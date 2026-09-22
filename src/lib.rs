@@ -434,4 +434,46 @@ mod tests {
         let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query().label("Example — Title · desc").assert_exists();
     }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn sticker_picker_toggles(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let flag = store.stickers_open.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query().role(Role::BUTTON).label("Stickers & GIFs").tap();
+        assert!(flag.get());
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn contacts_add_form_opens(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let inner = store.clone();
+        let flag = store.add_contact_open.clone();
+        let mut app = ui.mount(move || views::new_chat_view(inner.clone()).state(&store));
+        app.query().role(Role::BUTTON).label("Add contact").tap();
+        assert!(flag.get());
+        app.query().label("Phone").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn settings_storage_section(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
+        app.query().label("Storage").assert_exists();
+        app.query().label("Clear cached media").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn members_invite_row(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        store.selected.set(Some(1));
+        store.members_open.set(true);
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query().role(Role::BUTTON).label("New link").assert_exists();
+    }
 }

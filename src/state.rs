@@ -269,6 +269,31 @@ pub struct Store {
     /// Group-admin edit fields in the members panel.
     pub admin_title: Binding<Str>,
     pub admin_desc: Binding<Str>,
+    /// Sticker/GIF picker panel + items.
+    pub stickers_open: Binding<bool>,
+    pub sticker_items: Binding<Vec<StickerItem>>,
+    /// New-contact form on the contacts screen.
+    pub add_contact_open: Binding<bool>,
+    pub nc_phone: Binding<Str>,
+    pub nc_first: Binding<Str>,
+    pub nc_last: Binding<Str>,
+    /// Invite link created for the open group/channel.
+    pub invite_link: Binding<Str>,
+    /// Storage-statistics summary line in Settings.
+    pub storage_summary: Binding<Str>,
+}
+
+/// One cell in the sticker/GIF picker.
+#[derive(Clone, Identifiable)]
+pub struct StickerItem {
+    /// TDLib file id of the sticker/animation (key).
+    #[id]
+    pub file_id: i32,
+    /// Thumbnail file id (0 = none).
+    pub thumb: i32,
+    pub emoji: Str,
+    /// true = GIF animation, false = sticker.
+    pub gif: bool,
 }
 
 /// One row in the active-sessions list.
@@ -487,6 +512,14 @@ impl Store {
             profile_note: Binding::container(Str::from("")),
             admin_title: Binding::container(Str::from("")),
             admin_desc: Binding::container(Str::from("")),
+            stickers_open: Binding::bool(false),
+            sticker_items: Binding::<Vec<StickerItem>>::default(),
+            add_contact_open: Binding::bool(false),
+            nc_phone: Binding::container(Str::from("")),
+            nc_first: Binding::container(Str::from("")),
+            nc_last: Binding::container(Str::from("")),
+            invite_link: Binding::container(Str::from("")),
+            storage_summary: Binding::container(Str::from("")),
         }
     }
 
@@ -2350,6 +2383,208 @@ impl Store {
             {
                 store.nav.pop();
                 store.select_chat(chat.id);
+            }
+        })
+        .detach();
+    }
+
+    /// Toggle the sticker/GIF picker; loads recent stickers + saved GIFs
+    /// on first open.
+    pub fn toggle_stickers(&self) {
+        let open = !self.stickers_open.get();
+        self.stickers_open.set(open);
+        if open {
+            self.load_stickers();
+        }
+    }
+
+    /// Recent stickers plus saved GIFs, thumbnails kicked into the
+    /// shared file-download map.
+    pub fn load_stickers(&self) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let mut items: Vec<StickerItem> = Vec::new();
+            if let Ok(enums::Stickers::Stickers(r)) =
+                functions::get_recent_stickers(false, client).await
+            {
+                for st in r.stickers {
+                    let thumb = st.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0);
+                    if thumb != 0 {
+                        let _ =
+                            functions::download_file(thumb, 8, 0, 0, false, client).await;
+                    }
+                    items.push(StickerItem {
+                        file_id: st.sticker.id,
+                        thumb,
+                        emoji: st.emoji.into(),
+                        gif: false,
+                    });
+                }
+            }
+            if let Ok(enums::Animations::Animations(a)) =
+                functions::get_saved_animations(client).await
+            {
+                for an in a.animations {
+                    let thumb = an.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0);
+                    if thumb != 0 {
+                        let _ =
+                            functions::download_file(thumb, 8, 0, 0, false, client).await;
+                    }
+                    items.push(StickerItem {
+                        file_id: an.animation.id,
+                        thumb,
+                        emoji: "".into(),
+                        gif: true,
+                    });
+                }
+            }
+            store.sticker_items.set(items);
+        })
+        .detach();
+    }
+
+    /// Send a sticker or saved GIF into the open chat.
+    pub fn send_sticker(&self, item: StickerItem) {
+        let chat_id = self.open_chat.get();
+        let client = self.client_id;
+        if chat_id == 0 || client == 0 {
+            return;
+        }
+        self.stickers_open.set(false);
+        let content = if item.gif {
+            enums::InputMessageContent::InputMessageAnimation(
+                types::InputMessageAnimation {
+                    animation: enums::InputFile::Id(types::InputFileId { id: item.file_id }),
+                    thumbnail: None,
+                    added_sticker_file_ids: Vec::new(),
+                    duration: 0,
+                    width: 0,
+                    height: 0,
+                    caption: None,
+                    show_caption_above_media: false,
+                    has_spoiler: false,
+                },
+            )
+        } else {
+            enums::InputMessageContent::InputMessageSticker(types::InputMessageSticker {
+                sticker: enums::InputFile::Id(types::InputFileId { id: item.file_id }),
+                thumbnail: None,
+                width: 0,
+                height: 0,
+                emoji: item.emoji.to_string(),
+            })
+        };
+        spawn_local(async move {
+            let _ = functions::send_message(chat_id, None, None, None, content, client).await;
+        })
+        .detach();
+    }
+
+    /// Import the new-contact form fields as a contact, then refresh the
+    /// contacts list.
+    pub fn add_contact(&self) {
+        let phone = self.nc_phone.get().to_string();
+        let first = self.nc_first.get().to_string();
+        let last = self.nc_last.get().to_string();
+        let client = self.client_id;
+        if client == 0 || phone.trim().is_empty() || first.trim().is_empty() {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let contact = types::ImportedContact {
+                phone_number: phone,
+                first_name: first,
+                last_name: last,
+                note: types::FormattedText {
+                    text: String::new(),
+                    entities: Vec::new(),
+                },
+            };
+            if functions::import_contacts(vec![contact], client)
+                .await
+                .is_ok()
+            {
+                store.add_contact_open.set(false);
+                store.load_contacts();
+            }
+        })
+        .detach();
+    }
+
+    /// Remove a contact by user id, then refresh the list.
+    pub fn remove_contact(&self, user_id: i64) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if functions::remove_contacts(vec![user_id], client).await.is_ok() {
+                store.load_contacts();
+            }
+        })
+        .detach();
+    }
+
+    /// Create a fresh invite link for the open group/channel.
+    pub fn create_invite(&self) {
+        let chat_id = self.open_chat.get();
+        let client = self.client_id;
+        if chat_id == 0 || client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::ChatInviteLink::ChatInviteLink(l)) =
+                functions::create_chat_invite_link(chat_id, String::new(), 0, 0, false, client)
+                    .await
+            {
+                store.invite_link.set_from(l.invite_link);
+            }
+        })
+        .detach();
+    }
+
+    /// Storage statistics summary for Settings (size + file count).
+    pub fn load_storage(&self) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::StorageStatistics::StorageStatistics(st)) =
+                functions::get_storage_statistics(0, client).await
+            {
+                let mb = st.size as f64 / (1024.0 * 1024.0);
+                store
+                    .storage_summary
+                    .set_from(format!("{mb:.1} MB in {} files", st.count));
+            }
+        })
+        .detach();
+    }
+
+    /// Clear all cached media files, then refresh the summary.
+    pub fn clear_storage(&self) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if functions::optimize_storage(
+                0, -1, -1, 0, Vec::new(), Vec::new(), Vec::new(), true, 0, client,
+            )
+            .await
+            .is_ok()
+            {
+                store.load_storage();
             }
         })
         .detach();

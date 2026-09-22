@@ -66,8 +66,8 @@
 | 发送文件 | ✅ | `sendMessage(inputMessageDocument)`（默认兜底） | `attachment_content_dispatch` |
 | 语音消息（录制/发送/播放） | ❌ | `inputMessageVoiceNote` + `sendChatActionRecordingVoiceNote` | — |
 | 视频消息 | ❌ | `inputMessageVideoNote` | — |
-| 贴纸 | ❌ | `inputMessageSticker` + `getStickers` | — |
-| GIF | ❌ | `inputMessageAnimation` + `getSavedAnimations` | — |
+| 贴纸 | 🟡 | `getRecentStickers` → `sendMessage(inputMessageSticker)`（picker 面板+缩略图；无表情搜索/包浏览） | `sticker_picker_toggles` |
+| GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（同贴纸面板，缩略图） | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | 🟡 | `downloadFile` → `file_signal`（图片经 Photo 渲染；视频/文件为标签占位） | `media_slot` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ❌ | `sendMessageAlbum` | — |
@@ -82,14 +82,14 @@
 | 加入/退出 | ✅ | `joinChat`/`leaveChat` | — |
 | 成员列表 | ✅ | `searchChatMembers`（名字+角色面板） | `members_panel_lists_members` |
 | 基础管理（改标题/描述/头像、删成员） | 🟡 | `setChatTitle`/`setChatDescription`/`setChatMemberStatus(Banned)`/`setMessageSenderBlockList`（头像未做） | — |
-| 频道简介/邀请链接 | ❌ | `getChatInviteLink`/`createChatInviteLink` | — |
+| 频道简介/邀请链接 | ✅ | `createChatInviteLink` → 成员面板显示链接（New link 按钮） | `members_invite_row` |
 
 ## 6. 联系人与个人资料
 
 | 功能 | 状态 | TDLib API | 测试 |
 |---|---|---|---|
 | 联系人列表 | ✅ | `getContacts` + `getUser`（新建聊天页，点击开聊） | `contacts_list_renders` |
-| 添加/删除联系人 | ❌ | `addContact`/`removeContacts` | — |
+| 添加/删除联系人 | ✅ | `importContacts`（电话+姓名表单）/`removeContacts`（行右键菜单） | `contacts_add_form_opens` |
 | 查看对方资料 | 🟡 | `getUser`（仅名字显示） | — |
 | 编辑自己资料（名/简介/用户名/头像） | 🟡 | `setName`/`setBio`/`setUsername`（头像未做） | `settings_shows_sections` |
 
@@ -104,7 +104,7 @@
 | 两步验证管理 | 🟡 | `getPasswordState` 状态展示（SRP 设置未做） | `settings_shows_sections` |
 | 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`/`terminateAllOtherSessions` | `settings_shows_sections` |
 | 语言 | ❌ | `setOption(language_pack_id)` | — |
-| 存储/缓存清理 | ❌ | `getStorageStatistics`/`optimizeStorage` | — |
+| 存储/缓存清理 | ✅ | `getStorageStatistics` 摘要 + `optimizeStorage` 清理按钮 | `settings_storage_section` |
 
 ## 8. 明确不计划（本期范围外）
 
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：26 项 ｜ 部分 🟡：12 项 ｜ 未实现 ❌：29 项
+- 已实现 ✅：48 项 ｜ 部分 🟡：12 项 ｜ 未实现 ❌：7 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）

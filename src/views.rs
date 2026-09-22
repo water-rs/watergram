@@ -22,7 +22,7 @@ use waterui::widget::condition::when;
 use waterui_barcode::Barcode;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{ChatRow, MemberRow, MessageRow, Route, Screen, SessionRow, Store};
+use crate::state::{ChatRow, MemberRow, MessageRow, Route, Screen, SessionRow, StickerItem, Store};
 use mdi::account;
 use mdi::account_group;
 use mdi::alert_circle;
@@ -31,6 +31,10 @@ use mdi::bookmark;
 use mdi::bullhorn;
 use mdi::clock_outline;
 use mdi::close;
+use mdi::delete_sweep;
+use mdi::account_plus;
+use mdi::emoticon;
+use mdi::link_variant;
 use mdi::cog;
 use mdi::file;
 use mdi::image_outline;
@@ -487,6 +491,9 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let search_b = store.chat_search.clone();
     let search_debounced = store.chat_search.debounce(Duration::from_millis(400));
     let search_results_b = store.chat_search_results.clone();
+    let stickers_open = store.stickers_open.clone();
+    let sticker_items = store.sticker_items.clone();
+    let store_cells = store.clone();
     let inner = store.clone();
 
     vstack((
@@ -542,6 +549,17 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 ))
                 .spacing(6.0)
                 .padding_with((10.0, 0.0)),
+                hstack((
+                    link_variant().tint(MutedForeground).size(14.0, 14.0),
+                    text!("{invite_link}", invite_link = store.invite_link.clone())
+                        .caption()
+                        .line_limit(ONE)
+                        .muted(),
+                    spacer(),
+                    button("New link").action(|store: Store| store.create_invite()),
+                ))
+                .spacing(6.0)
+                .padding_with((10.0, 4.0)),
                 scroll(Lazy::vstack(ForEach::new(
                     SignalCollection::new(store.members.clone()),
                     move |row: MemberRow| {
@@ -623,9 +641,46 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .padding_with((12.0, 6.0))
             .background(Surface)
         }),
+        when(stickers_open, move || {
+            let cells = store_cells.clone();
+            scroll(Lazy::hstack(ForEach::new(
+                SignalCollection::new(sticker_items.clone()),
+                move |item: StickerItem| {
+                    let cell_store = cells.clone();
+                    let thumb = item.thumb;
+                    let fallback: Str = if item.gif {
+                        "GIF".into()
+                    } else {
+                        item.emoji.clone()
+                    };
+                    let it = item.clone();
+                    let cell = if thumb != 0 {
+                        let has = cell_store
+                            .file_signal(thumb)
+                            .map(|p: Str| !p.is_empty())
+                            .distinct();
+                        let url = cell_store.file_signal(thumb).map(Url::from_file_path_str);
+                        when(has, move || {
+                            Photo::new(url.clone()).max_width(72.0).max_height(72.0)
+                        })
+                        .otherwise(move || text(fallback.clone()).headline())
+                        .anyview()
+                    } else {
+                        text(fallback).headline().anyview()
+                    };
+                    cell.padding_with((6.0, 6.0))
+                        .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
+                        .on_tap(move |store: Store| store.send_sticker(it.clone()))
+                },
+            )))
+            .max_height(96.0)
+        }),
         hstack((
             FilePicker::open(label("Attach file").icon(paperclip()), &store.attach)
                 .label_style(LabelDisplayMode::IconOnly),
+            icon_button(emoticon(), "Stickers & GIFs", |store: Store| {
+                store.toggle_stickers()
+            }),
             field("Message", &composer_b)
                 .prompt("Message")
                 .hide_label(),
@@ -910,6 +965,26 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         ))
         .spacing(10.0)
         .leading(),
+        vstack((
+            text("Storage").caption().muted(),
+            hstack((
+                text!("{storage}", storage = store.storage_summary.clone())
+                    .caption()
+                    .muted(),
+                spacer(),
+                button("Refresh").action(|store: Store| store.load_storage()),
+            )),
+            hstack((
+                delete_sweep().tint(Error).size(14.0, 14.0),
+                text("Clear cached media")
+                    .caption()
+                    .foreground(Error)
+                    .on_tap(|store: Store| store.clear_storage()),
+                spacer(),
+            )),
+        ))
+        .spacing(8.0)
+        .leading(),
         text("Appearance").caption().muted(),
         toggle("Dark mode", &dark),
         text("Session").caption().muted(),
@@ -922,6 +997,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         async move {
             store.load_sessions();
             store.load_twofa();
+            store.load_storage();
         }
     });
     NavigationView::new("Settings", content)
@@ -930,6 +1006,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
 pub(crate) fn new_chat_view(store: Store) -> NavigationView {
     let kind = store.new_chat_kind.clone();
     let input = store.new_chat_input.clone();
+    let store_nc = store.clone();
     let items: Vec<PickerItem<i32>> = vec![
         text("Private chat").tag(0),
         text("Group").tag(1),
@@ -953,7 +1030,31 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
             spacer(),
             button("Create").action(|store: Store| store.create_chat()),
         )),
-        text("Contacts").caption().muted(),
+        hstack((
+            text("Contacts").caption().muted(),
+            spacer(),
+            icon_button(account_plus(), "Add contact", |store: Store| {
+                store.add_contact_open.toggle()
+            }),
+        )),
+        when(store.add_contact_open.clone(), move || {
+            vstack((
+                field("Phone", &store_nc.nc_phone)
+                    .prompt("+1234567890")
+                    .hide_label(),
+                hstack((
+                    field("First name", &store_nc.nc_first).hide_label(),
+                    field("Last name", &store_nc.nc_last).hide_label(),
+                ))
+                .spacing(8.0),
+                hstack((
+                    spacer(),
+                    button("Add contact").action(|store: Store| store.add_contact()),
+                )),
+            ))
+            .spacing(8.0)
+            .leading()
+        }),
         Lazy::vstack(ForEach::new(
             SignalCollection::new(store.contacts.clone()),
             move |row: MemberRow| {
@@ -965,6 +1066,9 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
                 .spacing(6.0)
                 .padding_with((0.0, 4.0))
                 .on_tap(move |store: Store| store.start_chat_with(row.key))
+                .context_menu(("Remove contact".action(move |store: Store| {
+                    store.remove_contact(row.key)
+                }),))
             },
         )),
     ))
