@@ -15,7 +15,7 @@
 | 新用户注册 | ✅ | `registerUser` | — |
 | QR 登录 | ✅ | `requestQrCodeAuthentication` + `authorizationStateWaitOtherDeviceConfirmation` | — |
 | 登出 | ✅ | `logOut` | — |
-| 多账号切换 | ❌ | 多 `client_id` | — |
+| 多账号切换 | ✅ | 每账号独立 TDLib client + `db_<id>`/`files_<id>` + `getAuthorizationState` 切换 + `getMe` 标签 + `accounts.json` 持久化（非活动账号更新被丢弃，切回重查） | `account_switcher_opens` |
 | 邮件验证（新注册要求的邮箱码） | 🚫 | `checkAuthenticationEmailCode`（UI 仅提示不支持） | — |
 
 ## 2. 聊天列表
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：55 项 ｜ 部分 🟡：10 项 ｜ 未实现 ❌：2 项
+- 已实现 ✅：56 项 ｜ 部分 🟡：10 项 ｜ 未实现 ❌：1 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
