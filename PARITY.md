@@ -81,7 +81,7 @@
 | 公开频道浏览/搜索加入 | ✅ | `searchChatsOnServer` + `joinChat`（行菜单） | — |
 | 加入/退出 | ✅ | `joinChat`/`leaveChat` | — |
 | 成员列表 | ✅ | `searchChatMembers`（名字+角色面板） | `members_panel_lists_members` |
-| 基础管理（改标题/描述/头像、删成员） | 🟡 | `setChatMemberStatus(Banned)` 踢人（标题/头像编辑未做） | — |
+| 基础管理（改标题/描述/头像、删成员） | 🟡 | `setChatTitle`/`setChatDescription`/`setChatMemberStatus(Banned)`/`setMessageSenderBlockList`（头像未做） | — |
 | 频道简介/邀请链接 | ❌ | `getChatInviteLink`/`createChatInviteLink` | — |
 
 ## 6. 联系人与个人资料
@@ -102,7 +102,7 @@
 | 通知设置（全局/按聊天） | 🟡 | `setChatNotificationSettings`（仅单聊切换） | — |
 | 隐私设置 | ❌ | `getUserPrivacySettingRules`/`setUserPrivacySettingRules` | — |
 | 两步验证管理 | 🟡 | `getPasswordState` 状态展示（SRP 设置未做） | `settings_shows_sections` |
-| 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`（无批量终止） | `settings_shows_sections` |
+| 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`/`terminateAllOtherSessions` | `settings_shows_sections` |
 | 语言 | ❌ | `setOption(language_pack_id)` | — |
 | 存储/缓存清理 | ❌ | `getStorageStatistics`/`optimizeStorage` | — |
 
