@@ -109,6 +109,8 @@ pub struct ChatRow {
     pub pinned: bool,
     pub muted: bool,
     pub marked_unread: bool,
+    /// Has a position in the Archive list.
+    pub in_archive: bool,
     pub photo_file: i32,
     pub time: Str,
     pub typing: bool,
@@ -239,6 +241,13 @@ pub struct Store {
     pub chat_search_results: Binding<Vec<MessageRow>>,
     /// file_id -> download progress 0-100 for in-flight downloads.
     pub file_progress: Rc<RefCell<HashMap<i32, i32>>>,
+    /// Sidebar is showing the Archive list instead of Main.
+    pub archive_mode: Binding<bool>,
+    /// Members panel for the open group/channel.
+    pub members_open: Binding<bool>,
+    pub members: Binding<Vec<MemberRow>>,
+    /// Total member count label for the panel header.
+    pub members_count: Binding<Str>,
 }
 
 fn fmt_time(ts: i32) -> Str {
@@ -252,13 +261,32 @@ fn fmt_time(ts: i32) -> Str {
         .into()
 }
 
-fn main_position(chat: &types::Chat) -> Option<&types::ChatPosition> {
-    chat.positions
-        .iter()
-        .find(|p| p.list == enums::ChatList::Main)
+fn position_in<'a>(chat: &'a types::Chat, list: &enums::ChatList) -> Option<&'a types::ChatPosition> {
+    chat.positions.iter().find(|p| &p.list == list)
+}
+
+/// One row in the members panel.
+#[derive(Clone, Identifiable)]
+pub struct MemberRow {
+    /// member_id key: user_id or chat_id.
+    #[id]
+    pub key: i64,
+    pub name: Str,
+    pub status: Str,
+    /// TDLib sender id for admin actions (kick).
+    pub sender: enums::MessageSender,
 }
 
 impl Store {
+    /// The chat list currently shown in the sidebar.
+    fn active_list(&self) -> enums::ChatList {
+        if self.archive_mode.get() {
+            enums::ChatList::Archive
+        } else {
+            enums::ChatList::Main
+        }
+    }
+
     pub fn new(client_id: i32) -> Self {
         Self {
             client_id,
@@ -312,6 +340,10 @@ impl Store {
             chat_search: Binding::container(Str::from("")),
             chat_search_results: Binding::<Vec<MessageRow>>::default(),
             file_progress: Rc::new(RefCell::new(HashMap::new())),
+            archive_mode: Binding::bool(false),
+            members_open: Binding::bool(false),
+            members: Binding::<Vec<MemberRow>>::default(),
+            members_count: Binding::container(Str::from("")),
         }
     }
 
@@ -653,7 +685,7 @@ impl Store {
     }
 
     fn upsert_chat(&self, chat: types::Chat) {
-        let pos = main_position(&chat).cloned();
+        let pos = position_in(&chat, &self.active_list()).cloned();
         self.chat_objs.borrow_mut().insert(chat.id, chat.clone());
         if let Some(photo) = &chat.photo {
             self.want_file(&photo.small);
@@ -709,6 +741,7 @@ impl Store {
             pinned,
             muted,
             marked_unread: chat.is_marked_as_unread,
+            in_archive: position_in(&chat, &enums::ChatList::Archive).is_some(),
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
             time,
             typing: false,
@@ -756,11 +789,8 @@ impl Store {
                 c.positions.push(p.clone());
             }
         }
-        if let Some(p) = positions
-            .iter()
-            .find(|p| p.list == enums::ChatList::Main)
-            .cloned()
-        {
+        let active = self.active_list();
+        if let Some(p) = positions.iter().find(|p| p.list == active).cloned() {
             let (order, pinned) = (p.order, p.is_pinned);
             if order == 0 {
                 let mut list = self.chats.get();
@@ -1389,10 +1419,23 @@ impl Store {
         self.chat_search_open.set(false);
         self.chat_search.set_from("");
         self.chat_search_results.set(Vec::new());
+        if prev != 0 {
+            let cur = self.composer.get();
+            if cur.is_empty() {
+                self.drafts.borrow_mut().remove(&prev);
+            } else {
+                self.drafts.borrow_mut().insert(prev, cur);
+            }
+        }
         if let Some(d) = self.drafts.borrow().get(&chat_id) {
             self.composer.set(d.clone());
         } else {
             self.composer.set_from("");
+        }
+        self.members_open.set(false);
+        if self.client_id == 0 {
+            // Unit-test store: no TDLib client to talk to.
+            return;
         }
         let client = self.client_id;
         let store = self.clone();
@@ -1655,6 +1698,7 @@ impl Store {
         if let Some(msg_id) = self.editing.get() {
             self.editing.set(None);
             self.composer.set_from("");
+            self.drafts.borrow_mut().remove(&chat_id);
             let client = self.client_id;
             spawn_local(async move {
                 let _ = functions::edit_message_text(
@@ -1686,6 +1730,7 @@ impl Store {
         });
         self.reply_to.set(None);
         self.composer.set_from("");
+        self.drafts.borrow_mut().remove(&chat_id);
         let client = self.client_id;
         spawn_local(async move {
             let _ = functions::send_message(
@@ -1956,6 +2001,138 @@ impl Store {
         .detach();
     }
 
+    /// Join a public group/channel the user found via search.
+    pub fn join(&self, chat_id: i64) {
+        let client = self.client_id;
+        spawn_local(async move {
+            let _ = functions::join_chat(chat_id, client).await;
+        })
+        .detach();
+    }
+
+    /// Switch the sidebar between the Main and Archive chat lists.
+    pub fn toggle_archive_view(&self) {
+        let next = !self.archive_mode.get();
+        self.archive_mode.set(next);
+        self.chats.set(Vec::new());
+        let chats: Vec<types::Chat> = self.chat_objs.borrow().values().cloned().collect();
+        for c in chats {
+            self.upsert_chat(c);
+        }
+    }
+
+    /// Move a chat between Main and Archive.
+    pub fn toggle_archive(&self, chat_id: i64) {
+        let archived = self
+            .chat_objs
+            .borrow()
+            .get(&chat_id)
+            .map(|c| {
+                c.positions
+                    .iter()
+                    .any(|p| p.list == enums::ChatList::Archive)
+            })
+            .unwrap_or(false);
+        let list = if archived {
+            enums::ChatList::Main
+        } else {
+            enums::ChatList::Archive
+        };
+        let client = self.client_id;
+        spawn_local(async move {
+            let _ = functions::add_chat_to_list(chat_id, list, client).await;
+        })
+        .detach();
+    }
+
+    /// Load the open group/channel's member list into `members`.
+    pub fn load_members(&self) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::ChatMembers::ChatMembers(m)) =
+                functions::search_chat_members(chat_id, String::new(), 50, None, client)
+                    .await
+            {
+                store
+                    .members_count
+                    .set_from(format!("{} members", m.total_count));
+                let mut rows = Vec::new();
+                for member in m.members {
+                    let (key, name, sender) = match &member.member_id {
+                        enums::MessageSender::User(u) => {
+                            let uid = u.user_id;
+                            let name = store
+                                .users
+                                .borrow()
+                                .get(&uid)
+                                .map(|u| {
+                                    format!("{} {}", u.first_name, u.last_name)
+                                        .trim()
+                                        .to_string()
+                                })
+                                .unwrap_or_else(|| format!("User {uid}"));
+                            (uid, name, member.member_id.clone())
+                        }
+                        enums::MessageSender::Chat(c) => {
+                            let title = store
+                                .chat_objs
+                                .borrow()
+                                .get(&c.chat_id)
+                                .map(|ch| ch.title.clone())
+                                .unwrap_or_else(|| format!("Chat {}", c.chat_id));
+                            (c.chat_id, title, member.member_id.clone())
+                        }
+                    };
+                    let status = match &member.status {
+                        enums::ChatMemberStatus::Creator(_) => "owner",
+                        enums::ChatMemberStatus::Administrator(_) => "admin",
+                        enums::ChatMemberStatus::Member(_) => "member",
+                        enums::ChatMemberStatus::Restricted(_) => "restricted",
+                        enums::ChatMemberStatus::Left => "left",
+                        enums::ChatMemberStatus::Banned(_) => "banned",
+                    };
+                    rows.push(MemberRow {
+                        key,
+                        name: name.into(),
+                        status: status.into(),
+                        sender,
+                    });
+                }
+                store.members.set(rows);
+            }
+        })
+        .detach();
+    }
+
+    /// Ban a member (basic admin op) then refresh the list.
+    pub fn kick_member(&self, member: &MemberRow) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        let sender = member.sender.clone();
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            let _ = functions::set_chat_member_status(
+                chat_id,
+                sender,
+                enums::ChatMemberStatus::Banned(types::ChatMemberStatusBanned {
+                    banned_until_date: 0,
+                }),
+                client,
+            )
+            .await;
+            store.load_members();
+        })
+        .detach();
+    }
+
     pub fn run_search(&self, query: Str) {
         if query.is_empty() {
             self.server_results.set(Vec::new());
@@ -2000,6 +2177,7 @@ impl Store {
             pinned: false,
             muted: false,
             marked_unread: false,
+            in_archive: position_in(&chat, &enums::ChatList::Archive).is_some(),
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
             time: "".into(),
             typing: false,

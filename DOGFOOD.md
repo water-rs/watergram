@@ -156,3 +156,12 @@ Findings collected while building a real Telegram client (Watergram) on
   (llvmpipe compute actually works — the Material 3 auth screens draw
   correctly, just slowly). Worth documenting as the standard way to run
   hydrolysis in CI/headless instead of "diagnostics only".
+- **Parallel `#[waterui::test]` mounts corrupt the heap** (waterui-testing
+  0.5.1 + hydrolysis-m3 0.3.1, wgpu software adapter): with 20 UI-mounting
+  tests, `cargo test --lib` (default parallelism) aborts with
+  `malloc_consolidate(): unaligned fastbin chunk detected` / `double free or
+  corruption` at a rate of roughly 2-in-3 runs; `--test-threads=1` is stable
+  across repeated runs. Repro: `cargo test --lib` in watergram (any set of
+  `ui.mount` tests run in parallel). Looks like shared renderer/theme state
+  is not thread-safe under concurrent mounts. Workaround used in this repo's
+  CI: `RUST_TEST_THREADS=1`.

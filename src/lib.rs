@@ -82,6 +82,7 @@ mod tests {
             online: false,
             kind_icon: "".into(),
             marked_unread: false,
+            in_archive: false,
         }
     }
 
@@ -284,6 +285,49 @@ mod tests {
         store.messages.set(vec![m]);
         let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
         app.query().label("👍 3").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn archive_toggle_rebuilds_list(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Alice", "hello", 100)]);
+        let mode = store.archive_mode.clone();
+        let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        app.query().role(Role::BUTTON).label("Archive").tap();
+        assert!(mode.get());
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn members_panel_lists_members(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        store.members_open.set(true);
+        store.members_count.set("2 members".into());
+        store.members.set(vec![crate::state::MemberRow {
+            key: 9,
+            name: "Alice".into(),
+            status: "owner".into(),
+            sender: tdlib_rs::enums::MessageSender::User(tdlib_rs::types::MessageSenderUser {
+                user_id: 9,
+            }),
+        }]);
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query().label("2 members").assert_exists();
+        app.query().label("Alice").assert_exists();
+        app.query().label("owner").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn drafts_saved_per_chat(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let inner = store.clone();
+        let _app = ui.mount(move || views::chat_detail(inner.clone(), 7).state(&inner));
+        store.composer.set("half typed".into());
+        store.select_chat(8);
+        assert!(store.drafts.borrow().get(&7).is_some());
+        store.select_chat(7);
+        assert_eq!(store.composer.get().to_string(), "half typed");
     }
 
     #[test]

@@ -22,10 +22,11 @@ use waterui::widget::condition::when;
 use waterui_barcode::Barcode;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{ChatRow, MessageRow, Route, Screen, Store};
+use crate::state::{ChatRow, MemberRow, MessageRow, Route, Screen, Store};
 use mdi::account;
 use mdi::account_group;
 use mdi::alert_circle;
+use mdi::archive;
 use mdi::bookmark;
 use mdi::bullhorn;
 use mdi::clock_outline;
@@ -259,6 +260,9 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 .label_style(LabelDisplayMode::IconOnly)
                 .plain()
                 .action(|nav: Navigator<Route>| nav.push(Route::NewChat)),
+            icon_button(archive(), "Archive", |store: Store| {
+                store.toggle_archive_view()
+            }),
             spacer(),
             text!("{conn}").caption().muted(),
             spacer(),
@@ -424,7 +428,14 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         }
         .action(move |store: Store| store.toggle_mark_unread(id)),
         if row.pinned { "Unpin" } else { "Pin" }.action(move |store: Store| store.toggle_pin(id)),
+        if row.in_archive {
+            "Unarchive"
+        } else {
+            "Archive"
+        }
+        .action(move |store: Store| store.toggle_archive(id)),
         if row.muted { "Unmute" } else { "Mute" }.action(move |store: Store| store.toggle_mute(id)),
+        "Join chat".action(move |store: Store| store.join(id)),
         "Leave chat".action(move |store: Store| store.leave(id)),
     ))
     .on_tap(move |store: Store| store.select_chat(id))
@@ -507,6 +518,37 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .padding_with((12.0, 8.0)),
         )
         .scroll_controller(&scroller),
+        when(store.members_open.clone(), move || {
+            vstack((
+                hstack((
+                    text!("{members_count}", members_count = store.members_count.clone())
+                        .caption()
+                        .muted(),
+                    spacer(),
+                    icon_button(close(), "Close members", |store: Store| {
+                        store.members_open.set(false)
+                    }),
+                ))
+                .padding_with((10.0, 6.0)),
+                scroll(Lazy::vstack(ForEach::new(
+                    SignalCollection::new(store.members.clone()),
+                    move |row: MemberRow| {
+                        hstack((
+                            text(row.name.clone()).caption(),
+                            spacer(),
+                            text(row.status.clone()).caption().muted(),
+                        ))
+                        .spacing(6.0)
+                        .padding_with((10.0, 4.0))
+                        .context_menu(("Kick".action(move |store: Store| {
+                            store.kick_member(&row)
+                        }),))
+                    },
+                )))
+                .max_height(200.0),
+            ))
+            .background(Surface)
+        }),
         when(search_open, move || {
             vstack((
                 hstack((
@@ -571,6 +613,13 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 .hide_label(),
             icon_button(magnify(), "Search in chat", move |store: Store| {
                 store.chat_search_open.set(!search_open2.get())
+            }),
+            icon_button(account_group(), "Members", move |store: Store| {
+                let open = !store.members_open.get();
+                store.members_open.set(open);
+                if open {
+                    store.load_members();
+                }
             }),
             icon_button(send(), "Send", |store: Store| store.send()),
         ))
