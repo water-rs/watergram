@@ -39,6 +39,8 @@ default-features = false
 features = [
     "assets",
     "flow-markdown",
+    "video",
+    "video-gpu",
 ]
 
 [dependencies]

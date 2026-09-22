@@ -64,11 +64,11 @@
 | 发送图片 | ✅ | `sendMessage(inputMessagePhoto)`（FilePicker，气泡内 Photo 渲染） | `attachment_content_dispatch` |
 | 发送视频 | ✅ | `sendMessage(inputMessageVideo)`（按扩展名分发） | `attachment_content_dispatch` |
 | 发送文件 | ✅ | `sendMessage(inputMessageDocument)`（默认兜底） | `attachment_content_dispatch` |
-| 语音消息（录制/发送/播放） | ❌ | `inputMessageVoiceNote` + `sendChatActionRecordingVoiceNote` | — |
-| 视频消息 | ❌ | `inputMessageVideoNote` | — |
+| 语音消息（录制/发送/播放） | 🟡 | 播放：`downloadFile` → `video_player`（waterui-video + video-gpu）；录制/发送缺采集组件 | `media_play_fallback_row` |
+| 视频消息 | 🟡 | 播放：`downloadFile` → `video_player`；圆形视频消息录制缺采集组件 | `media_play_fallback_row` |
 | 贴纸 | 🟡 | `getRecentStickers` → `sendMessage(inputMessageSticker)`（picker 面板+缩略图；无表情搜索/包浏览） | `sticker_picker_toggles` |
 | GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（同贴纸面板，缩略图） | `sticker_picker_toggles` |
-| 图片/视频气泡内预览 | 🟡 | `downloadFile` → `file_signal`（图片经 Photo 渲染；视频/文件为标签占位） | `media_slot` |
+| 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
 
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：52 项 ｜ 部分 🟡：11 项 ｜ 未实现 ❌：4 项
+- 已实现 ✅：53 项 ｜ 部分 🟡：12 项 ｜ 未实现 ❌：2 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）

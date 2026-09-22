@@ -96,6 +96,7 @@ mod tests {
             can_edit: outgoing,
             reply_excerpt: "".into(),
             media_file: 0,
+            play_file: 0,
             media_label: "".into(),
             reactions: "".into(),
             failed: false,
@@ -548,5 +549,18 @@ mod tests {
         app.query().label("@alice").assert_exists();
         app.query().label("hello world").assert_exists();
         app.query().label("online").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn media_play_fallback_row(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut row = msg(7, "Voice message (3s)", false);
+        row.media_label = "Voice".into();
+        row.play_file = 99;
+        let mut app = ui.mount(move || {
+            views::message_bubble(store.clone(), row.clone()).state(&store)
+        });
+        // File 99 is not downloaded -> labelled progress fallback, no crash.
+        app.query().label("Voice").assert_exists();
     }
 }

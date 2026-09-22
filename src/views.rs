@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use waterui::component::lazy::Lazy;
 use waterui::media::Photo;
+use waterui::video::video_player;
 use waterui::navigation::{ColumnWidth, NavigationSplitView, NavigationView, Navigator};
 use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
@@ -904,8 +905,68 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
 }
 
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
+#[allow(signal_get_in_view)] // the `has` gate rebuilds the view when the
+// file lands; get() then reads the resolved path at rebuild time
 pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
-    if row.media_file != 0 {
+    if row.play_file != 0 {
+        // Playable payload (video / voice / audio / animation). Shows the
+        // inline player once the file is downloaded; before that, a
+        // labelled progress row (thumbnails still render via the photo
+        // branch below for kinds that carry one).
+        let pfid = row.play_file;
+        let tfid = row.media_file;
+        let path_a = store.file_signal(pfid);
+        let path_b = store.file_signal(pfid);
+        let has = path_a.map(|p: Str| !p.is_empty()).distinct();
+        let url = path_b.map(Url::from_file_path_str);
+        let audio_only = matches!(row.media_label.as_str(), "Voice" | "Audio");
+        let label_text = row.media_label.clone();
+        let pct = store.file_progress_signal(pfid);
+        let thumb = store.file_signal(tfid);
+        vstack((
+            when(has, move || {
+                if audio_only {
+                    video_player(url.get())
+                        .max_height(56.0)
+                        .max_width(320.0)
+                        .anyview()
+                } else {
+                    video_player(url.get())
+                        .max_height(240.0)
+                        .max_width(320.0)
+                        .clip(RoundedRectangle::new(0.12))
+                        .anyview()
+                }
+            })
+            .otherwise(move || {
+                hstack((
+                    if tfid != 0 {
+                        Photo::new(thumb.map(Url::from_file_path_str))
+                            .max_width(96.0)
+                            .max_height(96.0)
+                            .clip(RoundedRectangle::new(0.12))
+                            .anyview()
+                    } else {
+                        image_outline()
+                            .tint(MutedForeground)
+                            .size(14.0, 14.0)
+                            .anyview()
+                    },
+                    text!("{label_text}{suffix}", suffix = pct.map(|p: i32| {
+                        if p > 0 && p < 100 {
+                            Str::from(format!(" — {p}%"))
+                        } else {
+                            Str::from("")
+                        }
+                    }))
+                    .caption()
+                    .muted(),
+                ))
+                .padding_with((8.0, 4.0))
+            }),
+        ))
+        .anyview()
+    } else if row.media_file != 0 {
         let fid = row.media_file;
         let path_a = store.file_signal(fid);
         let path_b = store.file_signal(fid);

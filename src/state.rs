@@ -150,6 +150,9 @@ pub struct MessageRow {
     pub can_edit: bool,
     pub reply_excerpt: Str,
     pub media_file: i32,
+    /// Playable media file id (video/voice/audio/animation payload, as
+    /// opposed to `media_file` which may hold a thumbnail).
+    pub play_file: i32,
     pub media_label: Str,
     pub reactions: Str,
     /// Emoji the current user has chosen on this message, if any.
@@ -744,11 +747,11 @@ impl Store {
     }
 
 #[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
-    fn content_preview(content: &enums::MessageContent) -> (Str, i32, Str) {
-        // (text/caption, media file id, media label)
+    fn content_preview(content: &enums::MessageContent) -> (Str, i32, Str, i32) {
+        // (text/caption, thumbnail/preview file id, media label, playable file id)
         match content {
             enums::MessageContent::MessageText(t) => {
-                (t.text.text.clone().into(), 0, Str::from(""))
+                (t.text.text.clone().into(), 0, Str::from(""), 0)
             }
             enums::MessageContent::MessagePhoto(p) => {
                 let file = p
@@ -766,6 +769,7 @@ impl Store {
                     },
                     file,
                     "Photo".into(),
+                    0,
                 )
             }
             enums::MessageContent::MessageVideo(v) => (
@@ -784,6 +788,7 @@ impl Store {
                     .map(|t| t.file.id)
                     .unwrap_or_default(),
                 "Video".into(),
+                v.video.video.id,
             ),
             enums::MessageContent::MessageDocument(d) => (
                 format!("Document: {}", d.document.file_name).into(),
@@ -793,35 +798,62 @@ impl Store {
                     .map(|t| t.file.id)
                     .unwrap_or_default(),
                 "Document".into(),
+                0,
             ),
             enums::MessageContent::MessageAudio(a) => (
                 format!("Audio: {}", a.audio.title).into(),
                 0,
                 "Audio".into(),
+                a.audio.audio.id,
             ),
-            enums::MessageContent::MessageVoiceNote(_) => {
-                ("Voice message".into(), 0, "Voice".into())
+            enums::MessageContent::MessageVoiceNote(v) => {
+                (
+                    format!("Voice message ({}s)", v.voice_note.duration).into(),
+                    0,
+                    "Voice".into(),
+                    v.voice_note.voice.id,
+                )
             }
-            enums::MessageContent::MessageVideoNote(_) => {
-                ("Video note".into(), 0, "Video note".into())
+            enums::MessageContent::MessageVideoNote(v) => {
+                (
+                    format!("Video note ({}s)", v.video_note.duration).into(),
+                    v.video_note
+                        .thumbnail
+                        .as_ref()
+                        .map(|t| t.file.id)
+                        .unwrap_or_default(),
+                    "Video note".into(),
+                    v.video_note.video.id,
+                )
             }
             enums::MessageContent::MessageSticker(s) => (
                 format!("{} Sticker", s.sticker.emoji).into(),
                 0,
                 "Sticker".into(),
+                0,
             ),
-            enums::MessageContent::MessageAnimation(_) => ("GIF".into(), 0, "GIF".into()),
+            enums::MessageContent::MessageAnimation(a) => (
+                "GIF".into(),
+                a.animation
+                    .thumbnail
+                    .as_ref()
+                    .map(|t| t.file.id)
+                    .unwrap_or_default(),
+                "GIF".into(),
+                a.animation.animation.id,
+            ),
             enums::MessageContent::MessageLocation(_) => {
-                ("Location".into(), 0, "Location".into())
+                ("Location".into(), 0, "Location".into(), 0)
             }
             enums::MessageContent::MessageContact(c) => (
                 format!("Contact: {} {}", c.contact.first_name, c.contact.last_name)
                     .into(),
                 0,
                 "Contact".into(),
+                0,
             ),
             enums::MessageContent::MessagePoll(p) => {
-                (format!("Poll: {}", p.poll.question.text).into(), 0, "Poll".into())
+                (format!("Poll: {}", p.poll.question.text).into(), 0, "Poll".into(), 0)
             }
             enums::MessageContent::MessageCall(c) => (
                 format!(
@@ -831,18 +863,19 @@ impl Store {
                 .into(),
                 0,
                 "Call".into(),
+                0,
             ),
             enums::MessageContent::MessageChatAddMembers(_) => {
-                ("New members joined".into(), 0, Str::from(""))
+                ("New members joined".into(), 0, Str::from(""), 0)
             }
             enums::MessageContent::MessageChatJoinByLink
             | enums::MessageContent::MessageChatJoinByRequest => {
-                ("Joined the chat".into(), 0, Str::from(""))
+                ("Joined the chat".into(), 0, Str::from(""), 0)
             }
             enums::MessageContent::MessagePinMessage(_) => {
-                ("Pinned a message".into(), 0, Str::from(""))
+                ("Pinned a message".into(), 0, Str::from(""), 0)
             }
-            _ => ("Unsupported message".into(), 0, Str::from("")),
+            _ => ("Unsupported message".into(), 0, Str::from(""), 0),
         }
     }
 
@@ -878,19 +911,22 @@ impl Store {
     /// may borrow the caches and kick off file downloads.
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
     pub fn message_row(&self, m: &types::Message) -> MessageRow {
-        let (mut text, media_file, media_label) = Self::content_preview(&m.content);
+        let (mut text, media_file, media_label, play_file) = Self::content_preview(&m.content);
         if let enums::MessageContent::MessageText(t) = &m.content {
             text = t.text.text.clone().into();
         }
         if media_file != 0 {
             self.want_file_id(media_file);
         }
+        if play_file != 0 {
+            self.want_file_id(play_file);
+        }
         let reply_excerpt = match &m.reply_to {
             Some(enums::MessageReplyTo::Message(r)) => r
                 .content
                 .as_ref()
                 .map(|c| {
-                    let (t, _, l) = Self::content_preview(c);
+                    let (t, _, l, _) = Self::content_preview(c);
                     if t.is_empty() {
                         l
                     } else {
@@ -945,6 +981,7 @@ impl Store {
             can_edit: m.is_outgoing,
             reply_excerpt,
             media_file,
+            play_file,
             media_label,
             reactions,
             my_reaction,
@@ -955,7 +992,7 @@ impl Store {
 
 #[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
     fn preview_text(&self, m: &types::Message) -> Str {
-        let (t, _, label) = Self::content_preview(&m.content);
+        let (t, _, label, _) = Self::content_preview(&m.content);
         if matches!(m.content, enums::MessageContent::MessageText(_)) {
             t
         } else if t.is_empty() {
@@ -1329,10 +1366,11 @@ impl Store {
             }
             enums::Update::MessageContent(u) => {
                 if u.chat_id == self.open_chat.get() {
-                    let (text, media, label) = Self::content_preview(&u.new_content);
+                    let (text, media, label, play) = Self::content_preview(&u.new_content);
                     self.update_message_row(u.message_id, |r| {
                         r.text = text.clone();
                         r.media_file = media;
+                        r.play_file = play;
                         r.media_label = label.clone();
                     });
                 }
@@ -1748,7 +1786,7 @@ impl Store {
     async fn refresh_pinned(&self, chat_id: i64) {
         match functions::get_chat_pinned_message(chat_id, self.client_id).await {
             Ok(enums::Message::Message(m)) => {
-                let (t, _, label) = Self::content_preview(&m.content);
+                let (t, _, label, _) = Self::content_preview(&m.content);
                 self.pinned_id.set(m.id);
                 self.pinned_label
                     .set(if t.is_empty() { label } else { t });
