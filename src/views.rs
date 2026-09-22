@@ -530,9 +530,22 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     }),
                 ))
                 .padding_with((10.0, 6.0)),
+                hstack((
+                    field("Group title", &store.admin_title).hide_label(),
+                    button("Rename").action(|store: Store| store.rename_chat()),
+                ))
+                .spacing(6.0)
+                .padding_with((10.0, 0.0)),
+                hstack((
+                    field("Group description", &store.admin_desc).hide_label(),
+                    button("Set").action(|store: Store| store.set_chat_desc()),
+                ))
+                .spacing(6.0)
+                .padding_with((10.0, 0.0)),
                 scroll(Lazy::vstack(ForEach::new(
                     SignalCollection::new(store.members.clone()),
                     move |row: MemberRow| {
+                        let r_kick = row.clone();
                         hstack((
                             text(row.name.clone()).caption(),
                             spacer(),
@@ -540,9 +553,14 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         ))
                         .spacing(6.0)
                         .padding_with((10.0, 4.0))
-                        .context_menu(("Kick".action(move |store: Store| {
-                            store.kick_member(&row)
-                        }),))
+                        .context_menu((
+                            "Kick".action(move |store: Store| {
+                                store.kick_member(&r_kick)
+                            }),
+                            "Block".action(move |store: Store| {
+                                store.toggle_block(&row, true)
+                            }),
+                        ))
                     },
                 )))
                 .max_height(200.0),
@@ -845,7 +863,14 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 spacer(),
                 text!("{twofa}", twofa = store.twofa.clone()).muted(),
             )),
-            text("Active sessions").caption().muted(),
+            hstack((
+                text("Active sessions").caption().muted(),
+                spacer(),
+                text("Terminate other sessions")
+                    .caption()
+                    .foreground(Error)
+                    .on_tap(|store: Store| store.terminate_all_sessions()),
+            )),
             Lazy::vstack(ForEach::new(
                 SignalCollection::new(store.sessions.clone()),
                 move |row: SessionRow| {

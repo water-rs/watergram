@@ -260,6 +260,9 @@ pub struct Store {
     pub edit_bio: Binding<Str>,
     pub edit_username: Binding<Str>,
     pub profile_note: Binding<Str>,
+    /// Group-admin edit fields in the members panel.
+    pub admin_title: Binding<Str>,
+    pub admin_desc: Binding<Str>,
 }
 
 /// One row in the active-sessions list.
@@ -374,6 +377,8 @@ impl Store {
             edit_bio: Binding::container(Str::from("")),
             edit_username: Binding::container(Str::from("")),
             profile_note: Binding::container(Str::from("")),
+            admin_title: Binding::container(Str::from("")),
+            admin_desc: Binding::container(Str::from("")),
         }
     }
 
@@ -2288,6 +2293,64 @@ impl Store {
                 store.me.set(me);
             }
             store.profile_note.set_from(note);
+        })
+        .detach();
+    }
+
+    /// Rename the open group/channel (admin).
+    pub fn rename_chat(&self) {
+        let chat_id = self.open_chat.get();
+        let title = self.admin_title.get().to_string();
+        if chat_id == 0 || title.is_empty() {
+            return;
+        }
+        let client = self.client_id;
+        spawn_local(async move {
+            let _ = functions::set_chat_title(chat_id, title, client).await;
+        })
+        .detach();
+    }
+
+    /// Set the open group/channel's description (admin).
+    pub fn set_chat_desc(&self) {
+        let chat_id = self.open_chat.get();
+        let desc = self.admin_desc.get().to_string();
+        if chat_id == 0 {
+            return;
+        }
+        let client = self.client_id;
+        spawn_local(async move {
+            let _ = functions::set_chat_description(chat_id, desc, client).await;
+        })
+        .detach();
+    }
+
+    /// Block/unblock a member (main block list).
+    pub fn toggle_block(&self, member: &MemberRow, block: bool) {
+        let sender = member.sender.clone();
+        let client = self.client_id;
+        spawn_local(async move {
+            let _ = functions::set_message_sender_block_list(
+                sender,
+                if block {
+                    Some(enums::BlockList::Main)
+                } else {
+                    None
+                },
+                client,
+            )
+            .await;
+        })
+        .detach();
+    }
+
+    /// Log out every session except the current one.
+    pub fn terminate_all_sessions(&self) {
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            let _ = functions::terminate_all_other_sessions(client).await;
+            store.load_sessions();
         })
         .detach();
     }
