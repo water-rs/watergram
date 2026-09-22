@@ -76,10 +76,10 @@ impl Config {
             c.api_hash = hash;
             cfg = Some(c);
         }
-        if let Ok(v) = std::env::var("WATERGRAM_TEST_DC") {
-            if let Some(c) = cfg.as_mut() {
-                c.test_dc = matches!(v.as_str(), "1" | "true" | "yes");
-            }
+        if let Ok(v) = std::env::var("WATERGRAM_TEST_DC")
+            && let Some(c) = cfg.as_mut()
+        {
+            c.test_dc = matches!(v.as_str(), "1" | "true" | "yes");
         }
         cfg.filter(|c| c.api_id != 0 && !c.api_hash.is_empty())
     }
@@ -108,6 +108,7 @@ pub struct ChatRow {
     pub unread: i32,
     pub pinned: bool,
     pub muted: bool,
+    pub marked_unread: bool,
     pub photo_file: i32,
     pub time: Str,
     pub typing: bool,
@@ -140,11 +141,15 @@ pub struct MessageRow {
     pub text: Str,
     pub time: Str,
     pub outgoing: bool,
+    /// Outgoing message the peer has read (double check).
+    pub read_out: bool,
     pub can_edit: bool,
     pub reply_excerpt: Str,
     pub media_file: i32,
     pub media_label: Str,
     pub reactions: Str,
+    /// Emoji the current user has chosen on this message, if any.
+    pub my_reaction: Str,
     pub failed: bool,
     pub pending: bool,
 }
@@ -225,6 +230,15 @@ pub struct Store {
     /// Human-readable excerpt of the message being replied to.
     pub reply_label: Binding<Str>,
     pub last_typing_sent: Rc<Cell<Instant>>,
+    /// Excerpt of the chat's pinned message (empty = none).
+    pub pinned_label: Binding<Str>,
+    pub pinned_id: Rc<Cell<i64>>,
+    /// In-chat message search state.
+    pub chat_search_open: Binding<bool>,
+    pub chat_search: Binding<Str>,
+    pub chat_search_results: Binding<Vec<MessageRow>>,
+    /// file_id -> download progress 0-100 for in-flight downloads.
+    pub file_progress: Rc<RefCell<HashMap<i32, i32>>>,
 }
 
 fn fmt_time(ts: i32) -> Str {
@@ -292,6 +306,12 @@ impl Store {
             no_more_history: Binding::bool(false),
             reply_label: Binding::container(Str::from("")),
             last_typing_sent: Rc::new(Cell::new(Instant::now())),
+            pinned_label: Binding::container(Str::from("")),
+            pinned_id: Rc::new(Cell::new(0)),
+            chat_search_open: Binding::bool(false),
+            chat_search: Binding::container(Str::from("")),
+            chat_search_results: Binding::<Vec<MessageRow>>::default(),
+            file_progress: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -307,7 +327,7 @@ impl Store {
     /// Register a downloaded-file path and bump the version counter so
     /// `file_signal` derived views re-read the map.
     fn register_file(&self, file: &types::File) {
-        let changed = {
+        let mut changed = {
             let mut files = self.files.borrow_mut();
             let entry = files.entry(file.id).or_default();
             let new_path = if file.local.is_downloading_completed {
@@ -322,6 +342,22 @@ impl Store {
                 false
             }
         };
+        let pct = if file.local.is_downloading_completed {
+            100
+        } else if file.expected_size > 0 {
+            ((file.local.downloaded_size * 100) / file.expected_size)
+                .clamp(0, 99) as i32
+        } else {
+            0
+        };
+        {
+            let mut progress = self.file_progress.borrow_mut();
+            let entry = progress.entry(file.id).or_insert(0);
+            if *entry != pct {
+                *entry = pct;
+                changed = true;
+            }
+        }
         if changed {
             self.files_version.add_assign(1);
         }
@@ -384,6 +420,14 @@ impl Store {
                     .unwrap_or_default()
                     .into()
             })
+            .computed()
+    }
+
+    /// Signal of `file_id -> download progress percent` (0-100).
+    pub fn file_progress_signal(&self, file_id: i32) -> Computed<i32> {
+        let progress = self.file_progress.clone();
+        self.files_version
+            .map(move |_| progress.borrow().get(&file_id).copied().unwrap_or(0))
             .computed()
     }
 
@@ -510,25 +554,32 @@ impl Store {
         }
     }
 
-    fn reactions_text(m: &types::Message) -> Str {
-        m.interaction_info
+    /// (display string, emoji chosen by the current user)
+    fn reactions_info(m: &types::Message) -> (Str, Str) {
+        let Some(reactions) = m
+            .interaction_info
             .as_ref()
             .and_then(|i| i.reactions.as_ref())
-            .map(|r| {
-                r.reactions
-                    .iter()
-                    .map(|mr| {
-                        let emoji = match &mr.r#type {
-                            enums::ReactionType::Emoji(e) => e.emoji.clone(),
-                            _ => "★".to_string(),
-                        };
-                        format!("{emoji} {}", mr.total_count)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("  ")
+        else {
+            return (Str::from(""), Str::from(""));
+        };
+        let mut mine = String::new();
+        let display = reactions
+            .reactions
+            .iter()
+            .map(|mr| {
+                let emoji = match &mr.r#type {
+                    enums::ReactionType::Emoji(e) => e.emoji.clone(),
+                    _ => "★".to_string(),
+                };
+                if mr.is_chosen {
+                    mine = emoji.clone();
+                }
+                format!("{emoji} {}", mr.total_count)
             })
-            .unwrap_or_default()
-            .into()
+            .collect::<Vec<_>>()
+            .join("  ");
+        (display.into(), mine.into())
     }
 
     /// Build a `MessageRow` from a TDLib message. Runs on the UI thread, so it
@@ -563,17 +614,27 @@ impl Store {
             Some(enums::MessageSendingState::Failed(_)) => (false, true),
             _ => (false, false),
         };
+        let read_out = m.is_outgoing
+            && self
+                .chat_objs
+                .borrow()
+                .get(&m.chat_id)
+                .map(|c| m.id <= c.last_read_outbox_message_id)
+                .unwrap_or(false);
+        let (reactions, my_reaction) = Self::reactions_info(m);
         MessageRow {
             id: m.id,
             sender: self.sender_name(&m.sender_id),
             text,
             time: fmt_time(m.date),
             outgoing: m.is_outgoing,
+            read_out,
             can_edit: m.is_outgoing,
             reply_excerpt,
             media_file,
             media_label,
-            reactions: Self::reactions_text(m),
+            reactions,
+            my_reaction,
             failed,
             pending,
         }
@@ -647,6 +708,7 @@ impl Store {
             unread: chat.unread_count,
             pinned,
             muted,
+            marked_unread: chat.is_marked_as_unread,
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
             time,
             typing: false,
@@ -785,14 +847,58 @@ impl Store {
                 self.update_chat_row(u.chat_id, |r| r.unread = u.unread_count);
             }
             enums::Update::ChatReadOutbox(u) => {
+                if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
+                    c.last_read_outbox_message_id = u.last_read_outbox_message_id;
+                }
                 if u.chat_id == self.open_chat.get() {
                     let mut list = self.messages.get();
                     for r in list.iter_mut() {
                         if r.outgoing && r.id <= u.last_read_outbox_message_id {
                             r.pending = false;
+                            r.read_out = true;
                         }
                     }
                     self.messages.set(list);
+                }
+            }
+            enums::Update::ChatIsMarkedAsUnread(u) => {
+                if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
+                    c.is_marked_as_unread = u.is_marked_as_unread;
+                }
+                self.update_chat_row(u.chat_id, |r| {
+                    r.marked_unread = u.is_marked_as_unread
+                });
+            }
+            enums::Update::MessageInteractionInfo(u) => {
+                if u.chat_id == self.open_chat.get() {
+                    let (display, mine) = u
+                        .interaction_info
+                        .as_ref()
+                        .and_then(|i| i.reactions.as_ref())
+                        .map(|reactions| {
+                            let mut mine = String::new();
+                            let display = reactions
+                                .reactions
+                                .iter()
+                                .map(|mr| {
+                                    let emoji = match &mr.r#type {
+                                        enums::ReactionType::Emoji(e) => e.emoji.clone(),
+                                        _ => "★".to_string(),
+                                    };
+                                    if mr.is_chosen {
+                                        mine = emoji.clone();
+                                    }
+                                    format!("{emoji} {}", mr.total_count)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("  ");
+                            (display, mine)
+                        })
+                        .unwrap_or_default();
+                    self.update_message_row(u.message_id, |r| {
+                        r.reactions = display.clone().into();
+                        r.my_reaction = mine.clone().into();
+                    });
                 }
             }
             enums::Update::ChatNotificationSettings(u) => {
@@ -951,10 +1057,10 @@ impl Store {
                 self.register_file(&f.file);
             }
             enums::Update::Option(o) => {
-                if o.name == "my_id" {
-                    if let enums::OptionValue::Integer(v) = o.value {
-                        self.my_id.set(v.value);
-                    }
+                if o.name == "my_id"
+                    && let enums::OptionValue::Integer(v) = o.value
+                {
+                    self.my_id.set(v.value);
                 }
             }
             enums::Update::ConnectionState(s) => {
@@ -1278,6 +1384,11 @@ impl Store {
         self.no_more_history.set(false);
         self.loading_history.set(false);
         self.oldest_message.set(0);
+        self.pinned_label.set_from("");
+        self.pinned_id.set(0);
+        self.chat_search_open.set(false);
+        self.chat_search.set_from("");
+        self.chat_search_results.set(Vec::new());
         if let Some(d) = self.drafts.borrow().get(&chat_id) {
             self.composer.set(d.clone());
         } else {
@@ -1291,6 +1402,168 @@ impl Store {
             }
             let _ = functions::open_chat(chat_id, client).await;
             store.load_history(chat_id, 0, 0).await;
+            store.refresh_pinned(chat_id).await;
+        })
+        .detach();
+    }
+
+    /// Fetch the chat's pinned message into `pinned_label`/`pinned_id`.
+    #[allow(if_else_view)] // string pick, not a view
+    async fn refresh_pinned(&self, chat_id: i64) {
+        match functions::get_chat_pinned_message(chat_id, self.client_id).await {
+            Ok(enums::Message::Message(m)) => {
+                let (t, _, label) = Self::content_preview(&m.content);
+                self.pinned_id.set(m.id);
+                self.pinned_label
+                    .set(if t.is_empty() { label } else { t });
+            }
+            _ => {
+                self.pinned_id.set(0);
+                self.pinned_label.set_from("");
+            }
+        }
+    }
+
+    pub fn pin_message(&self, message_id: i64) {
+        let chat_id = self.open_chat.get();
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            if functions::pin_chat_message(chat_id, message_id, false, false, client)
+                .await
+                .is_ok()
+            {
+                store.refresh_pinned(chat_id).await;
+            }
+        })
+        .detach();
+    }
+
+    pub fn unpin_message(&self, message_id: i64) {
+        let chat_id = self.open_chat.get();
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            if functions::unpin_chat_message(chat_id, message_id, client)
+                .await
+                .is_ok()
+            {
+                store.refresh_pinned(chat_id).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Quick-react to a message: removes the reaction when the same emoji was
+    /// already chosen, otherwise adds it.
+    pub fn toggle_reaction(&self, row: &MessageRow, emoji: &str) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        let (client, mid) = (self.client_id, row.id);
+        let emoji = emoji.to_string();
+        let chosen = row.my_reaction.as_str() == emoji;
+        let rt = enums::ReactionType::Emoji(types::ReactionTypeEmoji { emoji });
+        spawn_local(async move {
+            if chosen {
+                let _ = functions::remove_message_reaction(chat_id, mid, rt, client).await;
+            } else {
+                let _ = functions::add_message_reaction(
+                    chat_id, mid, rt, false, true, client,
+                )
+                .await;
+            }
+        })
+        .detach();
+    }
+
+    /// Mark a chat unread/read manually.
+    pub fn toggle_mark_unread(&self, chat_id: i64) {
+        let current = self
+            .chat_objs
+            .borrow()
+            .get(&chat_id)
+            .map(|c| c.is_marked_as_unread)
+            .unwrap_or(false);
+        let client = self.client_id;
+        spawn_local(async move {
+            let _ =
+                functions::toggle_chat_is_marked_as_unread(chat_id, !current, client)
+                    .await;
+        })
+        .detach();
+    }
+
+    /// In-chat message search via `searchChatMessages`.
+    pub fn run_chat_search(&self, query: Str) {
+        self.chat_search.set(query.clone());
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        if query.is_empty() {
+            self.chat_search_results.set(Vec::new());
+            return;
+        }
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::FoundChatMessages::FoundChatMessages(found)) =
+                functions::search_chat_messages(
+                    chat_id,
+                    None,
+                    query.to_string(),
+                    None,
+                    0,
+                    0,
+                    20,
+                    None,
+                    client,
+                )
+                .await
+            {
+                let mut rows: Vec<MessageRow> = found
+                    .messages
+                    .iter()
+                    .map(|m| store.message_row(m))
+                    .collect();
+                rows.sort();
+                store.chat_search_results.set(rows);
+            }
+        })
+        .detach();
+    }
+
+    /// Scroll/jump to a message: loads a window of history centered on it so
+    /// the bubble is on screen (best-effort without per-row scrolling).
+    pub fn jump_to_message(&self, message_id: i64) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Messages::Messages(msgs)) = functions::get_chat_history(
+                chat_id,
+                message_id,
+                -20,
+                40,
+                false,
+                store.client_id,
+            )
+            .await
+            {
+                let mut list = store.messages.get();
+                for m in msgs.messages.iter().flatten() {
+                    let row = store.message_row(m);
+                    if !list.iter().any(|r| r.id == row.id) {
+                        list.push(row);
+                    }
+                }
+                list.sort();
+                store.messages.set(list);
+            }
         })
         .detach();
     }
@@ -1332,17 +1605,17 @@ impl Store {
             if offset == 0 && from == 0 {
                 self.scroll_bottom();
             }
-            if let Some(last) = msgs.messages.iter().flatten().next() {
-                if !last.is_outgoing {
-                    let client = self.client_id;
-                    let mid = last.id;
-                    spawn_local(async move {
-                        let _ =
-                            functions::view_messages(chat_id, vec![mid], None, false, client)
-                                .await;
-                    })
-                    .detach();
-                }
+            if let Some(last) = msgs.messages.iter().flatten().next()
+                && !last.is_outgoing
+            {
+                let client = self.client_id;
+                let mid = last.id;
+                spawn_local(async move {
+                    let _ =
+                        functions::view_messages(chat_id, vec![mid], None, false, client)
+                            .await;
+                })
+                .detach();
             }
         }
         self.loading_history.set(false);
@@ -1437,6 +1710,89 @@ impl Store {
         .detach();
     }
 
+    /// Build the right `InputMessageContent` for a local file path based on
+    /// its extension: photos, videos, and audio get their native message
+    /// types; everything else goes as a document.
+    pub(crate) fn attachment_content(path: String, caption: String) -> enums::InputMessageContent {
+        let ext = path
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        let file = enums::InputFile::Local(types::InputFileLocal { path });
+        let caption = if caption.is_empty() {
+            None
+        } else {
+            Some(types::FormattedText {
+                text: caption,
+                entities: Vec::new(),
+            })
+        };
+        match ext.as_str() {
+            "jpg" | "jpeg" | "png" | "webp" | "bmp" => {
+                enums::InputMessageContent::InputMessagePhoto(types::InputMessagePhoto {
+                    photo: file,
+                    thumbnail: None,
+                    added_sticker_file_ids: Vec::new(),
+                    width: 0,
+                    height: 0,
+                    caption,
+                    show_caption_above_media: false,
+                    self_destruct_type: None,
+                    has_spoiler: false,
+                })
+            }
+            "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => {
+                enums::InputMessageContent::InputMessageVideo(types::InputMessageVideo {
+                    video: file,
+                    thumbnail: None,
+                    cover: None,
+                    start_timestamp: 0,
+                    added_sticker_file_ids: Vec::new(),
+                    duration: 0,
+                    width: 0,
+                    height: 0,
+                    supports_streaming: true,
+                    caption,
+                    show_caption_above_media: false,
+                    self_destruct_type: None,
+                    has_spoiler: false,
+                })
+            }
+            "mp3" | "ogg" | "m4a" | "flac" | "wav" | "opus" => {
+                enums::InputMessageContent::InputMessageAudio(types::InputMessageAudio {
+                    audio: file,
+                    album_cover_thumbnail: None,
+                    duration: 0,
+                    title: String::new(),
+                    performer: String::new(),
+                    caption,
+                })
+            }
+            "gif" => enums::InputMessageContent::InputMessageAnimation(
+                types::InputMessageAnimation {
+                    animation: file,
+                    thumbnail: None,
+                    added_sticker_file_ids: Vec::new(),
+                    duration: 0,
+                    width: 0,
+                    height: 0,
+                    caption,
+                    show_caption_above_media: false,
+                    has_spoiler: false,
+                },
+            ),
+            _ => enums::InputMessageContent::InputMessageDocument(
+                types::InputMessageDocument {
+                    document: file,
+                    thumbnail: None,
+                    disable_content_type_detection: false,
+                    caption,
+                },
+            ),
+        }
+    }
+
     pub fn send_attachment(&self) {
         let chat_id = self.open_chat.get();
         let urls = self.attach.get();
@@ -1458,26 +1814,7 @@ impl Store {
                 None,
                 None,
                 None,
-                enums::InputMessageContent::InputMessagePhoto(
-                    types::InputMessagePhoto {
-                        photo: enums::InputFile::Local(types::InputFileLocal { path }),
-                        thumbnail: None,
-                        added_sticker_file_ids: Vec::new(),
-                        width: 0,
-                        height: 0,
-                        caption: if caption.is_empty() {
-                            None
-                        } else {
-                            Some(types::FormattedText {
-                                text: caption,
-                                entities: Vec::new(),
-                            })
-                        },
-                        show_caption_above_media: false,
-                        self_destruct_type: None,
-                        has_spoiler: false,
-                    },
-                ),
+                Self::attachment_content(path, caption),
                 client,
             )
             .await;
@@ -1540,10 +1877,10 @@ impl Store {
     pub fn copy_message(&self, row: &MessageRow) {
         self.clipboard.set(row.text.clone());
         let text = row.text.to_string();
-        if !text.is_empty() {
-            if let Ok(mut cb) = arboard::Clipboard::new() {
-                let _ = cb.set_text(text);
-            }
+        if !text.is_empty()
+            && let Ok(mut cb) = arboard::Clipboard::new()
+        {
+            let _ = cb.set_text(text);
         }
     }
 
@@ -1662,6 +1999,7 @@ impl Store {
             unread: 0,
             pinned: false,
             muted: false,
+            marked_unread: false,
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
             time: "".into(),
             typing: false,
@@ -1693,30 +2031,27 @@ impl Store {
                         uname.remove(0);
                     }
                     let mut user_id: i64 = uname.parse().unwrap_or(0);
-                    if user_id == 0 {
-                        if let Ok(enums::Chats::Chats(c)) =
+                    if user_id == 0
+                        && let Ok(enums::Chats::Chats(c)) =
                             functions::search_chats_on_server(format!("@{uname}"), 5, client)
                                 .await
-                        {
-                            for cid in c.chat_ids {
-                                if let Ok(enums::Chat::Chat(chat)) =
-                                    functions::get_chat(cid, client).await
-                                {
-                                    if let enums::ChatType::Private(p) = chat.r#type {
-                                        user_id = p.user_id;
-                                        break;
-                                    }
-                                }
+                    {
+                        for cid in c.chat_ids {
+                            if let Ok(enums::Chat::Chat(chat)) =
+                                functions::get_chat(cid, client).await
+                                && let enums::ChatType::Private(p) = chat.r#type
+                            {
+                                user_id = p.user_id;
+                                break;
                             }
                         }
                     }
-                    if user_id != 0 {
-                        if let Ok(enums::Chat::Chat(chat)) =
+                    if user_id != 0
+                        && let Ok(enums::Chat::Chat(chat)) =
                             functions::create_private_chat(user_id, false, client)
                                 .await
-                        {
-                            store.select_chat(chat.id);
-                        }
+                    {
+                        store.select_chat(chat.id);
                     }
                 }
                 1 => {

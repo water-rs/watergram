@@ -81,6 +81,7 @@ mod tests {
             typing: false,
             online: false,
             kind_icon: "".into(),
+            marked_unread: false,
         }
     }
 
@@ -98,6 +99,8 @@ mod tests {
             reactions: "".into(),
             failed: false,
             pending: false,
+            read_out: false,
+            my_reaction: "".into(),
         }
     }
 
@@ -226,5 +229,86 @@ mod tests {
         store.reply_label.set("Replying to Alice".into());
         let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
         app.query().label("Replying to Alice").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn pinned_banner_shows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        store.pinned_label.set("Pinned message".into());
+        store.pinned_id.set(99);
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query().label("Pinned message").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn chat_search_panel_opens(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        store.chat_search_open.set(true);
+        store
+            .chat_search_results
+            .set(vec![msg(1, "needle hit", false)]);
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query().label("Search in chat").assert_exists();
+        app.query().label("needle hit").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn marked_unread_shows_dot(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut c = chat(1, "Alice", "hello", 100);
+        c.marked_unread = true;
+        store.chats.set(vec![c]);
+        let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        app.query().label("●").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn read_receipt_double_check(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let mut m = msg(1, "seen", true);
+        m.read_out = true;
+        store.messages.set(vec![m]);
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query().label("✓✓").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn reactions_render(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let mut m = msg(1, "liked", false);
+        m.reactions = "👍 3".into();
+        store.messages.set(vec![m]);
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query().label("👍 3").assert_exists();
+    }
+
+    #[test]
+    fn attachment_content_dispatch() {
+        use tdlib_rs::enums::InputMessageContent as C;
+        assert!(matches!(
+            Store::attachment_content("/tmp/a.png".into(), String::new()),
+            C::InputMessagePhoto(_)
+        ));
+        assert!(matches!(
+            Store::attachment_content("/tmp/a.mp4".into(), String::new()),
+            C::InputMessageVideo(_)
+        ));
+        assert!(matches!(
+            Store::attachment_content("/tmp/a.mp3".into(), String::new()),
+            C::InputMessageAudio(_)
+        ));
+        assert!(matches!(
+            Store::attachment_content("/tmp/a.zip".into(), String::new()),
+            C::InputMessageDocument(_)
+        ));
+        let C::InputMessagePhoto(p) = Store::attachment_content("/tmp/x.JPG".into(), "cap".into())
+        else {
+            panic!()
+        };
+        assert_eq!(p.caption.unwrap().text, "cap");
     }
 }

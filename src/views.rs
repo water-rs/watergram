@@ -34,6 +34,7 @@ use mdi::cog;
 use mdi::file;
 use mdi::image_outline;
 use mdi::lock;
+use mdi::magnify;
 use mdi::paperclip;
 use mdi::pin;
 use mdi::plus;
@@ -365,7 +366,10 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
     };
     let badge: AnyView = if row.pinned {
         pin().tint(MutedForeground).size(14.0, 14.0).anyview()
-    } else if unread > 0 {
+    } else if unread > 0 || row.marked_unread {
+        if row.marked_unread && unread == 0 {
+            text("●").caption().foreground(Accent).anyview()
+        } else {
         text!("{unread}")
                 .caption()
                 .bold()
@@ -380,6 +384,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                 } else {
                     Circle.fill(Accent)
                 }).anyview()
+        }
     } else {
         spacer().width(1.0).anyview()
     };
@@ -412,6 +417,12 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
     .padding_with((10.0, 6.0))
     .context_menu((
         "Mark read".action(move |store: Store| store.mark_read(id)),
+        if row.marked_unread {
+            "Mark as read (clear flag)"
+        } else {
+            "Mark as unread"
+        }
+        .action(move |store: Store| store.toggle_mark_unread(id)),
         if row.pinned { "Unpin" } else { "Pin" }.action(move |store: Store| store.toggle_pin(id)),
         if row.muted { "Unmute" } else { "Mute" }.action(move |store: Store| store.toggle_mute(id)),
         "Leave chat".action(move |store: Store| store.leave(id)),
@@ -458,9 +469,29 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let has_attach = store.attach.map(|v| !v.is_empty()).distinct();
     let scroller = store.scroll.clone();
     let composer_b = store.composer.clone();
+    let has_pinned = store.pinned_label.map(|s: Str| !s.is_empty()).distinct();
+    let pinned_label = store.pinned_label.clone();
+    let search_open = store.chat_search_open.clone();
+    let search_open2 = store.chat_search_open.clone();
+    let search_b = store.chat_search.clone();
+    let search_debounced = store.chat_search.debounce(Duration::from_millis(400));
+    let search_results_b = store.chat_search_results.clone();
     let inner = store.clone();
 
     vstack((
+        when(has_pinned, move || {
+            hstack((
+                pin().tint(Accent).size(14.0, 14.0),
+                text!("{pinned_label}")
+                    .caption()
+                    .line_limit(ONE)
+                    .foreground(Accent),
+                spacer(),
+            ))
+            .padding_with((12.0, 6.0))
+            .background(Surface)
+            .on_tap(|store: Store| store.jump_to_message(store.pinned_id.get()))
+        }),
         scroll(
             vstack((
                 when(has_more, || {
@@ -476,6 +507,37 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .padding_with((12.0, 8.0)),
         )
         .scroll_controller(&scroller),
+        when(search_open, move || {
+            vstack((
+                hstack((
+                    field("Search in chat", &search_b)
+                        .prompt("Search in this chat")
+                        .hide_label(),
+                    icon_button(close(), "Close search", |store: Store| {
+                        store.chat_search_open.set(false);
+                        store.chat_search.set_from("");
+                        store.chat_search_results.set(Vec::new());
+                    }),
+                ))
+                .spacing(6.0)
+                .padding_with((10.0, 6.0)),
+                scroll(Lazy::vstack(ForEach::new(
+                    SignalCollection::new(search_results_b.clone()),
+                    move |row: MessageRow| {
+                        hstack((
+                            text(row.time.clone()).caption().muted(),
+                            text(row.text.clone()).caption().line_limit(ONE),
+                            spacer(),
+                        ))
+                        .spacing(6.0)
+                        .padding_with((10.0, 4.0))
+                        .on_tap(move |store: Store| store.jump_to_message(row.id))
+                    },
+                )))
+                .max_height(160.0),
+            ))
+            .background(Surface)
+        }),
         when(reply_open, move || {
             banner("Reply to", reply_label.clone(), |store: Store| {
                 store.reply_to.set(None)
@@ -490,7 +552,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         when(has_attach, || {
             hstack((
                 paperclip().tint(Accent).size(16.0, 16.0),
-                text("Photo attached — press send")
+                text("File attached — press send")
                     .caption()
                     .foreground(Accent),
                 spacer(),
@@ -502,17 +564,21 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .background(Surface)
         }),
         hstack((
-            FilePicker::open(label("Attach photo").icon(paperclip()), &store.attach)
+            FilePicker::open(label("Attach file").icon(paperclip()), &store.attach)
                 .label_style(LabelDisplayMode::IconOnly),
             field("Message", &composer_b)
                 .prompt("Message")
                 .hide_label(),
+            icon_button(magnify(), "Search in chat", move |store: Store| {
+                store.chat_search_open.set(!search_open2.get())
+            }),
             icon_button(send(), "Send", |store: Store| store.send()),
         ))
         .spacing(6.0)
         .padding_with((10.0, 8.0))
         .background(Surface),
     ))
+    .on_change(&search_debounced, |q: Str, store: Store| store.run_chat_search(q))
     .on_change(&composer_b, |_: Str, store: Store| store.typing_ping())
     .title(text!("{title}"))
     .navigation_subtitle(text!("{subtitle}"))
@@ -568,6 +634,8 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                 clock_outline().size(11.0, 11.0).anyview()
             } else if row.failed {
                 alert_circle().tint(Error).size(11.0, 11.0).anyview()
+            } else if row.outgoing && row.read_out {
+                text("✓✓").caption().anyview()
             } else if row.outgoing {
                 text("✓").caption().anyview()
             } else {
@@ -592,9 +660,31 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         Color::from(Foreground)
     });
 
+    let react_label: &'static str = if row.my_reaction == "👍" {
+        "Remove 👍"
+    } else {
+        "React 👍"
+    };
+    let pinned = store.pinned_id.get() == row.id;
+    let pin_label: &'static str = if pinned {
+        "Unpin message"
+    } else {
+        "Pin message"
+    };
+    let r6 = row.clone();
+    let r7 = row.clone();
     let bubble = bubble.context_menu((
         "Reply".action(move |store: Store| store.start_reply(&r1)),
+        react_label.action(move |store: Store| store.toggle_reaction(&r6, "👍")),
+        "React ❤️".action(move |store: Store| store.toggle_reaction(&r7, "❤️")),
         "Forward".action(move |store: Store| store.start_forward(&r2)),
+        pin_label.action(move |store: Store| {
+            if pinned {
+                store.unpin_message(row.id)
+            } else {
+                store.pin_message(row.id)
+            }
+        }),
         "Copy".action(move |store: Store| store.copy_message(&r3)),
         "Edit".action(move |store: Store| store.start_edit(&r4)),
         "Delete".action(move |store: Store| store.delete_message(r5)),
@@ -616,13 +706,22 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
         let has = path_a.map(|p: Str| !p.is_empty()).distinct();
         let url = path_b.map(Url::from_file_path_str);
         let label_text = row.media_label.clone();
+        let pct = store.file_progress_signal(fid);
         when(has, move || {
                 Photo::new(url.clone()).max_width(320.0).clip(RoundedRectangle::new(0.12))
             })
             .otherwise(move || {
                 hstack((
                     image_outline().tint(MutedForeground).size(14.0, 14.0),
-                    text(label_text.clone()).caption().muted(),
+                    text!("{label_text}{suffix}", suffix = pct.map(|p: i32| {
+                        if p > 0 && p < 100 {
+                            Str::from(format!(" — {p}%"))
+                        } else {
+                            Str::from("")
+                        }
+                    }))
+                    .caption()
+                    .muted(),
                 ))
                 .padding_with((8.0, 4.0))
                 .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
