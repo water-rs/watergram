@@ -47,11 +47,11 @@
 | 复制文本 | ✅ | `getMessage` + 剪贴板 | — |
 | 已读标记（拉取后回执） | ✅ | `viewMessages` | — |
 | 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
-| 跳转到某条消息（日期/回复定位） | 🟡 | `getChatHistory` 以目标消息为中心加载窗口（无精确滚动定位） | — |
+| 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + 按行高估算 `ScrollController` 滚动 + 气泡高亮 | — |
 | 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
 | Reactions 展示 | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
-| 发送中/失败状态 | 🟡 | `updateMessageSendSucceeded`/`Failed`（行内） | — |
+| 发送中/失败状态 | ✅ | `updateMessageSendSucceeded`/`Failed` 行内图标；点 ✗ → `resendMessages` | `resend_failed_marks_pending` |
 | 定时消息 / 静默发送 | ✅ | `sendMessage(MessageSendOptions{disable_notification,scheduling_state=SendAtDate})` — 发送按钮右键 | — (send_opt 路径） |
 | 链接预览 | ✅ | `MessageText.link_preview` → 站内一行卡片（site—title·desc) | `link_preview_line_shows` |
 | 富文本实体（粗/斜/剧透/超链） | ✅ | `FormattedText.entities` → `StyledStr`（粗/斜/下划/删除/剧透/代码/引用/链接，UTF-16→byte 映射+重叠合并） | `styled_entities_merge` |
@@ -64,10 +64,10 @@
 | 发送图片 | ✅ | `sendMessage(inputMessagePhoto)`（FilePicker，气泡内 Photo 渲染） | `attachment_content_dispatch` |
 | 发送视频 | ✅ | `sendMessage(inputMessageVideo)`（按扩展名分发） | `attachment_content_dispatch` |
 | 发送文件 | ✅ | `sendMessage(inputMessageDocument)`（默认兜底） | `attachment_content_dispatch` |
-| 语音消息（录制/发送/播放） | 🟡 | 播放：`downloadFile` → `video_player`；发送：ogg/opus 文件 → `inputMessageVoiceNote`；录制缺采集组件 | `media_play_fallback_row` |
-| 视频消息 | 🟡 | 播放：`downloadFile` → `video_player`；圆形视频消息录制缺采集组件 | `media_play_fallback_row` |
+| 语音消息（录制/发送/播放） | ✅ | 播放：`video_player`；录制：waterkit-audio cpal → opus-pure Ogg/Opus + waveform → `inputMessageVoiceNote` | `opus_ogg_container`、`waveform_encodes_100_bars`、`voice_record_button_handles_missing_device` |
+| 视频消息 | ✅ | 播放：`video_player`；录制：waterkit-camera → wgpu readback → 方形裁剪 → waterkit-codec H.264 → VideoWriter mp4 → `inputMessageVideoNote`（VA-API 编码需 /dev/dri） | `nv12_layout`、`crop_square`、`video_note_handles_missing_camera` |
 | 贴纸 | ✅ | `getRecentStickers`/`searchStickers`/`getInstalledStickerSets`/`getStickerSet`（emoji 搜索+贴纸包浏览）→ `inputMessageSticker` | `sticker_picker_toggles` |
-| GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（同贴纸面板，缩略图） | `sticker_picker_toggles` |
+| GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（缩略图面板；trending/搜索经 inline bot 未接） | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
@@ -100,8 +100,8 @@
 | 深色模式 | ✅ | env `ColorScheme` | `dark_mode_toggle` |
 | 账号信息展示 | ✅ | `getMe` | `settings_shows_account` |
 | 通知设置（全局/按聊天） | ✅ | `setChatNotificationSettings`（单聊）+ `setScopeNotificationSettings`（私聊/群/频道三项全局开关） | — |
-| 隐私设置 | 🟡 | `getUserPrivacySettingRules` + `setUserPrivacySettingRules`（右键菜单 Everyone/My contacts/Nobody 预设；无逐用户例外编辑） | `privacy_audience_mapping` |
-| 两步验证管理 | 🟡 | `getPasswordState` 状态展示（SRP 设置未做） | `settings_shows_sections` |
+| 隐私设置 | ✅ | `getUserPrivacySettingRules` + `setUserPrivacySettingRules`：预设 + 逐用户 Always/Never allow 例外（联系人选择器，AllowUsers/RestrictUsers 合并前置） | `privacy_audience_mapping`、`privacy_exception_merge` |
+| 两步验证管理 | ✅ | `getPasswordState` + `setPassword`（设/改/关 + hint + recovery email；SRP 由 TDLib 内部计算） | `twofa_requires_current_password` |
 | 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`/`terminateAllOtherSessions` | `settings_shows_sections` |
 | 语言 | ❌ | `setOption(language_pack_id)` | — |
 | 存储/缓存清理 | ✅ | `getStorageStatistics` 摘要 + `optimizeStorage` 清理按钮 | `settings_storage_section` |
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：59 项 ｜ 部分 🟡：7 项 ｜ 未实现 ❌：1 项
+- 已实现 ✅：65 项 ｜ 部分 🟡：1 项 ｜ 未实现 ❌：1 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）

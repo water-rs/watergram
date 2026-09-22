@@ -33,6 +33,8 @@ use mdi::archive;
 use mdi::bookmark;
 use mdi::bullhorn;
 use mdi::clock_outline;
+use mdi::camera;
+use mdi::microphone;
 use mdi::close;
 use mdi::delete_sweep;
 use mdi::account_plus;
@@ -48,6 +50,7 @@ use mdi::pin;
 use mdi::plus;
 use mdi::send;
 use mdi::share_variant;
+use waterui_image::reactive_image;
 
 const ONE: NonZeroUsize = NonZeroUsize::new(1).unwrap();
 const TWO: NonZeroUsize = NonZeroUsize::new(2).unwrap();
@@ -606,6 +609,15 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let reply_label = store.reply_label.clone();
     let messages = SignalCollection::new(store.messages.clone());
     let has_attach = store.attach.map(|v| !v.is_empty()).distinct();
+    let voice_rec = store.recording_voice.clone();
+    let has_capture_error = store
+        .capture_error
+        .map(|s: Str| !s.is_empty())
+        .distinct();
+    let capture_error_text = store.capture_error.clone();
+    let video_note_open = store.video_note_open.clone();
+    let voice_elapsed = store.voice_elapsed.clone();
+    let store_for_sheet = store.clone();
     let scroller = store.scroll.clone();
     let composer_b = store.composer.clone();
     let has_pinned = store.pinned_label.map(|s: Str| !s.is_empty()).distinct();
@@ -771,6 +783,30 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 store.composer.set_from("");
             })
         }),
+        when(voice_rec, move || {
+            hstack((
+                text!("Recording… {voice_elapsed}")
+                    .caption()
+                    .foreground(Accent),
+                spacer(),
+                icon_button(close(), "Cancel recording", |store: Store| {
+                    store.cancel_voice_record()
+                }),
+                icon_button(send(), "Send voice note", |store: Store| {
+                    store.toggle_voice_record()
+                }),
+            ))
+            .padding_with((12.0, 6.0))
+            .background(Surface)
+        }),
+        when(has_capture_error, move || {
+            banner("Capture", text!("{capture_error_text}"), |store: Store| {
+                store.capture_error.set_from("")
+            })
+        }),
+        when(video_note_open, move || {
+            video_note_sheet(store_for_sheet.clone())
+        }),
         when(has_attach, || {
             hstack((
                 paperclip().tint(Accent).size(16.0, 16.0),
@@ -859,6 +895,12 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             field("Message", &composer_b)
                 .prompt("Message")
                 .hide_label(),
+            icon_button(microphone(), "Record voice note", |store: Store| {
+                store.toggle_voice_record()
+            }),
+            icon_button(camera(), "Video note", |store: Store| {
+                store.open_video_note()
+            }),
             icon_button(magnify(), "Search in chat", move |store: Store| {
                 store.chat_search_open.set(!search_open2.get())
             }),
@@ -951,7 +993,11 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             if row.pending {
                 clock_outline().size(11.0, 11.0).anyview()
             } else if row.failed {
-                alert_circle().tint(Error).size(11.0, 11.0).anyview()
+                alert_circle()
+                    .tint(Error)
+                    .size(11.0, 11.0)
+                    .on_tap(move |store: Store| store.resend_failed(row.id))
+                    .anyview()
             } else if row.outgoing && row.read_out {
                 text("✓✓").caption().anyview()
             } else if row.outgoing {
@@ -966,7 +1012,9 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     .padding_with(10.0)
     .max_width(420.0)
     .leading()
-    .background(if row.outgoing {
+    .background(if row.highlighted {
+        RoundedRectangle::new(0.18).fill(SurfaceVariant)
+    } else if row.outgoing {
         RoundedRectangle::new(0.18).fill(Accent)
     } else {
         RoundedRectangle::new(0.18).fill(Surface)
@@ -1185,13 +1233,16 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 text("Two-step verification"),
                 spacer(),
                 text!("{twofa}", twofa = store.twofa.clone()).muted(),
-            )),
+            ))
+            .on_tap(|store: Store| store.open_twofa()),
             Lazy::vstack(ForEach::new(
                 SignalCollection::new(store.privacy_rows.clone()),
                 move |row: PrivacyRow| {
                     let k = row.key.clone();
                     let k2 = row.key.clone();
                     let k3 = row.key.clone();
+                    let k4 = row.key.clone();
+                    let k5 = row.key.clone();
                     hstack((
                         text(row.setting.clone()).caption(),
                         spacer(),
@@ -1206,6 +1257,12 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                         }),
                         "Nobody".action(move |store: Store| {
                             store.set_privacy_audience(k3.clone(), "Nobody")
+                        }),
+                        "Always allow a person…".action(move |store: Store| {
+                            store.open_privacy_exception(k4.clone(), true)
+                        }),
+                        "Never allow a person…".action(move |store: Store| {
+                            store.open_privacy_exception(k5.clone(), false)
                         }),
                     ))
                 },
@@ -1284,7 +1341,79 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             store.load_privacy();
         }
     });
+    let store_for_twofa = store.clone();
+    let store_for_picker = store.clone();
+    let content = vstack((
+        content,
+        when(store.twofa_open.clone(), move || {
+            twofa_sheet(store_for_twofa.clone())
+        }),
+        when(store.privacy_picker_open.clone(), move || {
+            privacy_picker_view(store_for_picker.clone())
+        }),
+    ));
     NavigationView::new("Settings", content)
+}
+
+/// Two-step verification sheet: current+new password, hint, recovery email.
+fn twofa_sheet(store: Store) -> impl View {
+    let note = store.twofa_note.clone();
+    vstack((
+        hstack((
+            text("Two-step verification").headline(),
+            spacer(),
+            icon_button(close(), "Close", |store: Store| {
+                store.twofa_open.set(false)
+            }),
+        )),
+        SecureField::new("Current password", &store.twofa_old).hide_label(),
+        SecureField::new("New password (empty disables)", &store.twofa_new).hide_label(),
+        field("Password hint", &store.twofa_hint_in)
+            .prompt("Hint")
+            .hide_label(),
+        field("Recovery email", &store.twofa_email)
+            .prompt("Recovery email (optional)")
+            .hide_label(),
+        when(
+            note.map(|s: Str| !s.is_empty()).distinct(),
+            move || text(note.clone()).caption().muted(),
+        ),
+        hstack((
+            button("Save").action(|store: Store| store.save_twofa()),
+            spacer(),
+        )),
+    ))
+    .spacing(8.0)
+    .padding_with((16.0, 10.0))
+    .background(Surface)
+}
+
+/// Contact picker for a per-user privacy exception.
+fn privacy_picker_view(store: Store) -> impl View {
+    vstack((
+        hstack((
+            text("Pick a contact").headline(),
+            spacer(),
+            icon_button(close(), "Close", |store: Store| {
+                store.privacy_picker_open.set(false)
+            }),
+        )),
+        Lazy::vstack(ForEach::new(
+            SignalCollection::new(store.contacts.clone()),
+            |row: MemberRow| {
+                let uid = row.key;
+                hstack((
+                    text(row.name.clone()).caption(),
+                    spacer(),
+                ))
+                .padding_with((0.0, 4.0))
+                .on_tap(move |store: Store| store.pick_privacy_exception(uid))
+            },
+        )),
+    ))
+    .spacing(6.0)
+    .padding_with((16.0, 10.0))
+    .background(Surface)
 }
 
 pub(crate) fn profile_view(store: Store) -> NavigationView {
@@ -1408,4 +1537,45 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
         }
     });
     NavigationView::new("New chat", content)
+}
+
+/// Video-note sheet: camera preview + record/stop/send controls.
+fn video_note_sheet(store: Store) -> impl View {
+    let (handle, preview) = reactive_image();
+    let status = store.video_status.clone();
+    let rec_flag = store.video_recording.clone();
+    let rec_label = store.video_elapsed.clone();
+    vstack((
+        hstack((
+            text("Video note").headline(),
+            spacer(),
+            icon_button(close(), "Close", |store: Store| {
+                store.close_video_note()
+            }),
+        )),
+        preview
+            .size(240.0, 240.0)
+            .background(RoundedRectangle::new(0.5).fill(SurfaceVariant)),
+        when(
+            status.map(|s: Str| !s.is_empty()).distinct(),
+            move || text(status.clone()).caption().muted(),
+        ),
+        when(rec_flag, move || {
+            text!("Recording {rec_label}").caption().foreground(Accent)
+        }),
+        hstack((
+            icon_button(camera(), "Start recording", |store: Store| {
+                store.start_video_record()
+            }),
+            icon_button(send(), "Send video note", |store: Store| {
+                store.finish_video_record()
+            }),
+        ))
+        .spacing(12.0),
+    ))
+    .padding_with((12.0, 10.0))
+    .background(Surface)
+    .on_appear(move |store: Store| {
+        *store.video_preview.borrow_mut() = Some(handle.clone());
+    })
 }

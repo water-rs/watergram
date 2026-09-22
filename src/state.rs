@@ -7,6 +7,7 @@
 //! type (which is `Rc`-backed and `!Send`) on one thread.
 
 use std::cell::{Cell, RefCell};
+use std::sync::mpsc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -20,6 +21,7 @@ use waterui::layout::{Point, ScrollController};
 use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::task::spawn_local;
+use waterui_image::{ReactiveImageHandle, image};
 use waterui::Identifiable;
 use waterui::log::error;
 use waterui::task::sleep;
@@ -165,6 +167,8 @@ pub struct MessageRow {
     pub forwarded_from: Str,
     pub failed: bool,
     pub pending: bool,
+    /// Flash-highlighted after a jump-to-message.
+    pub highlighted: bool,
 }
 
 impl PartialEq for MessageRow {
@@ -315,6 +319,38 @@ pub struct Store {
     pub accounts_open: Binding<bool>,
     /// Installed sticker packs shown above the sticker cells.
     pub sticker_packs: Binding<Vec<PackRow>>,
+    /// Live voice capture session (recorder + collector thread).
+    pub voice_session: Rc<RefCell<Option<crate::capture::VoiceCapture>>>,
+    /// Voice-recording state shown in the composer.
+    pub recording_voice: Binding<bool>,
+    /// "0:12" elapsed label while recording.
+    pub voice_elapsed: Binding<Str>,
+    /// Last capture error shown in the composer/sheet.
+    pub capture_error: Binding<Str>,
+    /// Video-note sheet state.
+    pub video_note_open: Binding<bool>,
+    pub video_status: Binding<Str>,
+    pub video_recording: Binding<bool>,
+    pub video_elapsed: Binding<Str>,
+    /// Camera session owned by the video-note sheet.
+    pub video_session: Rc<RefCell<Option<crate::capture::VideoNoteCapture>>>,
+    /// Camera-open result pending pickup by the UI-thread pump.
+    #[allow(clippy::type_complexity)]
+    pub video_open_rx: Rc<RefCell<Option<mpsc::Receiver<Result<crate::capture::VideoNoteCapture, String>>>>>,
+    /// Preview handle installed by the sheet's reactive_image.
+    pub video_preview: Rc<RefCell<Option<ReactiveImageHandle>>>,
+    /// Message id flash-highlighted after jump-to-message.
+    pub highlight_msg: Binding<i64>,
+    /// 2FA management sheet.
+    pub twofa_open: Binding<bool>,
+    pub twofa_old: Binding<Secure>,
+    pub twofa_new: Binding<Secure>,
+    pub twofa_hint_in: Binding<Str>,
+    pub twofa_email: Binding<Str>,
+    pub twofa_note: Binding<Str>,
+    /// Per-user privacy exception picker: (setting, allow?).
+    pub privacy_picker_open: Binding<bool>,
+    privacy_target: RefCell<Option<(enums::UserPrivacySetting, bool)>>,
     /// Guards keeping notification-scope watchers alive.
     notif_watchers: Rc<RefCell<Vec<Box<dyn std::any::Any>>>>,
     /// Global notification toggles (per scope; true = notifications on).
@@ -663,6 +699,26 @@ impl Store {
             accounts: Binding::<Vec<AccountRow>>::default(),
             accounts_open: Binding::bool(false),
             sticker_packs: Binding::<Vec<PackRow>>::default(),
+            voice_session: Rc::new(RefCell::new(None)),
+            recording_voice: Binding::bool(false),
+            voice_elapsed: Binding::container(Str::from("")),
+            capture_error: Binding::container(Str::from("")),
+            video_note_open: Binding::bool(false),
+            video_status: Binding::container(Str::from("")),
+            video_recording: Binding::bool(false),
+            video_elapsed: Binding::container(Str::from("")),
+            video_session: Rc::new(RefCell::new(None)),
+            video_open_rx: Rc::new(RefCell::new(None)),
+            video_preview: Rc::new(RefCell::new(None)),
+            highlight_msg: Binding::i64(0),
+            twofa_open: Binding::bool(false),
+            twofa_old: Binding::<Secure>::default(),
+            twofa_new: Binding::<Secure>::default(),
+            twofa_hint_in: Binding::container(Str::from("")),
+            twofa_email: Binding::container(Str::from("")),
+            twofa_note: Binding::container(Str::from("")),
+            privacy_picker_open: Binding::bool(false),
+            privacy_target: RefCell::new(None),
             notif_watchers: Rc::new(RefCell::new(Vec::new())),
             notif_private: Binding::bool(true),
             notif_groups: Binding::bool(true),
@@ -1088,6 +1144,7 @@ impl Store {
             my_reaction,
             failed,
             pending,
+            highlighted: false,
         }
     }
 
@@ -2022,8 +2079,9 @@ impl Store {
         .detach();
     }
 
-    /// Scroll/jump to a message: loads a window of history centered on it so
-    /// the bubble is on screen (best-effort without per-row scrolling).
+    /// Scroll/jump to a message: loads a window of history centered on it,
+    /// scrolls to the estimated offset and flash-highlights the bubble.
+    /// (ScrollController is Point-based — no per-item scroll exists.)
     pub fn jump_to_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
         if chat_id == 0 {
@@ -2049,7 +2107,21 @@ impl Store {
                     }
                 }
                 list.sort();
+                let pos = list.iter().position(|r| r.id == message_id);
+                for (i, r) in list.iter_mut().enumerate() {
+                    r.highlighted = Some(i) == pos;
+                }
+                let from_bottom = pos
+                    .map(|p| list.len().saturating_sub(1 + p) as f32);
                 store.messages.set(list);
+                store.highlight_msg.set(message_id);
+                if let Some(from_bottom) = from_bottom {
+                    // Rows render newest-at-bottom; estimate ~52 px per row
+                    // from the bottom edge (no per-item scroll API exists).
+                    store
+                        .scroll
+                        .scroll_to(Point::new(0.0, from_bottom * 52.0));
+                }
             }
         })
         .detach();
@@ -2367,6 +2439,298 @@ impl Store {
             }
         })
         .detach();
+    }
+
+    /// Toggle voice-note recording: first tap starts, second stops+encodes.
+    pub fn toggle_voice_record(&self) {
+        if self.voice_session.borrow().is_some() {
+            self.finish_voice_record();
+            return;
+        }
+        match crate::capture::start_voice() {
+            Ok(cap) => {
+                self.capture_error.set_from("");
+                *self.voice_session.borrow_mut() = Some(cap);
+                self.recording_voice.set(true);
+                let store = self.clone();
+                spawn_local(async move {
+                    loop {
+                        sleep(std::time::Duration::from_millis(500)).await;
+                        if store.voice_session.borrow().is_none() {
+                            break;
+                        }
+                        store.refresh_voice_elapsed();
+                    }
+                })
+                .detach();
+                self.refresh_voice_elapsed();
+            }
+            Err(e) => {
+                self.capture_error.set_from(e);
+                self.recording_voice.set(false);
+            }
+        }
+    }
+
+    /// Update the "0:SS" elapsed label from the live recorder.
+    fn refresh_voice_elapsed(&self) {
+        let secs = self
+            .voice_session
+            .borrow()
+            .as_ref()
+            .map(|c| c.elapsed())
+            .unwrap_or(0);
+        self.voice_elapsed.set_from(format!("0:{secs:02}"));
+    }
+
+    /// Stop + encode + send the recorded voice note.
+    fn finish_voice_record(&self) {
+        let Some(cap) = self.voice_session.borrow_mut().take() else {
+            return;
+        };
+        self.recording_voice.set(false);
+        match cap.finish() {
+            Ok(take) => {
+                self.voice_elapsed.set_from("");
+                if take.duration < 1 {
+                    self.capture_error.set_from("recording too short");
+                    return;
+                }
+                let path = self.next_capture_path("ogg");
+                if std::fs::write(&path, &take.data).is_err() {
+                    self.capture_error.set_from("failed to write recording");
+                    return;
+                }
+                self.send_voice_file(path, take.duration, take.waveform);
+            }
+            Err(e) => self.capture_error.set_from(e),
+        }
+    }
+
+    /// Send a finished .ogg voice note to the open chat.
+    fn send_voice_file(&self, path: String, duration: i32, waveform: String) {
+        if self.open_chat.get() == 0 {
+            return;
+        }
+        let chat_id = self.open_chat.get();
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ = functions::send_message(
+                chat_id,
+                None,
+                None,
+                None,
+                enums::InputMessageContent::InputMessageVoiceNote(
+                    types::InputMessageVoiceNote {
+                        voice_note: enums::InputFile::Local(types::InputFileLocal {
+                            path,
+                        }),
+                        duration,
+                        waveform,
+                        caption: None,
+                        self_destruct_type: None,
+                    },
+                ),
+                client,
+            )
+            .await;
+        })
+        .detach();
+    }
+
+    /// Cancel recording without sending.
+    pub fn cancel_voice_record(&self) {
+        if let Some(cap) = self.voice_session.borrow_mut().take() {
+            drop(cap); // recorder drops → cpal stream ends
+        }
+        self.recording_voice.set(false);
+        self.voice_elapsed.set_from("");
+    }
+
+    /// Open the video-note sheet: spin up camera + preview pump.
+    pub fn open_video_note(&self) {
+        if self.video_session.borrow().is_some() {
+            self.video_note_open.set(true);
+            return;
+        }
+        self.video_note_open.set(true);
+        self.video_status.set_from("starting camera…");
+        let (tx, rx) = mpsc::channel();
+        // open_camera blocks on the GPU adapter — run it off the UI thread.
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::capture::open_camera());
+        });
+        *self.video_open_rx.borrow_mut() = Some(rx);
+        let store = self.clone();
+        spawn_local(async move {
+            loop {
+                sleep(std::time::Duration::from_millis(100)).await;
+                let result = {
+                    let mut slot = store.video_open_rx.borrow_mut();
+                    match slot.as_ref().map(|rx| rx.try_recv()) {
+                        Some(Ok(result)) => {
+                            *slot = None;
+                            Some(result)
+                        }
+                        Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                            *slot = None;
+                            None
+                        }
+                        _ => continue,
+                    }
+                };
+                match result {
+                    Some(Ok(cap)) => {
+                        *store.video_session.borrow_mut() = Some(cap);
+                        store.video_status.set_from("");
+                        store.pump_video_preview();
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        store.video_status.set_from(format!("camera: {e}"));
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Close the sheet and drop the camera session.
+    pub fn close_video_note(&self) {
+        self.video_session.borrow_mut().take();
+        self.video_note_open.set(false);
+        self.video_recording.set(false);
+        self.video_status.set_from("");
+        self.video_elapsed.set_from("");
+    }
+
+    /// Pump latest camera frames into the sheet's preview image (~30 Hz).
+    fn pump_video_preview(&self) {
+        let store = self.clone();
+        spawn_local(async move {
+            loop {
+                sleep(std::time::Duration::from_millis(33)).await;
+                let done = {
+                    let session = store.video_session.borrow();
+                    session.is_none()
+                };
+                if done {
+                    break;
+                }
+                let frame = {
+                    let session = store.video_session.borrow();
+                    session.as_ref().and_then(|s| s.next_preview())
+                };
+                if let (Some(rgba), Some(handle)) =
+                    (frame, store.video_preview.borrow().clone())
+                {
+                    handle.set(image(
+                        rgba,
+                        crate::capture::VIDEO_NOTE_SIZE,
+                        crate::capture::VIDEO_NOTE_SIZE,
+                    ));
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Start collecting frames for the recording.
+    pub fn start_video_record(&self) {
+        if let Some(cap) = self.video_session.borrow_mut().as_mut() {
+            cap.start_recording();
+            self.video_recording.set(true);
+            self.refresh_video_elapsed();
+        }
+    }
+
+    /// Update the video-note elapsed label.
+    pub fn refresh_video_elapsed(&self) {
+        let secs = self
+            .video_session
+            .borrow()
+            .as_ref()
+            .map(|c| c.elapsed())
+            .unwrap_or(0);
+        self.video_elapsed.set_from(format!("0:{secs:02}"));
+    }
+
+    /// Stop recording, encode mp4, send as a video note.
+    pub fn finish_video_record(&self) {
+        self.video_recording.set(false);
+        let path = self.next_capture_path("mp4");
+        let result = {
+            let session = self.video_session.borrow();
+            session.as_ref().map(|s| s.finish(std::path::Path::new(&path)))
+        };
+        match result {
+            Some(Ok((duration, thumb))) => {
+                let thumb_path = self.next_capture_path("jpg");
+                let _ = std::fs::write(&thumb_path, &thumb);
+                self.send_video_file(path, thumb_path, duration);
+                self.video_status.set_from("sent");
+            }
+            Some(Err(e)) => self.video_status.set_from(format!("encode: {e}")),
+            None => self.video_status.set_from("no camera"),
+        }
+    }
+
+    /// Send the recorded mp4 as a video-note message.
+    fn send_video_file(&self, path: String, thumb: String, duration: i32) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ = functions::send_message(
+                chat_id,
+                None,
+                None,
+                None,
+                enums::InputMessageContent::InputMessageVideoNote(
+                    types::InputMessageVideoNote {
+                        video_note: enums::InputFile::Local(types::InputFileLocal {
+                            path,
+                        }),
+                        thumbnail: Some(types::InputThumbnail {
+                            thumbnail: enums::InputFile::Local(types::InputFileLocal {
+                                path: thumb,
+                            }),
+                            width: crate::capture::VIDEO_NOTE_SIZE as i32,
+                            height: crate::capture::VIDEO_NOTE_SIZE as i32,
+                        }),
+                        duration,
+                        length: crate::capture::VIDEO_NOTE_SIZE as i32,
+                        self_destruct_type: None,
+                    },
+                ),
+                client,
+            )
+            .await;
+        })
+        .detach();
+    }
+
+    /// Next file path inside the client's files dir for a capture artifact.
+    fn next_capture_path(&self, ext: &str) -> String {
+        let dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("watergram")
+            .join(format!("files_{}", self.client_id.get()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(format!(
+            "capture_{}.{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            ext
+        ))
+        .to_string_lossy()
+        .into_owned()
     }
 
     /// Decide how to deliver the composer's picked files: two or more
@@ -3436,6 +3800,163 @@ impl Store {
                 .set_from(if ok { "Avatar updated" } else { "Avatar upload failed" });
         })
         .detach();
+    }
+
+    /// Resend a message whose delivery failed (tap the ✗ indicator).
+    pub fn resend_failed(&self, message_id: i64) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        let mut list = self.messages.get();
+        if let Some(r) = list.iter_mut().find(|r| r.id == message_id) {
+            r.failed = false;
+            r.pending = true;
+            self.messages.set(list);
+        }
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ =
+                functions::resend_messages(chat_id, vec![message_id], None, 0, client)
+                    .await;
+        })
+        .detach();
+    }
+
+    /// Open the two-step-verification management sheet.
+    pub fn open_twofa(&self) {
+        self.twofa_note.set_from("");
+        self.twofa_open.set(true);
+    }
+
+    /// Apply 2FA changes: set/change/disable password + recovery email.
+    /// TDLib computes the SRP exchange internally — the client only sends
+    /// the plaintext over the encrypted MTProto channel.
+    pub fn save_twofa(&self) {
+        let old = self.twofa_old.get().expose().to_string();
+        let new = self.twofa_new.get().expose().to_string();
+        if old.is_empty() && new.is_empty() {
+            self.twofa_note
+                .set_from("Enter your current password to disable 2FA");
+            return;
+        }
+        let hint = self.twofa_hint_in.get().to_string();
+        let email = self.twofa_email.get().to_string();
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            match functions::set_password(
+                old,
+                new,
+                hint,
+                !email.is_empty(),
+                email,
+                client,
+            )
+            .await
+            {
+                Ok(enums::PasswordState::PasswordState(p)) => {
+                    store
+                        .twofa
+                        .set_from(if p.has_password { "On" } else { "Off" });
+                    store.twofa_note.set_from("Saved");
+                    store.twofa_open.set(false);
+                }
+                Err(e) => store.twofa_note.set_from(e.message),
+            }
+        })
+        .detach();
+    }
+
+    /// Open the contact picker to add a per-user exception to a privacy
+    /// setting (`allow`=Always allow, `false`=Never allow).
+    pub fn open_privacy_exception(&self, key: enums::UserPrivacySetting, allow: bool) {
+        *self.privacy_target.borrow_mut() = Some((key, allow));
+        self.load_contacts();
+        self.privacy_picker_open.set(true);
+    }
+
+    /// Merge the picked user into Allow/RestrictUsers rules and push.
+    pub fn pick_privacy_exception(&self, user_id: i64) {
+        let Some((key, allow)) = self.privacy_target.borrow_mut().take() else {
+            return;
+        };
+        self.privacy_picker_open.set(false);
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let Ok(enums::UserPrivacySettingRules::UserPrivacySettingRules(rs)) =
+                functions::get_user_privacy_setting_rules(key.clone(), client)
+                    .await
+            else {
+                return;
+            };
+            let rules = Self::merge_privacy_exception(rs.rules, user_id, allow);
+            let _ = functions::set_user_privacy_setting_rules(
+                key,
+                types::UserPrivacySettingRules { rules },
+                client,
+            )
+            .await;
+            store.load_privacy();
+        })
+        .detach();
+    }
+
+    /// Pure merge: fold AllowUsers/RestrictUsers lists, drop the user from
+    /// both, re-add on the requested side, keep user rules first (first
+    /// matched rule wins in TDLib semantics).
+    pub(crate) fn merge_privacy_exception(
+        rules: Vec<enums::UserPrivacySettingRule>,
+        user_id: i64,
+        allow: bool,
+    ) -> Vec<enums::UserPrivacySettingRule> {
+        let mut allow_ids: Vec<i64> = Vec::new();
+        let mut deny_ids: Vec<i64> = Vec::new();
+        let mut out = Vec::new();
+        for r in rules {
+            match r {
+                enums::UserPrivacySettingRule::AllowUsers(u) => {
+                    allow_ids.extend(u.user_ids.into_iter().filter(|id| *id != user_id))
+                }
+                enums::UserPrivacySettingRule::RestrictUsers(u) => {
+                    deny_ids.extend(u.user_ids.into_iter().filter(|id| *id != user_id))
+                }
+                other => out.push(other),
+            }
+        }
+        if allow {
+            allow_ids.push(user_id);
+        } else {
+            deny_ids.push(user_id);
+        }
+        if !deny_ids.is_empty() {
+            out.insert(
+                0,
+                enums::UserPrivacySettingRule::RestrictUsers(
+                    types::UserPrivacySettingRuleRestrictUsers {
+                        user_ids: deny_ids,
+                    },
+                ),
+            );
+        }
+        if !allow_ids.is_empty() {
+            out.insert(
+                0,
+                enums::UserPrivacySettingRule::AllowUsers(
+                    types::UserPrivacySettingRuleAllowUsers {
+                        user_ids: allow_ids,
+                    },
+                ),
+            );
+        }
+        out
     }
 
     /// Read-only privacy summary: who can see phone/photo/status, who can

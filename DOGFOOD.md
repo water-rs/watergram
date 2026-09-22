@@ -200,11 +200,66 @@ Watergram plays downloaded video / voice-note / audio / animation files
 inline via `video_player` (unverified at runtime until real-login e2e;
 the semantic-test path only exercises the not-downloaded fallback).
 
-**Capture is genuinely absent.** Checked crates (registry sources,
-2026-09): `waterui-video*` (playback/session only), `waterkit-video*`
-(decode/container/streaming), `waterkit-audio` (output via cpal/rodio),
-`waterui-media` (Photo/LivePhoto/MediaPicker — no capture), waterui facade
-module list. No `Microphone`/`Camera`/capture view exists in 0.5.x, so
-voice-note and video-note *recording* cannot be implemented; request an
-audio-capture (and ideally camera) component. Video-message send is also
-blocked on `inputMessageVideoNote` needing a source file.
+**Capture APIs exist in waterkit; only the waterui view layer is
+missing.** Correcting the earlier note: `waterkit-audio 0.1.4` provides
+`AudioRecorderBuilder`/`AudioRecorder`/`InputDevice`/`AudioBuffer`
+(`multimedia/audio/src/recorder.rs`, desktop = cpal,
+`sys/desktop_record.rs`); `waterkit-camera 0.1.4` provides `Camera::list`/
+`Camera::open`, `CameraConfig`, `Frame::view()` (frame→wgpu texture),
+`Photo`, `Recording`. Watergram implements voice notes as
+cpal capture → `opus-pure` (pure-Rust RFC 6716 Opus + RFC 7845 Ogg) →
+`sendMessage` `InputMessageVoiceNote`, and video notes as
+nokhwa capture → wgpu texture → CPU readback → square crop →
+`waterkit-codec` H.264 (VA-API) → `waterkit-video-container` `VideoWriter`
+mp4 → `InputMessageVideoNote`.
+
+**Missing: a ready-made waterui capture view + a desktop recorder.** Two
+gaps had to be hand-assembled (src/capture.rs):
+
+1. No camera-preview widget. `Frame::view()` gives a wgpu texture, but
+   hydrolysis owns a bare `wgpu::Device` while `Camera::open` requires
+   `Arc<Device>` + `Arc<Queue>`, so the app's surface device can't be
+   shared with the camera. Hand-wired instead: a private
+   `wgpu::Instance`/`Device` on a dedicated capture thread, CPU readback
+   via `copy_texture_to_buffer` + `map_async`, frames pushed to the UI
+   through `waterui_image::reactive_image` (`Image` RGBA8). A facade
+   `CameraPreview`/`GpuSurface` view that hands `Arc<Device>` (or accepts
+   an external `Frame` stream) would remove ~200 lines of plumbing. Note
+   `Camera::frames()` returns a stream that *borrows* the camera, forcing
+   camera + stream to live on one thread behind an mpsc command channel —
+   an owned/`'static` frames API would compose better with
+   `spawn_local`.
+2. `Camera::recording()` is `CameraError::ControlUnsupported("recording
+   not supported on desktop")` — mobile-only. The mp4 encode path
+   (RGBA→NV12→`Encoder::new(H264)`→`VideoWriter`) was hand-rolled;
+   `encode_nv12` returns a one-shot *iterator* yielding a single
+   `Result<Vec<u8>>` rather than a per-frame stream, so each frame re-encodes
+   through a fresh iterator call — works, but a pull-based frame encoder
+   API would be more honest.
+
+**Observed on a device-less Linux VM (Ubuntu 22.04, no /dev/video*,
+/dev/snd, /dev/dri):**
+- `AudioRecorder::list_devices()` can return a non-empty list (cpal
+  enumerates the ALSA `default` PCM even with no hw backend), then
+  `recorder.start()` fails — `ALSA lib pcm.c:2664:
+  (snd_pcm_open_noupdate) Unknown PCM default` on stderr, `RecordError`
+  (OpenFailed/StartFailed) returned. The app surfaces the error verbatim
+  in the composer ("Capture" banner) and the mic button stays usable.
+- `Camera::list()` returns `Ok([])` → app shows `camera: no camera found`
+  in the video-note sheet and keeps Record/Send inert (no crash, no
+  panic from nokhwa).
+- `Encoder::new(H264)` opens VA-API by iterating DRM nodes; with no
+  /dev/dri it fails `CodecError::InitializationFailed`, so the video-note
+  encode path reports `encode: …` in-sheet. A software fallback exists
+  only behind a non-Linux cfg, so desktop Linux without GPU cannot make
+  video notes — worth flagging upstream.
+
+## ScrollController is Point-only — no per-item scrolling
+
+`waterui-layout 0.5.1` `ScrollController<T>` drives a scroll view through
+`scroll_to(Point)` pixel offsets and exposes only `target()`/`generation()`.
+There is no `scroll_to_item(key)`/`scroll_to_index` on `Lazy` collections,
+so Telegram's "jump to message" can only estimate the offset
+(avg row height × rows-from-bottom) and highlight the target bubble —
+good enough for nearby jumps, visibly off for tall media rows. A keyed
+scroll API (`Lazy::vstack(...).scroll_key(row.key)`) would make this exact.

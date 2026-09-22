@@ -8,6 +8,7 @@
 //! `!Send`), so updates flow through an `async-channel` and are drained by a
 //! `.task` future running on the UI executor.
 
+mod capture;
 mod state;
 mod td;
 mod views;
@@ -101,6 +102,7 @@ mod tests {
             reactions: "".into(),
             failed: false,
             pending: false,
+            highlighted: false,
             read_out: false,
             my_reaction: "".into(),
             styled: waterui::text::styled::StyledStr::empty(),
@@ -200,6 +202,111 @@ mod tests {
         app.query().label("Message").single().set_text(&mut app, "hello world");
         app.query().role(Role::BUTTON).label("Send").tap();
         assert_eq!(composer.get().to_string(), "");
+    }
+
+    /// Voice note: on a host with no mic the button stays usable and the
+    /// exact device error lands in `capture_error` (cpal DeviceNotFound or
+    /// "no input device" — either is surfaced verbatim, never swallowed).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn voice_record_button_handles_missing_device(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let rec = store.recording_voice.clone();
+        let err_b = store.capture_error.clone();
+        let caller = store.clone();
+        let mut app =
+            ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query()
+            .role(Role::BUTTON)
+            .label("Record voice note")
+            .tap();
+        // Either the recorder started (real mic present) or the exact
+        // device error surfaced — a listed-but-unopenable device lands on
+        // the second path (enumeration can succeed while open() fails).
+        if rec.get() {
+            caller.cancel_voice_record();
+            assert!(!rec.get());
+        } else {
+            let err = err_b.get().to_string();
+            assert!(!err.is_empty(), "missing/unopenable device must surface an error");
+        }
+    }
+
+    /// Video note: with no camera, the sheet opens and shows the camera
+    /// error instead of a preview.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn video_note_handles_missing_camera(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let open = store.video_note_open.clone();
+        let status_b = store.video_status.clone();
+        let caller = store.clone();
+        let mut app =
+            ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query()
+            .role(Role::BUTTON)
+            .label("Video note")
+            .tap();
+        assert!(open.get());
+        if crate::capture::camera_count() == 0 {
+            // Pump runs async; give the open thread a moment then read status.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let status = status_b.get().to_string();
+            assert!(
+                status.contains("camera") || status.contains("starting"),
+                "unexpected status: {status}"
+            );
+        }
+        caller.close_video_note();
+    }
+
+    /// Failed sends flip back to pending when the user taps the ✗ icon.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn resend_failed_marks_pending(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let mut m = msg(9, "was not delivered", true);
+        m.failed = true;
+        store.messages.set(vec![m]);
+        let msgs = store.messages.clone();
+        let caller = store.clone();
+        let mut app =
+            ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query().label("was not delivered").assert_exists();
+        caller.resend_failed(9);
+        let row = msgs.get().into_iter().next().unwrap();
+        assert!(row.pending && !row.failed);
+    }
+
+    /// 2FA sheet validates input before calling TDLib.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn twofa_requires_current_password(_ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_twofa();
+        store.save_twofa();
+        assert!(!store.twofa_note.get().to_string().is_empty());
+        assert!(store.twofa_open.get());
+    }
+
+    /// Per-user privacy exception merge: allow-list wins, denies drop out.
+    #[test]
+    fn privacy_exception_merge() {
+        use tdlib_rs::{enums::UserPrivacySettingRule as R, types};
+        let base = vec![
+            R::AllowContacts,
+            R::RestrictUsers(types::UserPrivacySettingRuleRestrictUsers {
+                user_ids: vec![5, 9],
+            }),
+        ];
+        let merged = crate::state::Store::merge_privacy_exception(base, 5, true);
+        // Allow rule first, user removed from deny list, base rule preserved.
+        assert!(matches!(merged[0], R::AllowUsers(_)));
+        assert!(merged.iter().any(|r| matches!(r, R::AllowContacts)));
+        let deny = merged.iter().find_map(|r| match r {
+            R::RestrictUsers(u) => Some(u.user_ids.clone()),
+            _ => None,
+        });
+        assert_eq!(deny, Some(vec![9]));
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
