@@ -190,14 +190,21 @@ Findings collected while building a real Telegram client (Watergram) on
   the stable workaround (not set in CI per maintainer request — the race
   stays visible).
 
-## waterui-media: no audio/video playback or capture components
+## Media capture: no audio/video recording components
 
-Verified against `waterui-media 0.5.1` sources: `src/` contains only
-`image.rs`, `live.rs` (LivePhoto), `media_picker.rs`, `photo.rs`, `url.rs`,
-`lib.rs`. There is **no audio player, no video player, and no capture API**
-(microphone / camera). Consequences for a messenger client: incoming voice
-and video messages cannot be played, voice-note/video-note recording is
-impossible, and photo attachments can only be shown as stills. Request:
-`Audio` / `Video` playback views plus `Microphone::record` / `Camera`
-capture surfaces (or document the intended bridge to host platform APIs).
-Blocks Watergram parity rows 语音消息 / 视频消息 / 媒体播放.
+Playback exists — `waterui-video 0.5.1` (`video_player`/`video`, facade
+features `video` + `video-gpu`; GPU decode path pulls `waterkit-video`,
+`cros-codecs` VA-API and `cpal`/`alsa-sys` — needs `libva-dev`,
+`libpipewire-0.3-dev`, `libspa-0.2-dev`, `libasound2-dev` on Ubuntu).
+Watergram plays downloaded video / voice-note / audio / animation files
+inline via `video_player` (unverified at runtime until real-login e2e;
+the semantic-test path only exercises the not-downloaded fallback).
+
+**Capture is genuinely absent.** Checked crates (registry sources,
+2026-09): `waterui-video*` (playback/session only), `waterkit-video*`
+(decode/container/streaming), `waterkit-audio` (output via cpal/rodio),
+`waterui-media` (Photo/LivePhoto/MediaPicker — no capture), waterui facade
+module list. No `Microphone`/`Camera`/capture view exists in 0.5.x, so
+voice-note and video-note *recording* cannot be implemented; request an
+audio-capture (and ideally camera) component. Video-message send is also
+blocked on `inputMessageVideoNote` needing a source file.
