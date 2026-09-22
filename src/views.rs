@@ -639,7 +639,10 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     store.load_members();
                 }
             }),
-            icon_button(send(), "Send", |store: Store| store.send()),
+            icon_button(send(), "Send", |store: Store| store.send()).context_menu((
+                "Send silently".action(|store: Store| store.send_silent()),
+                "Send in 1 hour".action(|store: Store| store.send_later(3600)),
+            )),
         ))
         .spacing(6.0)
         .padding_with((10.0, 8.0))
@@ -671,6 +674,10 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let reply_excerpt = row.reply_excerpt.clone();
     let has_reply = !reply_excerpt.is_empty();
     let body_text = row.text.clone();
+    let body_styled = row.styled.clone();
+    let has_styled = !body_styled.is_empty();
+    let webpage = row.webpage.clone();
+    let has_webpage = !webpage.is_empty();
     let has_text = !body_text.is_empty();
     let reactions = row.reactions.clone();
     let has_reactions = !reactions.is_empty();
@@ -692,7 +699,16 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             !row.outgoing && !row.sender.is_empty(),
             move || text(sender.clone()).caption().bold().foreground(Accent),
         ),
-        when(has_text, move || text(body_text.clone()).body()),
+        when(has_text, move || -> AnyView {
+            if has_styled {
+                text(body_styled.clone()).body().anyview()
+            } else {
+                text(body_text.clone()).body().anyview()
+            }
+        }),
+        when(has_webpage, move || {
+            text(webpage.clone()).caption().line_limit(TWO).muted()
+        }),
         hstack((
             when(has_reactions, move || text(reactions.clone()).caption()),
             spacer(),

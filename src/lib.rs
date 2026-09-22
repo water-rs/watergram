@@ -102,6 +102,8 @@ mod tests {
             pending: false,
             read_out: false,
             my_reaction: "".into(),
+            styled: waterui::text::styled::StyledStr::empty(),
+            webpage: "".into(),
         }
     }
 
@@ -389,5 +391,47 @@ mod tests {
             panic!()
         };
         assert_eq!(p.caption.unwrap().text, "cap");
+    }
+
+    #[test]
+    fn styled_entities_merge() {
+        use tdlib_rs::{enums::TextEntityType as T, types};
+        let ft = types::FormattedText {
+            text: "hello bold world".into(),
+            entities: vec![
+                types::TextEntity { offset: 6, length: 4, r#type: T::Bold },
+                types::TextEntity {
+                    offset: 6,
+                    length: 4,
+                    r#type: T::TextUrl(types::TextEntityTypeTextUrl {
+                        url: "https://x".into(),
+                    }),
+                },
+                types::TextEntity { offset: 11, length: 5, r#type: T::Italic },
+                types::TextEntity { offset: 11, length: 5, r#type: T::Underline },
+            ],
+        };
+        let chunks = crate::state::styled_from_formatted(&ft).into_chunks();
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].0.to_string(), "hello ");
+        assert!(chunks[0].1.is_plain());
+        assert_eq!(chunks[1].0.to_string(), "bold");
+        // Overlapping Bold + TextUrl merge into one styled chunk.
+        assert!(!chunks[1].1.is_plain());
+        assert_eq!(chunks[3].0.to_string(), "world");
+        assert!(chunks[3].1.italic && chunks[3].1.underline);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn link_preview_line_shows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        let mut m = msg(1, "check this", false);
+        m.webpage = "Example — Title · desc".into();
+        store.messages.set(vec![m]);
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query().label("Example — Title · desc").assert_exists();
     }
 }

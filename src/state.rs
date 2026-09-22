@@ -13,7 +13,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
+use waterui::color::Srgb;
 use waterui::form::secure::Secure;
+use waterui::text::styled::{Style, StyledStr};
 use waterui::layout::{Point, ScrollController};
 use waterui::media::Url;
 use waterui::prelude::*;
@@ -152,6 +154,10 @@ pub struct MessageRow {
     pub reactions: Str,
     /// Emoji the current user has chosen on this message, if any.
     pub my_reaction: Str,
+    /// Rich-text body; empty when the message has no formatting entities.
+    pub styled: StyledStr,
+    /// Link-preview card line (site — title · description).
+    pub webpage: Str,
     pub failed: bool,
     pub pending: bool,
 }
@@ -284,6 +290,108 @@ fn fmt_time(ts: i32) -> Str {
         })
         .unwrap_or_default()
         .into()
+}
+
+/// Convert a TDLib `FormattedText` (UTF-16 entity offsets) into a
+/// `StyledStr`: bold/italic/underline/strike/mono, spoiler as a black
+/// block, links in accent blue, quotes on a light background.
+pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
+    let mut styled = StyledStr::empty();
+    if ft.entities.is_empty() {
+        styled.push_str(ft.text.clone());
+        return styled;
+    }
+    // UTF-16 unit index -> byte offset, mapping entity bounds exactly.
+    let mut units: Vec<usize> = Vec::with_capacity(ft.text.len() + 1);
+    let mut u = 0usize;
+    for (bi, ch) in ft.text.char_indices() {
+        while units.len() <= u {
+            units.push(bi);
+        }
+        u += ch.len_utf16();
+    }
+    while units.len() <= u {
+        units.push(ft.text.len());
+    }
+    let byte_at = |u16: i32| units[u16.max(0) as usize];
+
+    let mut cuts: Vec<usize> = vec![0, ft.text.len()];
+    for e in &ft.entities {
+        cuts.push(byte_at(e.offset));
+        cuts.push(byte_at(e.offset + e.length));
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    for w in cuts.windows(2) {
+        let (b0, b1) = (w[0], w[1]);
+        if b0 == b1 {
+            continue;
+        }
+        let seg = &ft.text[b0..b1];
+        let (mut bold, mut italic, mut mono) = (false, false, false);
+        let (mut under, mut strike, mut spoiler) = (false, false, false);
+        let (mut link, mut quote) = (false, false);
+        for e in &ft.entities {
+            let (s, t) = (byte_at(e.offset), byte_at(e.offset + e.length));
+            if s >= b1 || t <= b0 {
+                continue;
+            }
+            match e.r#type {
+                enums::TextEntityType::Bold => bold = true,
+                enums::TextEntityType::Italic => italic = true,
+                enums::TextEntityType::Underline => under = true,
+                enums::TextEntityType::Strikethrough => strike = true,
+                enums::TextEntityType::Spoiler => spoiler = true,
+                enums::TextEntityType::Code
+                | enums::TextEntityType::Pre
+                | enums::TextEntityType::PreCode(_) => mono = true,
+                enums::TextEntityType::BlockQuote
+                | enums::TextEntityType::ExpandableBlockQuote => quote = true,
+                enums::TextEntityType::Url
+                | enums::TextEntityType::TextUrl(_)
+                | enums::TextEntityType::EmailAddress
+                | enums::TextEntityType::PhoneNumber
+                | enums::TextEntityType::Mention
+                | enums::TextEntityType::MentionName(_)
+                | enums::TextEntityType::Hashtag
+                | enums::TextEntityType::Cashtag
+                | enums::TextEntityType::BotCommand
+                | enums::TextEntityType::BankCardNumber
+                | enums::TextEntityType::MediaTimestamp(_) => link = true,
+                _ => {}
+            }
+        }
+        let mut st = Style::new();
+        if bold {
+            st = st.bold();
+        }
+        if italic {
+            st = st.italic();
+        }
+        if under {
+            st = st.underline();
+        }
+        if strike {
+            st = st.strikethrough();
+        }
+        if mono {
+            st = st.monospaced();
+        }
+        if link {
+            st = st.foreground(Srgb::try_from_hex("#1F6FC0").unwrap());
+        }
+        if spoiler {
+            st = st
+                .foreground(Srgb::BLACK)
+                .background(Srgb::BLACK);
+        }
+        if quote {
+            st = st.background(Srgb::try_from_hex("#E8E8E8").unwrap());
+        }
+        styled.push(seg.to_string(), st);
+    }
+    styled
 }
 
 fn position_in<'a>(chat: &'a types::Chat, list: &enums::ChatList) -> Option<&'a types::ChatPosition> {
@@ -689,6 +797,25 @@ impl Store {
                 .map(|c| m.id <= c.last_read_outbox_message_id)
                 .unwrap_or(false);
         let (reactions, my_reaction) = Self::reactions_info(m);
+        let (styled, webpage) = if let enums::MessageContent::MessageText(t) = &m.content {
+            (
+                styled_from_formatted(&t.text),
+                t.link_preview
+                    .as_ref()
+                    .map(|p| {
+                        let desc = p.description.text.trim();
+                        if desc.is_empty() {
+                            format!("{} — {}", p.site_name, p.title)
+                        } else {
+                            format!("{} — {} · {}", p.site_name, p.title, desc)
+                        }
+                    })
+                    .unwrap_or_default()
+                    .into(),
+            )
+        } else {
+            (StyledStr::empty(), Str::from(""))
+        };
         MessageRow {
             id: m.id,
             sender: self.sender_name(&m.sender_id),
@@ -696,6 +823,8 @@ impl Store {
             time: fmt_time(m.date),
             outgoing: m.is_outgoing,
             read_out,
+            styled,
+            webpage,
             can_edit: m.is_outgoing,
             reply_excerpt,
             media_file,
@@ -1721,6 +1850,34 @@ impl Store {
     }
 
     pub fn send(&self) {
+        self.send_opt(None);
+    }
+
+    /// Send without a notification for the recipient.
+    pub fn send_silent(&self) {
+        self.send_opt(Some(types::MessageSendOptions {
+            disable_notification: true,
+            ..Default::default()
+        }));
+    }
+
+    /// Schedule the message `secs` from now.
+    pub fn send_later(&self, secs: i32) {
+        let at = chrono::Local::now().timestamp() + i64::from(secs);
+        self.send_opt(Some(types::MessageSendOptions {
+            scheduling_state: Some(enums::MessageSchedulingState::SendAtDate(
+                types::MessageSchedulingStateSendAtDate {
+                    send_date: at as i32,
+                    repeat_period: 0,
+                },
+            )),
+            ..Default::default()
+        }));
+    }
+
+    /// Shared composer send path. `options` applies to text sends only —
+    /// attachments always go immediately for now.
+    fn send_opt(&self, options: Option<types::MessageSendOptions>) {
         if !self.attach.get().is_empty() {
             self.send_attachment();
             return;
@@ -1772,7 +1929,7 @@ impl Store {
                 chat_id,
                 None,
                 reply,
-                None,
+                options,
                 enums::InputMessageContent::InputMessageText(
                     types::InputMessageText {
                         text: types::FormattedText {

@@ -52,9 +52,9 @@
 | Reactions 展示 | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
 | Reactions 发送 | 🟡 | `addMessageReaction`/`removeMessageReaction`（菜单固定 👍/❤️，无表情选择器） | — |
 | 发送中/失败状态 | 🟡 | `updateMessageSendSucceeded`/`Failed`（行内） | — |
-| 定时消息 / 静默发送 | ❌ | `sendMessage(scheduling_state)` | — |
-| 链接预览 | ❌ | `getWebPagePreview`/`link_preview` | — |
-| 富文本实体（粗/斜/剧透/超链） | ❌ | `formattedText.entities`（当前只拼 plain text） | — |
+| 定时消息 / 静默发送 | ✅ | `sendMessage(MessageSendOptions{disable_notification,scheduling_state=SendAtDate})` — 发送按钮右键 | — (send_opt 路径） |
+| 链接预览 | ✅ | `MessageText.link_preview` → 站内一行卡片（site—title·desc) | `link_preview_line_shows` |
+| 富文本实体（粗/斜/剧透/超链） | ✅ | `FormattedText.entities` → `StyledStr`（粗/斜/下划/删除/剧透/代码/引用/链接，UTF-16→byte 映射+重叠合并） | `styled_entities_merge` |
 | 转发带出处徽标 | 🟡 | `m.forward_info`（仅行内标签） | — |
 
 ## 4. 媒体与附件
