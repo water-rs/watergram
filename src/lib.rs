@@ -105,6 +105,7 @@ mod tests {
             my_reaction: "".into(),
             styled: waterui::text::styled::StyledStr::empty(),
             webpage: "".into(),
+            forwarded_from: "".into(),
         }
     }
 

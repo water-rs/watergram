@@ -908,6 +908,8 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let has_styled = !body_styled.is_empty();
     let webpage = row.webpage.clone();
     let has_webpage = !webpage.is_empty();
+    let fwd = row.forwarded_from.clone();
+    let has_fwd = !fwd.is_empty();
     let has_text = !body_text.is_empty();
     let reactions = row.reactions.clone();
     let has_reactions = !reactions.is_empty();
@@ -921,6 +923,9 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let r5 = row.id;
 
     let bubble = vstack((
+        when(has_fwd, move || {
+            text(fwd.clone()).italic(true).caption().line_limit(ONE).muted()
+        }),
         when(has_reply, move || {
             text(reply_excerpt.clone()).caption().line_limit(TWO).muted()
         }),

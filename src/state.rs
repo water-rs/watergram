@@ -161,6 +161,8 @@ pub struct MessageRow {
     pub styled: StyledStr,
     /// Link-preview card line (site — title · description).
     pub webpage: Str,
+    /// "Forwarded from X" attribution, empty when not forwarded.
+    pub forwarded_from: Str,
     pub failed: bool,
     pub pending: bool,
 }
@@ -785,6 +787,23 @@ impl Store {
             .computed()
     }
 
+    fn user_name(&self, user_id: i64) -> String {
+        self.users
+            .borrow()
+            .get(&user_id)
+            .map(|u| format!("{} {}", u.first_name, u.last_name).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "User".to_string())
+    }
+
+    fn chat_name(&self, chat_id: i64) -> String {
+        self.chat_objs
+            .borrow()
+            .get(&chat_id)
+            .map(|c| c.title.clone())
+            .unwrap_or_else(|| "Chat".to_string())
+    }
+
     fn sender_name(&self, sender: &enums::MessageSender) -> Str {
         match sender {
             enums::MessageSender::User(u) => self
@@ -1028,6 +1047,28 @@ impl Store {
         } else {
             (StyledStr::empty(), Str::from(""))
         };
+        let forwarded_from = m
+            .forward_info
+            .as_ref()
+            .map(|f| match &f.origin {
+                enums::MessageOrigin::User(u) => format!(
+                    "Forwarded from {}",
+                    self.user_name(u.sender_user_id)
+                )
+                .into(),
+                enums::MessageOrigin::HiddenUser(h) => {
+                    format!("Forwarded from {}", h.sender_name).into()
+                }
+                enums::MessageOrigin::Chat(c) => {
+                    format!("Forwarded from {}", self.chat_name(c.sender_chat_id))
+                        .into()
+                }
+                enums::MessageOrigin::Channel(c) => {
+                    format!("Forwarded from {}", self.chat_name(c.chat_id))
+                        .into()
+                }
+            })
+            .unwrap_or_else(|| Str::from(""));
         MessageRow {
             id: m.id,
             sender: self.sender_name(&m.sender_id),
@@ -1037,6 +1078,7 @@ impl Store {
             read_out,
             styled,
             webpage,
+            forwarded_from,
             can_edit: m.is_outgoing,
             reply_excerpt,
             media_file,
