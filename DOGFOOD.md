@@ -156,12 +156,36 @@ Findings collected while building a real Telegram client (Watergram) on
   (llvmpipe compute actually works — the Material 3 auth screens draw
   correctly, just slowly). Worth documenting as the standard way to run
   hydrolysis in CI/headless instead of "diagnostics only".
-- **Parallel `#[waterui::test]` mounts corrupt the heap** (waterui-testing
-  0.5.1 + hydrolysis-m3 0.3.1, wgpu software adapter): with 20 UI-mounting
-  tests, `cargo test --lib` (default parallelism) aborts with
-  `malloc_consolidate(): unaligned fastbin chunk detected` / `double free or
-  corruption` at a rate of roughly 2-in-3 runs; `--test-threads=1` is stable
-  across repeated runs. Repro: `cargo test --lib` in watergram (any set of
-  `ui.mount` tests run in parallel). Looks like shared renderer/theme state
-  is not thread-safe under concurrent mounts. Workaround used in this repo's
-  CI: `RUST_TEST_THREADS=1`.
+- **Parallel `#[waterui::test]` mounts corrupt the heap — root-caused via
+  ThreadSanitizer** (waterui-testing 0.5.1 + hydrolysis-m3 0.3.1 + fontique
+  via hydrolysis test path + xcap 0.9.8/waterkit-screen 0.1.4):
+  `cargo test --lib` (default parallelism) intermittently aborts with
+  `malloc_consolidate(): unaligned fastbin chunk detected` /
+  `double free or corruption` (~1-in-10 on this machine, was ~2-in-3 with
+  more mount-heavy tests). ASan (nightly `-Zsanitizer=address`,
+  `-Zbuild-std`) reproduces nothing — 8/8 clean runs — because its allocator
+  replaces the glibc arena the bug corrupts. **TSan
+  (`-Zsanitizer=thread -Zbuild-std`) identifies the races directly**:
+
+  1. `fontique::collection::System::new` → `Collection::new`, called from
+     `hydrolysis::runner::fonts::deterministic_test_fonts` inside
+     `SemanticRuntime::new_for_tests` (via
+     `waterui_testing::app::UiBuilder::mount_semantic`). Two test threads
+     mounting concurrently race inside libfontconfig on shared global state:
+     `FcObjectSetBuild` (strcmp/strdup/malloc), `FcDirCacheLoad`
+     (pthread_mutex_lock), `FcAtomicDestroy` (malloc → free). Fontconfig's
+     first-use config build is not serialized → heap corruption. 4 of the
+     5 TSan reports are this path.
+  2. `xcb::base::Connection::connect` → `XauGetBestAuthByAddr` →
+     `XauFileName`/`fopen`, called from `xcap::monitor::Monitor::all` ←
+     `waterkit_screen::max_refresh_rate_hz` ←
+     `waterui_internal::runtime::task::runtime_guard::MonitoredLocalExecutor::
+     with_config_and_probes`. libXau's static filename buffer races with
+     another thread's malloc — same class of unsynchronized native init.
+
+  Fix belongs in framework: serialize `deterministic_test_fonts` /
+  `fontique::System` construction (OnceLock/mutex) and gate
+  `waterkit_screen::max_refresh_rate` X-probing behind OnceLock on the
+  headless/test path. Until then `cargo test --lib -- --test-threads=1` is
+  the stable workaround (not set in CI per maintainer request — the race
+  stays visible).
