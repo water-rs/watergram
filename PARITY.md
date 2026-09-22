@@ -70,7 +70,7 @@
 | GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（同贴纸面板，缩略图） | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | 🟡 | `downloadFile` → `file_signal`（图片经 Photo 渲染；视频/文件为标签占位） | `media_slot` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
-| 相册多选发送 | ❌ | `sendMessageAlbum` | — |
+| 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
 
 ## 5. 频道与群组
 
@@ -100,7 +100,7 @@
 | 深色模式 | ✅ | env `ColorScheme` | `dark_mode_toggle` |
 | 账号信息展示 | ✅ | `getMe` | `settings_shows_account` |
 | 通知设置（全局/按聊天） | 🟡 | `setChatNotificationSettings`（仅单聊切换） | — |
-| 隐私设置 | ❌ | `getUserPrivacySettingRules`/`setUserPrivacySettingRules` | — |
+| 隐私设置 | 🟡 | `getUserPrivacySettingRules` 只读摘要（手机/头像/在线/群邀请 → 所有人/联系人/无人；规则编辑器未做） | `privacy_audience_mapping` |
 | 两步验证管理 | 🟡 | `getPasswordState` 状态展示（SRP 设置未做） | `settings_shows_sections` |
 | 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`/`terminateAllOtherSessions` | `settings_shows_sections` |
 | 语言 | ❌ | `setOption(language_pack_id)` | — |
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：48 项 ｜ 部分 🟡：12 项 ｜ 未实现 ❌：7 项
+- 已实现 ✅：49 项 ｜ 部分 🟡：13 项 ｜ 未实现 ❌：5 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）

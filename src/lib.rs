@@ -476,4 +476,47 @@ mod tests {
         let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query().role(Role::BUTTON).label("New link").assert_exists();
     }
+
+    #[test]
+    fn attachment_planning() {
+        use crate::state::AttachmentPlan;
+        match Store::plan_attachments(
+            vec!["/a.png".into(), "/b.png".into(), "/c.mp4".into()],
+            "cap".into(),
+        ) {
+            AttachmentPlan::Album(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].1, "cap");
+                assert_eq!(items[1].1, "");
+            }
+            AttachmentPlan::Singles(_) => panic!("3 media files must go as one album"),
+        }
+        match Store::plan_attachments(vec!["/a.zip".into(), "/b.png".into()], "cap".into()) {
+            AttachmentPlan::Singles(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].1, "cap");
+                assert_eq!(items[1].1, "");
+            }
+            AttachmentPlan::Album(_) => panic!("mixed types must not album"),
+        }
+        match Store::plan_attachments(vec!["/a.png".into()], "cap".into()) {
+            AttachmentPlan::Singles(items) => assert_eq!(items[0].1, "cap"),
+            AttachmentPlan::Album(_) => panic!("one file is not an album"),
+        }
+    }
+
+    #[test]
+    fn privacy_audience_mapping() {
+        use crate::state::privacy_audience;
+        use tdlib_rs::enums::UserPrivacySettingRule as R;
+        assert_eq!(privacy_audience(&[R::AllowAll]), "Everyone");
+        assert_eq!(privacy_audience(&[R::RestrictAll]), "Nobody");
+        assert_eq!(privacy_audience(&[R::AllowContacts]), "My contacts");
+        assert_eq!(privacy_audience(&[R::RestrictAll, R::AllowContacts]), "Nobody");
+        assert_eq!(privacy_audience(&[]), "Default");
+        assert_eq!(
+            privacy_audience(&[R::AllowContacts, R::AllowPremiumUsers]),
+            "Custom"
+        );
+    }
 }

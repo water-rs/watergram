@@ -22,7 +22,7 @@ use waterui::widget::condition::when;
 use waterui_barcode::Barcode;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{ChatRow, MemberRow, MessageRow, Route, Screen, SessionRow, StickerItem, Store};
+use crate::state::{ChatRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
 use mdi::account;
 use mdi::account_group;
 use mdi::alert_circle;
@@ -934,6 +934,16 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 spacer(),
                 text!("{twofa}", twofa = store.twofa.clone()).muted(),
             )),
+            Lazy::vstack(ForEach::new(
+                SignalCollection::new(store.privacy_rows.clone()),
+                move |row: PrivacyRow| {
+                    hstack((
+                        text(row.setting.clone()).caption(),
+                        spacer(),
+                        text(row.audience.clone()).caption().muted(),
+                    ))
+                },
+            )),
             hstack((
                 text("Active sessions").caption().muted(),
                 spacer(),
@@ -998,6 +1008,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             store.load_sessions();
             store.load_twofa();
             store.load_storage();
+            store.load_privacy();
         }
     });
     NavigationView::new("Settings", content)

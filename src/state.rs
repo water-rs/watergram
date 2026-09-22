@@ -281,6 +281,24 @@ pub struct Store {
     pub invite_link: Binding<Str>,
     /// Storage-statistics summary line in Settings.
     pub storage_summary: Binding<Str>,
+    /// Read-only privacy rule summary rows (setting label -> audience).
+    pub privacy_rows: Binding<Vec<PrivacyRow>>,
+}
+
+/// One row of the read-only privacy summary in Settings.
+#[derive(Clone, Identifiable)]
+pub struct PrivacyRow {
+    /// Setting name as the row key.
+    #[id]
+    pub setting: Str,
+    /// Who can see it: "Everyone" / "My contacts" / "Nobody" / "Custom".
+    pub audience: Str,
+}
+
+/// How the composer's picked files are delivered.
+pub(crate) enum AttachmentPlan {
+    Album(Vec<(String, String)>),
+    Singles(Vec<(String, String)>),
 }
 
 /// One cell in the sticker/GIF picker.
@@ -435,6 +453,30 @@ pub struct MemberRow {
     pub sender: enums::MessageSender,
 }
 
+/// Collapse a TDLib privacy rule list into one audience label. The rule
+/// semantics are allow-overlapping-until-restrict; this display version
+/// reports the dominant audience only.
+pub(crate) fn privacy_audience(rules: &[enums::UserPrivacySettingRule]) -> &'static str {
+    use enums::UserPrivacySettingRule as R;
+    if rules.iter().any(|r| matches!(r, R::RestrictAll)) {
+        return "Nobody";
+    }
+    if rules.iter().any(|r| matches!(r, R::AllowAll)) {
+        return "Everyone";
+    }
+    let allow_contacts = rules.iter().any(|r| matches!(r, R::AllowContacts));
+    let restrict_contacts = rules.iter().any(|r| matches!(r, R::RestrictContacts));
+    if allow_contacts && !restrict_contacts && rules.iter().all(|r| {
+        matches!(r, R::AllowContacts | R::RestrictAll | R::RestrictUsers(_))
+    }) {
+        return "My contacts";
+    }
+    if rules.is_empty() {
+        return "Default";
+    }
+    "Custom"
+}
+
 impl Store {
     /// The chat list currently shown in the sidebar.
     fn active_list(&self) -> enums::ChatList {
@@ -520,6 +562,7 @@ impl Store {
             nc_last: Binding::container(Str::from("")),
             invite_link: Binding::container(Str::from("")),
             storage_summary: Binding::container(Str::from("")),
+            privacy_rows: Binding::<Vec<PrivacyRow>>::default(),
         }
     }
 
@@ -2066,12 +2109,15 @@ impl Store {
     pub fn send_attachment(&self) {
         let chat_id = self.open_chat.get();
         let urls = self.attach.get();
-        let Some(url) = urls.first() else { return };
-        if chat_id == 0 {
+        if chat_id == 0 || urls.is_empty() {
             return;
         }
-        let path = url.path().to_string();
-        if path.is_empty() {
+        let paths: Vec<String> = urls
+            .iter()
+            .map(|u| u.path().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if paths.is_empty() {
             return;
         }
         let caption = self.composer.get().to_string();
@@ -2079,17 +2125,65 @@ impl Store {
         self.composer.set_from("");
         let client = self.client_id;
         spawn_local(async move {
-            let _ = functions::send_message(
-                chat_id,
-                None,
-                None,
-                None,
-                Self::attachment_content(path, caption),
-                client,
-            )
-            .await;
+            match Self::plan_attachments(paths, caption) {
+                AttachmentPlan::Album(items) => {
+                    let contents = items
+                        .into_iter()
+                        .map(|(path, caption)| Self::attachment_content(path, caption))
+                        .collect();
+                    let _ = functions::send_message_album(
+                        chat_id, None, None, None, contents, client,
+                    )
+                    .await;
+                }
+                AttachmentPlan::Singles(items) => {
+                    for (path, caption) in items {
+                        let _ = functions::send_message(
+                            chat_id,
+                            None,
+                            None,
+                            None,
+                            Self::attachment_content(path, caption),
+                            client,
+                        )
+                        .await;
+                    }
+                }
+            }
         })
         .detach();
+    }
+
+    /// Decide how to deliver the composer's picked files: two or more
+    /// image/video files go out together as one album (caption on the
+    /// first item); anything else sends as individual messages, caption
+    /// on the first one.
+    pub(crate) fn plan_attachments(paths: Vec<String>, caption: String) -> AttachmentPlan {
+        let is_media = |p: &str| {
+            matches!(
+                p.rsplit('.').next().unwrap_or("").to_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "bmp" | "mp4" | "mov" | "mkv" | "webm" | "avi"
+                    | "m4v"
+            )
+        };
+        let media_count = paths.iter().filter(|p| is_media(p)).count();
+        if paths.len() == media_count && media_count >= 2 {
+            let items = paths
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| (p, if i == 0 { caption.clone() } else { String::new() }))
+                .collect();
+            return AttachmentPlan::Album(items);
+        }
+        let mut caption_left = caption;
+        let items = paths
+            .into_iter()
+            .map(|p| {
+                let c = std::mem::take(&mut caption_left);
+                (p, c)
+            })
+            .collect();
+        AttachmentPlan::Singles(items)
     }
 
     pub fn typing_ping(&self) {
@@ -2586,6 +2680,40 @@ impl Store {
             {
                 store.load_storage();
             }
+        })
+        .detach();
+    }
+
+    /// Read-only privacy summary: who can see phone/photo/status, who can
+    /// invite to chats. Rule evaluation is a simplified display mapping —
+    /// AllowAll/RestrictAll dominate; AllowContacts (without an opposing
+    /// Restrict rule) reads as "My contacts"; anything mixed reads
+    /// "Custom" so the row never overstates access.
+    pub fn load_privacy(&self) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let keys: [(enums::UserPrivacySetting, &str); 4] = [
+                (enums::UserPrivacySetting::ShowPhoneNumber, "Phone number"),
+                (enums::UserPrivacySetting::ShowProfilePhoto, "Profile photo"),
+                (enums::UserPrivacySetting::ShowStatus, "Last seen & online"),
+                (enums::UserPrivacySetting::AllowChatInvites, "Group invites"),
+            ];
+            let mut rows = Vec::new();
+            for (setting, label) in keys {
+                if let Ok(enums::UserPrivacySettingRules::UserPrivacySettingRules(rs)) =
+                    functions::get_user_privacy_setting_rules(setting, client).await
+                {
+                    rows.push(PrivacyRow {
+                        setting: label.into(),
+                        audience: privacy_audience(&rs.rules).into(),
+                    });
+                }
+            }
+            store.privacy_rows.set(rows);
         })
         .detach();
     }
