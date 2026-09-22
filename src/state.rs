@@ -192,7 +192,7 @@ pub enum Route {
 #[state]
 #[derive(Clone)]
 pub struct Store {
-    pub client_id: i32,
+    pub client_id: Cell<i32>,
     pub screen: Binding<Screen>,
     pub dark: Binding<bool>,
     // auth form
@@ -308,6 +308,9 @@ pub struct Store {
     pub folder_channels: Binding<bool>,
     /// Folder being edited; 0 = creating a new one.
     pub editing_folder: Binding<i32>,
+    /// Account switcher rows + dropdown state.
+    pub accounts: Binding<Vec<AccountRow>>,
+    pub accounts_open: Binding<bool>,
 }
 
 /// One chat folder tab in the sidebar strip.
@@ -319,6 +322,15 @@ pub struct FolderRow {
     pub title: Str,
     /// Currently selected tab (drives accent styling).
     pub active: bool,
+}
+
+/// A signed-in TDLib client in the account switcher.
+#[derive(Clone, Identifiable)]
+pub struct AccountRow {
+    /// TDLib client id (also the row key).
+    #[id]
+    pub id: i32,
+    pub label: Str,
 }
 
 /// Peer profile card for the Profile route.
@@ -543,7 +555,7 @@ impl Store {
 
     pub fn new(client_id: i32) -> Self {
         Self {
-            client_id,
+            client_id: Cell::new(client_id),
             screen: Binding::container(Screen::Loading),
             dark: Binding::bool(false),
             api_id: Binding::container(Str::from("")),
@@ -629,12 +641,15 @@ impl Store {
             folder_groups: Binding::bool(true),
             folder_channels: Binding::bool(true),
             editing_folder: Binding::i32(0),
+            accounts: Binding::<Vec<AccountRow>>::default(),
+            accounts_open: Binding::bool(false),
         }
     }
 
     /// Kick off the authorization flow once the view is mounted.
     pub fn start(&self) {
-        let client = self.client_id;
+        self.restore_accounts();
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::get_authorization_state(client).await;
         })
@@ -687,7 +702,7 @@ impl Store {
             && !file.local.is_downloading_active
             && file.local.can_be_downloaded
         {
-            let (client, id) = (self.client_id, file.id);
+            let (client, id) = (self.client_id.get(), file.id);
             spawn_local(async move {
                 let _ = functions::download_file(id, 8, 0, 0, false, client).await;
             })
@@ -698,7 +713,7 @@ impl Store {
     /// Same as `want_file` but resolves the `File` object through `getFile`
     /// first — message content only carries raw file ids.
     pub fn want_file_id(&self, file_id: i32) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let files = self.files.clone();
         let version = self.files_version.clone();
         spawn_local(async move {
@@ -1147,7 +1162,12 @@ impl Store {
 
     /// The one big dispatch — runs on the UI executor for every Update.
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
-    pub fn update(&self, u: enums::Update) {
+    pub fn update(&self, u: enums::Update, client: i32) {
+        if client != self.client_id.get() {
+            // Updates belonging to a background (non-active) account are
+            // dropped; switching accounts re-queries that client's state.
+            return;
+        }
         match u {
             enums::Update::AuthorizationState(s) => {
                 self.on_auth_state(s.authorization_state)
@@ -1354,7 +1374,7 @@ impl Store {
                         self.scroll_bottom();
                     }
                     if !m.is_outgoing {
-                        let (client, chat_id, mid) = (self.client_id, m.chat_id, m.id);
+                        let (client, chat_id, mid) = (self.client_id.get(), m.chat_id, m.id);
                         spawn_local(async move {
                             let _ = functions::view_messages(
                                 chat_id,
@@ -1399,7 +1419,7 @@ impl Store {
             }
             enums::Update::MessageEdited(u) => {
                 if u.chat_id == self.open_chat.get() {
-                    let client = self.client_id;
+                    let client = self.client_id.get();
                     let store = self.clone();
                     spawn_local(async move {
                         if let Ok(enums::Message::Message(m)) =
@@ -1502,6 +1522,7 @@ impl Store {
                 self.busy.set(false);
                 self.screen.set(Screen::Main);
                 self.after_login();
+                self.refresh_account_label();
             }
             A::LoggingOut | A::Closing => {
                 self.busy.set(true);
@@ -1515,12 +1536,18 @@ impl Store {
     }
 
     fn set_tdlib_parameters(&self, cfg: Config) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let db_root = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("watergram");
-        let db = db_root.join("db").to_string_lossy().to_string();
-        let files = db_root.join("files").to_string_lossy().to_string();
+        let db = db_root
+            .join(format!("db_{}", self.client_id.get()))
+            .to_string_lossy()
+            .to_string();
+        let files = db_root
+            .join(format!("files_{}", self.client_id.get()))
+            .to_string_lossy()
+            .to_string();
         let _ = std::fs::create_dir_all(&db_root);
         self.screen.set(Screen::Loading);
         let store = self.clone();
@@ -1556,7 +1583,7 @@ impl Store {
     }
 
     fn after_login(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::User::User(u)) = functions::get_me(client).await {
@@ -1623,7 +1650,7 @@ impl Store {
         }
         self.busy.set(true);
         self.auth_note.set_from("");
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             match functions::set_authentication_phone_number(phone, None, client)
@@ -1644,7 +1671,7 @@ impl Store {
     pub fn request_qr(&self) {
         self.busy.set(true);
         self.auth_note.set_from("");
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if let Err(e) =
@@ -1665,7 +1692,7 @@ impl Store {
             return;
         }
         self.busy.set(true);
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             match functions::check_authentication_code(code, client).await {
@@ -1687,7 +1714,7 @@ impl Store {
             return;
         }
         self.busy.set(true);
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             match functions::check_authentication_password(pw, client).await {
@@ -1711,7 +1738,7 @@ impl Store {
         }
         let last = self.last_name.get().to_string();
         self.busy.set(true);
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if let Err(e) = functions::register_user(first, last, false, client).await {
@@ -1726,7 +1753,7 @@ impl Store {
 
     pub fn logout(&self) {
         self.busy.set(true);
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::log_out(client).await;
         })
@@ -1738,7 +1765,7 @@ impl Store {
         // forwardMessages instead of opening the chat.
         if let Some((from, msg_id)) = self.forward_message.get() {
             self.forward_message.set(None);
-            let client = self.client_id;
+            let client = self.client_id.get();
             spawn_local(async move {
                 let _ = functions::forward_messages(
                     chat_id,
@@ -1786,11 +1813,11 @@ impl Store {
             self.composer.set_from("");
         }
         self.members_open.set(false);
-        if self.client_id == 0 {
+        if self.client_id.get() == 0 {
             // Unit-test store: no TDLib client to talk to.
             return;
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if prev != 0 {
@@ -1806,7 +1833,7 @@ impl Store {
     /// Fetch the chat's pinned message into `pinned_label`/`pinned_id`.
     #[allow(if_else_view)] // string pick, not a view
     async fn refresh_pinned(&self, chat_id: i64) {
-        match functions::get_chat_pinned_message(chat_id, self.client_id).await {
+        match functions::get_chat_pinned_message(chat_id, self.client_id.get()).await {
             Ok(enums::Message::Message(m)) => {
                 let (t, _, label, _) = Self::content_preview(&m.content);
                 self.pinned_id.set(m.id);
@@ -1822,7 +1849,7 @@ impl Store {
 
     pub fn pin_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if functions::pin_chat_message(chat_id, message_id, false, false, client)
@@ -1837,7 +1864,7 @@ impl Store {
 
     pub fn unpin_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if functions::unpin_chat_message(chat_id, message_id, client)
@@ -1857,7 +1884,7 @@ impl Store {
         if chat_id == 0 {
             return;
         }
-        let (client, mid) = (self.client_id, row.id);
+        let (client, mid) = (self.client_id.get(), row.id);
         let emoji = emoji.to_string();
         let chosen = row.my_reaction.as_str() == emoji;
         let rt = enums::ReactionType::Emoji(types::ReactionTypeEmoji { emoji });
@@ -1882,7 +1909,7 @@ impl Store {
             .get(&chat_id)
             .map(|c| c.is_marked_as_unread)
             .unwrap_or(false);
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ =
                 functions::toggle_chat_is_marked_as_unread(chat_id, !current, client)
@@ -1902,7 +1929,7 @@ impl Store {
             self.chat_search_results.set(Vec::new());
             return;
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::FoundChatMessages::FoundChatMessages(found)) =
@@ -1946,7 +1973,7 @@ impl Store {
                 -20,
                 40,
                 false,
-                store.client_id,
+                store.client_id.get(),
             )
             .await
             {
@@ -1972,7 +1999,7 @@ impl Store {
             offset,
             50,
             false,
-            self.client_id,
+            self.client_id.get(),
         )
         .await
         {
@@ -2004,7 +2031,7 @@ impl Store {
             if let Some(last) = msgs.messages.iter().flatten().next()
                 && !last.is_outgoing
             {
-                let client = self.client_id;
+                let client = self.client_id.get();
                 let mid = last.id;
                 spawn_local(async move {
                     let _ =
@@ -2080,7 +2107,7 @@ impl Store {
             self.editing.set(None);
             self.composer.set_from("");
             self.drafts.borrow_mut().remove(&chat_id);
-            let client = self.client_id;
+            let client = self.client_id.get();
             spawn_local(async move {
                 let _ = functions::edit_message_text(
                     chat_id,
@@ -2112,7 +2139,7 @@ impl Store {
         self.reply_to.set(None);
         self.composer.set_from("");
         self.drafts.borrow_mut().remove(&chat_id);
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::send_message(
                 chat_id,
@@ -2247,7 +2274,7 @@ impl Store {
         let caption = self.composer.get().to_string();
         self.attach.set(Vec::new());
         self.composer.set_from("");
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             match Self::plan_attachments(paths, caption) {
                 AttachmentPlan::Album(items) => {
@@ -2319,7 +2346,7 @@ impl Store {
             return;
         }
         self.last_typing_sent.set(Instant::now());
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::send_chat_action(
                 chat_id,
@@ -2334,7 +2361,7 @@ impl Store {
 
     pub fn delete_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ =
                 functions::delete_messages(chat_id, vec![message_id], true, client).await;
@@ -2387,7 +2414,7 @@ impl Store {
             .find(|r| r.id == chat_id)
             .map(|r| r.pinned)
             .unwrap_or(false);
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::toggle_chat_is_pinned(
                 enums::ChatList::Main,
@@ -2413,7 +2440,7 @@ impl Store {
         let mut next = settings;
         next.use_default_mute_for = false;
         next.mute_for = if muted { 0 } else { i32::MAX };
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::set_chat_notification_settings(chat_id, next, client).await;
         })
@@ -2429,7 +2456,7 @@ impl Store {
         else {
             return;
         };
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::view_messages(chat_id, vec![last], None, true, client).await;
         })
@@ -2437,7 +2464,7 @@ impl Store {
     }
 
     pub fn leave(&self, chat_id: i64) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::leave_chat(chat_id, client).await;
         })
@@ -2446,7 +2473,7 @@ impl Store {
 
     /// Join a public group/channel the user found via search.
     pub fn join(&self, chat_id: i64) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::join_chat(chat_id, client).await;
         })
@@ -2471,7 +2498,7 @@ impl Store {
         for c in chats {
             self.upsert_chat(c);
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client != 0 && list_id > 0 {
             spawn_local(async move {
                 let _ = functions::load_chats(
@@ -2504,7 +2531,7 @@ impl Store {
         } else {
             enums::ChatList::Archive
         };
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::add_chat_to_list(chat_id, list, client).await;
         })
@@ -2517,7 +2544,7 @@ impl Store {
         if chat_id == 0 {
             return;
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::ChatMembers::ChatMembers(m)) =
@@ -2578,7 +2605,7 @@ impl Store {
     /// Populate `contacts` for the New Chat screen.
     #[allow(if_else_view)] // string picks, not views
     pub fn load_contacts(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -2616,7 +2643,7 @@ impl Store {
 
     /// Open a private chat with a user (from contacts) and select it.
     pub fn start_chat_with(&self, user_id: i64) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::Chat::Chat(chat)) =
@@ -2642,7 +2669,7 @@ impl Store {
     /// Recent stickers plus saved GIFs, thumbnails kicked into the
     /// shared file-download map.
     pub fn load_stickers(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -2690,7 +2717,7 @@ impl Store {
 
     /// Replace picker contents with a TDLib sticker result set.
     fn replace_stickers_with(&self, stickers: Vec<types::Sticker>) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             let mut items = Vec::new();
@@ -2715,7 +2742,7 @@ impl Store {
     /// Send a sticker or saved GIF into the open chat.
     pub fn send_sticker(&self, item: StickerItem) {
         let chat_id = self.open_chat.get();
-        let client = self.client_id;
+        let client = self.client_id.get();
         if chat_id == 0 || client == 0 {
             return;
         }
@@ -2755,7 +2782,7 @@ impl Store {
         let phone = self.nc_phone.get().to_string();
         let first = self.nc_first.get().to_string();
         let last = self.nc_last.get().to_string();
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 || phone.trim().is_empty() || first.trim().is_empty() {
             return;
         }
@@ -2783,7 +2810,7 @@ impl Store {
 
     /// Remove a contact by user id, then refresh the list.
     pub fn remove_contact(&self, user_id: i64) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -2799,7 +2826,7 @@ impl Store {
     /// Create a fresh invite link for the open group/channel.
     pub fn create_invite(&self) {
         let chat_id = self.open_chat.get();
-        let client = self.client_id;
+        let client = self.client_id.get();
         if chat_id == 0 || client == 0 {
             return;
         }
@@ -2817,7 +2844,7 @@ impl Store {
 
     /// Storage statistics summary for Settings (size + file count).
     pub fn load_storage(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -2837,7 +2864,7 @@ impl Store {
 
     /// Clear all cached media files, then refresh the summary.
     pub fn clear_storage(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -2855,9 +2882,172 @@ impl Store {
         .detach();
     }
 
+    /// Path of the persisted account list.
+    fn accounts_path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("watergram")
+            .join("accounts.json")
+    }
+
+    /// Persist the account labels so future sessions can re-create the
+    /// TDLib clients.
+    fn persist_accounts(&self) {
+        let labels: Vec<String> = self
+            .accounts
+            .get()
+            .iter()
+            .map(|a| a.label.to_string())
+            .collect();
+        if let Ok(json) = serde_json::to_string(&labels)
+            && let Some(parent) = Self::accounts_path().parent()
+        {
+            let _ = std::fs::create_dir_all(parent);
+            let _ = std::fs::write(Self::accounts_path(), json);
+        }
+    }
+
+    /// Create TDLib clients for the persisted accounts. The active client
+    /// is reused for the first row; the rest get fresh clients + params.
+    pub fn restore_accounts(&self) {
+        let Ok(raw) = std::fs::read_to_string(Self::accounts_path()) else {
+            self.accounts.set(vec![AccountRow {
+                id: self.client_id.get(),
+                label: "Account".into(),
+            }]);
+            return;
+        };
+        let labels: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        if labels.is_empty() {
+            return;
+        }
+        let mut rows = Vec::new();
+        for (i, label) in labels.iter().enumerate() {
+            let id = if i == 0 {
+                self.client_id.get()
+            } else {
+                let id = tdlib_rs::create_client();
+                if let Some(cfg) = Config::load() {
+                    self.set_tdlib_parameters_for(id, cfg);
+                }
+                id
+            };
+            rows.push(AccountRow {
+                id,
+                label: label.clone().into(),
+            });
+        }
+        self.accounts.set(rows);
+        self.refresh_account_label();
+    }
+
+    /// Refresh the active account's switcher label via `getMe`.
+    pub fn refresh_account_label(&self) {
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::User::User(me)) = functions::get_me(client).await {
+                let name = format!("{} {}", me.first_name, me.last_name)
+                    .trim()
+                    .to_string();
+                if !name.is_empty() {
+                    let mut rows = store.accounts.get();
+                    if let Some(row) = rows.iter_mut().find(|r| r.id == client) {
+                        row.label = name.into();
+                        store.accounts.set(rows);
+                        store.persist_accounts();
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Add a fresh TDLib client and switch to it (lands on the auth flow).
+    pub fn add_account(&self) {
+        let id = tdlib_rs::create_client();
+        self.accounts_open.set(false);
+        let mut rows = self.accounts.get();
+        rows.push(AccountRow {
+            id,
+            label: "New account".into(),
+        });
+        self.accounts.set(rows);
+        self.switch_account(id);
+    }
+
+    /// Switch the active TDLib client; caches are per-account so they are
+    /// cleared and re-loaded through `get_authorization_state`.
+    pub fn switch_account(&self, id: i32) {
+        if id == self.client_id.get() {
+            self.accounts_open.set(false);
+            return;
+        }
+        self.client_id.set(id);
+        self.accounts_open.set(false);
+        // Clear account-scoped caches.
+        self.chats.set(Vec::new());
+        self.messages.set(Vec::new());
+        self.folders.set(Vec::new());
+        self.members.set(Vec::new());
+        self.server_results.set(Vec::new());
+        self.chat_objs.borrow_mut().clear();
+        self.users.borrow_mut().clear();
+        self.files.borrow_mut().clear();
+        self.file_progress.borrow_mut().clear();
+        self.open_chat.set(0);
+        self.active_folder.set(0);
+        self.screen.set(Screen::Loading);
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(state) = functions::get_authorization_state(id).await {
+                store.on_auth_state(state);
+            }
+        })
+        .detach();
+    }
+
+    /// `set_tdlib_parameters` for an arbitrary client (saved accounts get
+    /// their own `db_<id>` / `files_<id>` dirs).
+    fn set_tdlib_parameters_for(&self, client: i32, cfg: Config) {
+        let db_root = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("watergram");
+        let _ = std::fs::create_dir_all(&db_root);
+        let db = db_root
+            .join(format!("db_{client}"))
+            .to_string_lossy()
+            .to_string();
+        let files = db_root
+            .join(format!("files_{client}"))
+            .to_string_lossy()
+            .to_string();
+        spawn_local(async move {
+            let _ = functions::set_tdlib_parameters(
+                cfg.test_dc,
+                db,
+                files,
+                String::new(),
+                true,
+                true,
+                true,
+                false,
+                cfg.api_id,
+                cfg.api_hash,
+                "en".to_string(),
+                "Watergram".to_string(),
+                "desktop".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+                client,
+            )
+            .await;
+        })
+        .detach();
+    }
+
     /// Apply an audience preset to a privacy setting and reload.
     pub fn set_privacy_audience(&self, key: enums::UserPrivacySetting, audience: &str) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -2883,7 +3073,7 @@ impl Store {
     pub fn open_folder_editor(&self, id: i32) {
         self.editing_folder.set(id);
         if id == 0 {
-            self.folder_name.set("".into());
+            self.folder_name.set_from("");
         } else {
             let name = self
                 .folders
@@ -2899,7 +3089,7 @@ impl Store {
 
     /// Create or rename a chat folder from the editor form.
     pub fn save_folder(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let name = self.folder_name.get().to_string();
         if client == 0 || name.trim().is_empty() {
             return;
@@ -2946,7 +3136,7 @@ impl Store {
 
     /// Delete a chat folder by id (chats stay in the main list).
     pub fn delete_folder(&self, id: i32) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 || id <= 0 {
             return;
         }
@@ -2962,7 +3152,7 @@ impl Store {
 
     /// Search stickers by emoji text and show results in the picker.
     pub fn search_stickers_by(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let emoji = self.sticker_query.get().to_string();
         if client == 0 {
             return;
@@ -2988,7 +3178,7 @@ impl Store {
 
     /// Upload the picked file as this chat's photo.
     pub fn set_chat_avatar(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let chat_id = self.open_chat.get();
         let urls = self.chat_avatar_pick.get();
         let Some(url) = urls.first() else { return };
@@ -3015,7 +3205,7 @@ impl Store {
 
     /// Load a user's profile into the Profile route card and push it.
     pub fn open_profile(&self, user_id: i64) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -3054,7 +3244,7 @@ impl Store {
 
     /// Upload the picked Settings file as the account's profile photo.
     pub fn set_avatar(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let urls = self.avatar_pick.get();
         let Some(url) = urls.first() else { return };
         if client == 0 {
@@ -3089,7 +3279,7 @@ impl Store {
     /// Restrict rule) reads as "My contacts"; anything mixed reads
     /// "Custom" so the row never overstates access.
     pub fn load_privacy(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -3124,7 +3314,7 @@ impl Store {
 
     /// Load the account's active sessions for Settings.
     pub fn load_sessions(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -3156,7 +3346,7 @@ impl Store {
 
     /// Terminate another device's session, then refresh the list.
     pub fn terminate_session_by_id(&self, id: i64) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             let _ = functions::terminate_session(id, client).await;
@@ -3167,7 +3357,7 @@ impl Store {
 
     /// Read whether two-step verification is enabled.
     pub fn load_twofa(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         if client == 0 {
             return;
         }
@@ -3188,7 +3378,7 @@ impl Store {
 
     /// Save profile fields to the account.
     pub fn save_profile(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let (first, last, bio, uname) = (
             self.edit_first.get().to_string(),
             self.edit_last.get().to_string(),
@@ -3228,7 +3418,7 @@ impl Store {
         if chat_id == 0 || title.is_empty() {
             return;
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::set_chat_title(chat_id, title, client).await;
         })
@@ -3242,7 +3432,7 @@ impl Store {
         if chat_id == 0 {
             return;
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::set_chat_description(chat_id, desc, client).await;
         })
@@ -3252,7 +3442,7 @@ impl Store {
     /// Block/unblock a member (main block list).
     pub fn toggle_block(&self, member: &MemberRow, block: bool) {
         let sender = member.sender.clone();
-        let client = self.client_id;
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::set_message_sender_block_list(
                 sender,
@@ -3270,7 +3460,7 @@ impl Store {
 
     /// Log out every session except the current one.
     pub fn terminate_all_sessions(&self) {
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             let _ = functions::terminate_all_other_sessions(client).await;
@@ -3286,7 +3476,7 @@ impl Store {
             return;
         }
         let sender = member.sender.clone();
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             let _ = functions::set_chat_member_status(
@@ -3308,7 +3498,7 @@ impl Store {
             self.server_results.set(Vec::new());
             return;
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::Chats::Chats(c)) =
@@ -3369,7 +3559,7 @@ impl Store {
         if input.trim().is_empty() {
             return;
         }
-        let client = self.client_id;
+        let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
             match kind {

@@ -15,14 +15,14 @@ use tdlib_rs::enums::Update;
 /// which is fed by this same `receive()` loop, so the loop must run for the
 /// lifetime of the client. The channel is unbounded and send failures after
 /// the receiver is dropped are ignored.
-pub fn spawn_client() -> (i32, Receiver<Update>) {
+pub fn spawn_client() -> (i32, Receiver<(Update, i32)>) {
     let client_id = tdlib_rs::create_client();
-    let (tx, rx) = async_channel::unbounded::<Update>();
+    let (tx, rx) = async_channel::unbounded::<(Update, i32)>();
     std::thread::spawn(move || loop {
-        let Some((update, _client_id)) = tdlib_rs::receive() else {
+        let Some((update, client_id)) = tdlib_rs::receive() else {
             continue;
         };
-        if tx.try_send(update).is_err() {
+        if tx.try_send((update, client_id)).is_err() {
             break;
         }
     });

@@ -24,7 +24,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{ChatRow, FolderRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
+use crate::state::{AccountRow, ChatRow, FolderRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
 use mdi::account;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -294,6 +294,9 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             icon_button(archive(), "Archive", |store: Store| {
                 store.toggle_archive_view()
             }),
+            icon_button(account(), "Accounts", |store: Store| {
+                store.accounts_open.toggle()
+            }),
             spacer(),
             text!("{conn}").caption().muted(),
             spacer(),
@@ -303,6 +306,28 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 .action(|nav: Navigator<Route>| nav.push(Route::Settings)),
         ))
         .padding_with((12.0, 6.0)),
+        when(store.accounts_open.clone(), move || {
+            let rows = store.accounts.clone();
+            vstack((
+                Lazy::vstack(ForEach::new(
+                    SignalCollection::new(rows.clone()),
+                    move |acc: AccountRow| {
+                        let id = acc.id;
+                        hstack((text(acc.label.clone()).caption(), spacer()))
+                            .padding_with((12.0, 4.0))
+                            .on_tap(move |store: Store| store.switch_account(id))
+                    },
+                )),
+                hstack((
+                    plus().tint(Accent).size(14.0, 14.0),
+                    text("Add account").caption().foreground(Accent),
+                    spacer(),
+                ))
+                .padding_with((12.0, 4.0))
+                .on_tap(|store: Store| store.add_account()),
+            ))
+            .background(Surface)
+        }),
         when(has_folders, move || {
             let folder_edit = store.folder_open.clone();
             vstack((

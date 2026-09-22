@@ -25,8 +25,8 @@ fn main() -> impl View {
     let s = store.clone();
     views::root(store).task(async move {
         s.start();
-        while let Ok(update) = rx.recv().await {
-            s.update(update);
+        while let Ok((update, cid)) = rx.recv().await {
+            s.update(update, cid);
         }
     })
 }
@@ -47,8 +47,8 @@ pub fn app(mut env: Environment) -> App {
             let rx2 = rx.clone();
             views::root(store.clone()).task(async move {
                 s.start();
-                while let Ok(update) = rx2.recv().await {
-                    s.update(update);
+                while let Ok((update, cid)) = rx2.recv().await {
+                    s.update(update, cid);
                 }
             })
         },
@@ -577,5 +577,20 @@ mod tests {
             ui.mount(move || views::sidebar_view(store.clone()).state(&store));
         app.query().label("Save folder").assert_exists();
         app.query().label("New folder").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn account_switcher_opens(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.accounts.set(vec![
+            crate::state::AccountRow { id: 1, label: "Alice".into() },
+            crate::state::AccountRow { id: 2, label: "Bob".into() },
+        ]);
+        store.accounts_open.set(true);
+        let mut app =
+            ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        app.query().label("Alice").assert_exists();
+        app.query().label("Bob").assert_exists();
+        app.query().label("Add account").assert_exists();
     }
 }
