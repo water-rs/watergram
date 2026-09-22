@@ -248,6 +248,28 @@ pub struct Store {
     pub members: Binding<Vec<MemberRow>>,
     /// Total member count label for the panel header.
     pub members_count: Binding<Str>,
+    /// Contacts shown in the New Chat screen.
+    pub contacts: Binding<Vec<MemberRow>>,
+    /// Active-session list on the Settings screen.
+    pub sessions: Binding<Vec<SessionRow>>,
+    /// Two-step verification status line ("On"/"Off").
+    pub twofa: Binding<Str>,
+    /// Profile-edit form fields + result line.
+    pub edit_first: Binding<Str>,
+    pub edit_last: Binding<Str>,
+    pub edit_bio: Binding<Str>,
+    pub edit_username: Binding<Str>,
+    pub profile_note: Binding<Str>,
+}
+
+/// One row in the active-sessions list.
+#[derive(Clone, Identifiable)]
+pub struct SessionRow {
+    #[id]
+    pub id: i64,
+    pub title: Str,
+    pub subtitle: Str,
+    pub current: bool,
 }
 
 fn fmt_time(ts: i32) -> Str {
@@ -344,6 +366,14 @@ impl Store {
             members_open: Binding::bool(false),
             members: Binding::<Vec<MemberRow>>::default(),
             members_count: Binding::container(Str::from("")),
+            contacts: Binding::<Vec<MemberRow>>::default(),
+            sessions: Binding::<Vec<SessionRow>>::default(),
+            twofa: Binding::container(Str::from("")),
+            edit_first: Binding::container(Str::from("")),
+            edit_last: Binding::container(Str::from("")),
+            edit_bio: Binding::container(Str::from("")),
+            edit_username: Binding::container(Str::from("")),
+            profile_note: Binding::container(Str::from("")),
         }
     }
 
@@ -2105,6 +2135,159 @@ impl Store {
                 }
                 store.members.set(rows);
             }
+        })
+        .detach();
+    }
+
+    /// Populate `contacts` for the New Chat screen.
+    #[allow(if_else_view)] // string picks, not views
+    pub fn load_contacts(&self) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let mut rows = Vec::new();
+            if let Ok(enums::Users::Users(u)) = functions::get_contacts(client).await {
+                for uid in u.user_ids {
+                    if let Ok(enums::User::User(user)) = functions::get_user(uid, client).await {
+                        store.users.borrow_mut().insert(uid, user.clone());
+                        let uname = user
+                            .usernames
+                            .as_ref()
+                            .and_then(|u| u.active_usernames.first())
+                            .map(|s| format!("@{s}"))
+                            .unwrap_or_default();
+                        let name = format!("{} {}", user.first_name, user.last_name)
+                            .trim()
+                            .to_string();
+                        rows.push(MemberRow {
+                            key: uid,
+                            name: if name.is_empty() { uname.clone().into() } else { name.into() },
+                            status: uname.into(),
+                            sender: enums::MessageSender::User(types::MessageSenderUser {
+                                user_id: uid,
+                            }),
+                        });
+                    }
+                }
+            }
+            store.contacts.set(rows);
+        })
+        .detach();
+    }
+
+    /// Open a private chat with a user (from contacts) and select it.
+    pub fn start_chat_with(&self, user_id: i64) {
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Chat::Chat(chat)) =
+                functions::create_private_chat(user_id, false, client).await
+            {
+                store.nav.pop();
+                store.select_chat(chat.id);
+            }
+        })
+        .detach();
+    }
+
+    /// Load the account's active sessions for Settings.
+    pub fn load_sessions(&self) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Sessions::Sessions(s)) =
+                functions::get_active_sessions(client).await
+            {
+                let rows: Vec<SessionRow> = s
+                    .sessions
+                    .iter()
+                    .map(|sess| SessionRow {
+                        id: sess.id,
+                        title: format!(
+                            "{} {} · {}",
+                            sess.application_name, sess.application_version, sess.device_model
+                        )
+                        .into(),
+                        subtitle: format!("{} · {} {}", sess.location, sess.ip_address, sess.platform)
+                            .into(),
+                        current: sess.is_current,
+                    })
+                    .collect();
+                store.sessions.set(rows);
+            }
+        })
+        .detach();
+    }
+
+    /// Terminate another device's session, then refresh the list.
+    pub fn terminate_session_by_id(&self, id: i64) {
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            let _ = functions::terminate_session(id, client).await;
+            store.load_sessions();
+        })
+        .detach();
+    }
+
+    /// Read whether two-step verification is enabled.
+    pub fn load_twofa(&self) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::PasswordState::PasswordState(p)) =
+                functions::get_password_state(client).await
+            {
+                if p.has_password {
+                    store.twofa.set_from("On");
+                } else {
+                    store.twofa.set_from("Off");
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Save profile fields to the account.
+    pub fn save_profile(&self) {
+        let client = self.client_id;
+        let (first, last, bio, uname) = (
+            self.edit_first.get().to_string(),
+            self.edit_last.get().to_string(),
+            self.edit_bio.get().to_string(),
+            self.edit_username.get().to_string(),
+        );
+        let store = self.clone();
+        spawn_local(async move {
+            let mut note = "Saved";
+            if functions::set_name(first.clone(), last.clone(), client)
+                .await
+                .is_err()
+            {
+                note = "Failed to update name";
+            } else if functions::set_bio(bio, client).await.is_err() {
+                note = "Failed to update bio";
+            } else if functions::set_username(uname.clone(), client)
+                .await
+                .is_err()
+            {
+                note = "Failed to update username";
+            } else {
+                let mut me = store.me.get();
+                me.name = format!("{first} {last}").trim().to_string().into();
+                me.username = uname.into();
+                store.me.set(me);
+            }
+            store.profile_note.set_from(note);
         })
         .detach();
     }

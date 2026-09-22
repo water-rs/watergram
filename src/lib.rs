@@ -330,6 +330,41 @@ mod tests {
         assert_eq!(store.composer.get().to_string(), "half typed");
     }
 
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn settings_shows_sections(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.twofa.set("On".into());
+        store.sessions.set(vec![crate::state::SessionRow {
+            id: 1,
+            title: "Telegram Desktop 5.0 · PC".into(),
+            subtitle: "Berlin · 1.2.3.4 linux".into(),
+            current: true,
+        }]);
+        let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
+        app.query().label("Edit profile").assert_exists();
+        app.query().label("Two-step verification").assert_exists();
+        app.query().label("Active sessions").assert_exists();
+        app.query().label("Telegram Desktop 5.0 · PC").assert_exists();
+        app.query().label("current").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn contacts_list_renders(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.contacts.set(vec![crate::state::MemberRow {
+            key: 9,
+            name: "Alice A".into(),
+            status: "@alice".into(),
+            sender: tdlib_rs::enums::MessageSender::User(tdlib_rs::types::MessageSenderUser {
+                user_id: 9,
+            }),
+        }]);
+        let mut app = ui.mount(move || views::new_chat_view(store.clone()).state(&store));
+        app.query().label("Alice A").assert_exists();
+        app.query().label("@alice").assert_exists();
+        app.query().label("Contacts").assert_exists();
+    }
+
     #[test]
     fn attachment_content_dispatch() {
         use tdlib_rs::enums::InputMessageContent as C;

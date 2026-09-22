@@ -22,7 +22,7 @@ use waterui::widget::condition::when;
 use waterui_barcode::Barcode;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{ChatRow, MemberRow, MessageRow, Route, Screen, Store};
+use crate::state::{ChatRow, MemberRow, MessageRow, Route, Screen, SessionRow, Store};
 use mdi::account;
 use mdi::account_group;
 use mdi::alert_circle;
@@ -795,7 +795,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
     let me = store.me.clone();
     let dark = store.dark.clone();
 
-    scroll(vstack((
+    let content = scroll(vstack((
         text("Account").caption().muted(),
         hstack((
             text("Name"),
@@ -817,6 +817,58 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             spacer(),
             text!("{uid}", uid = me.map(|m| m.id)).muted(),
         )),
+        vstack((
+            text("Edit profile").caption().muted(),
+            hstack((
+                field("First name", &store.edit_first).hide_label(),
+                field("Last name", &store.edit_last).hide_label(),
+            ))
+            .spacing(8.0),
+            field("Bio", &store.edit_bio).prompt("a few words about you").hide_label(),
+            field("Username", &store.edit_username)
+                .prompt("username (no @)")
+                .hide_label(),
+            hstack((
+                text!("{profile_note}", profile_note = store.profile_note.clone())
+                    .caption()
+                    .muted(),
+                spacer(),
+                button("Save").action(|store: Store| store.save_profile()),
+            )),
+        ))
+        .spacing(10.0)
+        .leading(),
+        vstack((
+            text("Privacy").caption().muted(),
+            hstack((
+                text("Two-step verification"),
+                spacer(),
+                text!("{twofa}", twofa = store.twofa.clone()).muted(),
+            )),
+            text("Active sessions").caption().muted(),
+            Lazy::vstack(ForEach::new(
+                SignalCollection::new(store.sessions.clone()),
+                move |row: SessionRow| {
+                    let is_current = row.current;
+                    hstack((
+                        vstack((
+                            text(row.title.clone()).caption().bold(),
+                            text(row.subtitle.clone()).caption().muted(),
+                        ))
+                        .spacing(2.0)
+                        .leading(),
+                        spacer(),
+                        when(is_current, || text("current").caption().foreground(Accent)),
+                    ))
+                    .padding_with((0.0, 4.0))
+                    .context_menu(("Terminate".action(move |store: Store| {
+                        store.terminate_session_by_id(row.id)
+                    }),))
+                },
+            )),
+        ))
+        .spacing(10.0)
+        .leading(),
         text("Appearance").caption().muted(),
         toggle("Dark mode", &dark),
         text("Session").caption().muted(),
@@ -824,7 +876,14 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
     ))
     .spacing(10.0)
     .padding_with((16.0, 12.0)))
-    .title("Settings")
+    .task({
+        let store = store.clone();
+        async move {
+            store.load_sessions();
+            store.load_twofa();
+        }
+    });
+    NavigationView::new("Settings", content)
 }
 
 pub(crate) fn new_chat_view(store: Store) -> NavigationView {
@@ -843,7 +902,7 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
         })
     });
 
-    scroll(vstack((
+    let content = scroll(vstack((
         text("Type").caption().muted(),
         Picker::new("Chat type", items.clone(), &kind).hide_label(),
         text("Details").caption().muted(),
@@ -853,8 +912,28 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
             spacer(),
             button("Create").action(|store: Store| store.create_chat()),
         )),
+        text("Contacts").caption().muted(),
+        Lazy::vstack(ForEach::new(
+            SignalCollection::new(store.contacts.clone()),
+            move |row: MemberRow| {
+                hstack((
+                    text(row.name.clone()).caption(),
+                    spacer(),
+                    text(row.status.clone()).caption().muted(),
+                ))
+                .spacing(6.0)
+                .padding_with((0.0, 4.0))
+                .on_tap(move |store: Store| store.start_chat_with(row.key))
+            },
+        )),
     ))
     .spacing(10.0)
     .padding_with((16.0, 12.0)))
-    .title("New chat")
+    .task({
+        let store = store.clone();
+        async move {
+            store.load_contacts();
+        }
+    });
+    NavigationView::new("New chat", content)
 }
