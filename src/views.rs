@@ -35,6 +35,7 @@ use mdi::bullhorn;
 use mdi::clock_outline;
 use mdi::camera;
 use mdi::microphone;
+use mdi::file_gif_box;
 use mdi::close;
 use mdi::delete_sweep;
 use mdi::account_plus;
@@ -831,6 +832,12 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     icon_button(magnify(), "Search stickers", |store: Store| {
                         store.search_stickers_by()
                     }),
+                    {
+                        let q = store.sticker_query.clone();
+                        icon_button(file_gif_box(), "Search GIFs", move |store: Store| {
+                            store.search_gifs_by(q.get().to_string())
+                        })
+                    },
                 ))
                 .spacing(6.0)
                 .padding_with((8.0, 2.0)),

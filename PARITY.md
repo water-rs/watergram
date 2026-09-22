@@ -67,7 +67,7 @@
 | 语音消息（录制/发送/播放） | ✅ | 播放：`video_player`；录制：waterkit-audio cpal → opus-pure Ogg/Opus + waveform → `inputMessageVoiceNote` | `opus_ogg_container`、`waveform_encodes_100_bars`、`voice_record_button_handles_missing_device` |
 | 视频消息 | ✅ | 播放：`video_player`；录制：waterkit-camera → wgpu readback → 方形裁剪 → waterkit-codec H.264 → VideoWriter mp4 → `inputMessageVideoNote`（VA-API 编码需 /dev/dri） | `nv12_layout`、`crop_square`、`video_note_handles_missing_camera` |
 | 贴纸 | ✅ | `getRecentStickers`/`searchStickers`/`getInstalledStickerSets`/`getStickerSet`（emoji 搜索+贴纸包浏览）→ `inputMessageSticker` | `sticker_picker_toggles` |
-| GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（缩略图面板；trending/搜索经 inline bot 未接） | `sticker_picker_toggles` |
+| GIF | ✅ | `getSavedAnimations` + @gif inline bot `getInlineQueryResults` trending 搜索 → `inputMessageAnimation` | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：65 项 ｜ 部分 🟡：1 项 ｜ 未实现 ❌：1 项
+- 已实现 ✅：66 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：1 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）

@@ -348,6 +348,8 @@ pub struct Store {
     pub twofa_hint_in: Binding<Str>,
     pub twofa_email: Binding<Str>,
     pub twofa_note: Binding<Str>,
+    /// Cached user id of the @gif inline bot (resolved on first search).
+    gif_bot: Cell<i64>,
     /// Per-user privacy exception picker: (setting, allow?).
     pub privacy_picker_open: Binding<bool>,
     privacy_target: RefCell<Option<(enums::UserPrivacySetting, bool)>>,
@@ -718,6 +720,7 @@ impl Store {
             twofa_email: Binding::container(Str::from("")),
             twofa_note: Binding::container(Str::from("")),
             privacy_picker_open: Binding::bool(false),
+            gif_bot: Cell::new(0),
             privacy_target: RefCell::new(None),
             notif_watchers: Rc::new(RefCell::new(Vec::new())),
             notif_private: Binding::bool(true),
@@ -3700,6 +3703,73 @@ impl Store {
             .await
             {
                 store.replace_stickers_with(set.stickers);
+            }
+        })
+        .detach();
+    }
+
+    /// Search trending GIFs through the @gif inline bot and replace the
+    /// picker strip with the results (sends go out as `inputMessageAnimation`).
+    pub fn search_gifs_by(&self, query: String) {
+        let client = self.client_id.get();
+        let chat_id = self.open_chat.get();
+        if client == 0 || chat_id == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let mut bot_id = store.gif_bot.get();
+            if bot_id == 0 {
+                let Ok(enums::Chat::Chat(chat)) =
+                    functions::search_public_chat("gif".into(), client).await
+                else {
+                    return;
+                };
+                if let enums::ChatType::Private(p) = chat.r#type {
+                    bot_id = p.user_id;
+                    store.gif_bot.set(bot_id);
+                }
+            }
+            if bot_id == 0 {
+                return;
+            }
+            let Ok(enums::InlineQueryResults::InlineQueryResults(res)) =
+                functions::get_inline_query_results(
+                    bot_id,
+                    chat_id,
+                    None,
+                    query,
+                    String::new(),
+                    client,
+                )
+                .await
+            else {
+                return;
+            };
+            let mut items = Vec::new();
+            for r in res.results {
+                if let enums::InlineQueryResult::Animation(a) = r {
+                    let thumb = a
+                        .animation
+                        .thumbnail
+                        .as_ref()
+                        .map(|t| t.file.id)
+                        .unwrap_or(0);
+                    if thumb != 0 {
+                        let _ =
+                            functions::download_file(thumb, 8, 0, 0, false, client)
+                                .await;
+                    }
+                    items.push(StickerItem {
+                        file_id: a.animation.animation.id,
+                        thumb,
+                        emoji: "".into(),
+                        gif: true,
+                    });
+                }
+            }
+            if !items.is_empty() {
+                store.sticker_items.set(items);
             }
         })
         .detach();
