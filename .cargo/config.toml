@@ -1,9 +1,2 @@
 [env]
 PKG_CONFIG_PATH = "/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-
-[build]
-rustflags = [
-  "-L", "/home/ubuntu/.cargo-shims",
-  "-l", "dylib=shim_c", "-l", "dylib=shim_cpp",
-  "-C", "link-arg=-Wl,-rpath,/home/ubuntu/.cargo-shims",
-]
