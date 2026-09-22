@@ -519,4 +519,16 @@ mod tests {
             "Custom"
         );
     }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn folder_tabs_render(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.folders.set(vec![
+            crate::state::FolderRow { id: 5, title: "Work".into(), active: false },
+            crate::state::FolderRow { id: 9, title: "Chats".into(), active: false },
+        ]);
+        let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        app.query().label("Work").assert_exists();
+        app.query().label("Archive").assert_exists();
+    }
 }

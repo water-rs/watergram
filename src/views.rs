@@ -22,7 +22,7 @@ use waterui::widget::condition::when;
 use waterui_barcode::Barcode;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{ChatRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
+use crate::state::{ChatRow, FolderRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
 use mdi::account;
 use mdi::account_group;
 use mdi::alert_circle;
@@ -231,6 +231,7 @@ pub(crate) fn sidebar_stack(store: Store) -> impl View {
     )
 }
 
+#[allow(if_else_view)] // tab styling picks between two text looks, not reactive content
 pub(crate) fn sidebar_view(store: Store) -> impl View {
     let conn = store.connection.clone();
     let forward_mode = store.forward_message.is_some();
@@ -257,6 +258,28 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
     let debounced = store.search.debounce(Duration::from_millis(400));
     let rows_store = store.clone();
     let res_store = store.clone();
+    let folder_tabs = store
+        .folders
+        .zip(&store.active_folder)
+        .map(|(fs, active)| {
+            let mut tabs: Vec<FolderRow> = vec![FolderRow {
+                id: 0,
+                title: "All".into(),
+                active: active == 0,
+            }];
+            tabs.extend(fs.iter().map(|f| FolderRow {
+                id: f.id,
+                title: f.title.clone(),
+                active: f.id == active,
+            }));
+            tabs.push(FolderRow {
+                id: -1,
+                title: "Archive".into(),
+                active: active == -1,
+            });
+            tabs
+        });
+    let has_folders = store.folders.map(|f| !f.is_empty()).distinct();
 
     vstack((
         hstack((
@@ -276,6 +299,32 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 .action(|nav: Navigator<Route>| nav.push(Route::Settings)),
         ))
         .padding_with((12.0, 6.0)),
+        when(has_folders, move || {
+            scroll(Lazy::hstack(ForEach::new(
+                SignalCollection::new(folder_tabs.clone()),
+                move |tab: FolderRow| {
+                    let label = tab.title.clone();
+                    if tab.active {
+                        text(label)
+                            .caption()
+                            .bold()
+                            .foreground(Accent)
+                            .padding_with((10.0, 3.0))
+                            .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+                            .on_tap(move |store: Store| store.set_list(tab.id))
+                            .anyview()
+                    } else {
+                        text(label)
+                            .caption()
+                            .muted()
+                            .padding_with((10.0, 3.0))
+                            .on_tap(move |store: Store| store.set_list(tab.id))
+                            .anyview()
+                    }
+                },
+            )))
+            .padding_with((8.0, 4.0))
+        }),
         when(forward_mode, || {
             hstack((
                 share_variant().tint(Accent).size(16.0, 16.0),

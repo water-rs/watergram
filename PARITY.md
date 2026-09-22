@@ -30,7 +30,7 @@
 | typing/… 指示 | ✅ | `sendChatAction` + `updateChatAction` | — |
 | 草稿显示 | ✅ | `updateChatDraftMessage` | — |
 | 归档（Archive 文件夹） | ✅ | `addChatToList(Main/Archive)` + `ChatPosition` | `archive_toggle_rebuilds_list` |
-| 聊天文件夹（Chat Folders） | ❌ | `getChatFolderChatsToLeave`/`chatFolderInfo`/`createChatFolder` | — |
+| 聊天文件夹（Chat Folders） | 🟡 | `updateChatFolders` + `ChatList::Folder`/`loadChats` → 侧栏 tab 条（All/文件夹/Archive 切换）；创建/编辑文件夹未做 | `folder_tabs_render` |
 | 已读回执标记 | ✅ | `viewMessages` + `UpdateChatReadOutbox` → ✓/✓✓ | `read_receipt_double_check` |
 | 已标记为未读 | ✅ | `toggleChatIsMarkedAsUnread` + `UpdateChatIsMarkedAsUnread` | `marked_unread_shows_dot` |
 
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：49 项 ｜ 部分 🟡：13 项 ｜ 未实现 ❌：5 项
+- 已实现 ✅：49 项 ｜ 部分 🟡：14 项 ｜ 未实现 ❌：4 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）

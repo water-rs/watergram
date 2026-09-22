@@ -283,6 +283,22 @@ pub struct Store {
     pub storage_summary: Binding<Str>,
     /// Read-only privacy rule summary rows (setting label -> audience).
     pub privacy_rows: Binding<Vec<PrivacyRow>>,
+    /// User's chat folders from `updateChatFolders` (sidebar tab strip).
+    pub folders: Binding<Vec<FolderRow>>,
+    /// Which list the sidebar shows: 0 = Main, -1 = Archive, n = folder id.
+    /// Kept in sync with `archive_mode` (which views already read).
+    pub active_folder: Binding<i32>,
+}
+
+/// One chat folder tab in the sidebar strip.
+#[derive(Clone, Identifiable)]
+pub struct FolderRow {
+    /// Folder id: 0 = All chats, -1 = Archive, n = TDLib folder id.
+    #[id]
+    pub id: i32,
+    pub title: Str,
+    /// Currently selected tab (drives accent styling).
+    pub active: bool,
 }
 
 /// One row of the read-only privacy summary in Settings.
@@ -480,8 +496,13 @@ pub(crate) fn privacy_audience(rules: &[enums::UserPrivacySettingRule]) -> &'sta
 impl Store {
     /// The chat list currently shown in the sidebar.
     fn active_list(&self) -> enums::ChatList {
+        let folder = self.active_folder.get();
         if self.archive_mode.get() {
             enums::ChatList::Archive
+        } else if folder > 0 {
+            enums::ChatList::Folder(types::ChatListFolder {
+                chat_folder_id: folder,
+            })
         } else {
             enums::ChatList::Main
         }
@@ -563,6 +584,8 @@ impl Store {
             invite_link: Binding::container(Str::from("")),
             storage_summary: Binding::container(Str::from("")),
             privacy_rows: Binding::<Vec<PrivacyRow>>::default(),
+            folders: Binding::<Vec<FolderRow>>::default(),
+            active_folder: Binding::i32(0),
         }
     }
 
@@ -1073,6 +1096,18 @@ impl Store {
                 }
             }
             enums::Update::NewChat(c) => self.upsert_chat(c.chat),
+            enums::Update::ChatFolders(u) => {
+                self.folders.set(
+                    u.chat_folders
+                        .iter()
+                        .map(|f| FolderRow {
+                            id: f.id,
+                            title: f.name.text.text.clone().into(),
+                            active: false,
+                        })
+                        .collect(),
+                );
+            }
             enums::Update::ChatTitle(u) => {
                 if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
                     c.title = u.title.clone();
@@ -2332,11 +2367,34 @@ impl Store {
     /// Switch the sidebar between the Main and Archive chat lists.
     pub fn toggle_archive_view(&self) {
         let next = !self.archive_mode.get();
-        self.archive_mode.set(next);
+        self.set_list(if next { -1 } else { 0 });
+    }
+
+    /// Switch the sidebar list: 0 = All chats, -1 = Archive, n = folder.
+    pub fn set_list(&self, list_id: i32) {
+        if self.active_folder.get() == list_id && self.archive_mode.get() == (list_id == -1) {
+            return;
+        }
+        self.active_folder.set(list_id);
+        self.archive_mode.set(list_id == -1);
         self.chats.set(Vec::new());
         let chats: Vec<types::Chat> = self.chat_objs.borrow().values().cloned().collect();
         for c in chats {
             self.upsert_chat(c);
+        }
+        let client = self.client_id;
+        if client != 0 && list_id > 0 {
+            spawn_local(async move {
+                let _ = functions::load_chats(
+                    Some(enums::ChatList::Folder(types::ChatListFolder {
+                        chat_folder_id: list_id,
+                    })),
+                    200,
+                    client,
+                )
+                .await;
+            })
+            .detach();
         }
     }
 
