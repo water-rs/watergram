@@ -1,0 +1,57 @@
+[package]
+type = "playground"
+name = "Watergram"
+bundle_identifier = "dev.waterui.watergram"
+
+[framework]
+channel = "stable"
+minimum-cli-version = "0.3.2"
+rust-version = "1.95.0"
+
+[framework.release]
+repository = "https://github.com/water-rs/waterui"
+revision = "e45dc729e34fc41399ec67c98ea76eb577c83cd3"
+tag = "v0.5.2"
+
+[framework.metadata]
+android-backend-revision = "b8477febe8f7d8025ee5a5e0dbcfe229d57c49b8"
+android-backend-url = "https://github.com/water-rs/android-backend.git"
+android-min-api-level = 26
+apple-backend-url = "https://github.com/water-rs/apple-backend.git"
+apple-backend-version = "0.3.0"
+minimum-cli-version = "0.3.2"
+scaffold-packages = [
+    "hydrolysis",
+    "hydrolysis-m3",
+    "waterui-dew",
+    "waterui-gtk",
+    "waterui-winui",
+]
+
+[framework.scaffold]
+android-backend-revision = "b8477febe8f7d8025ee5a5e0dbcfe229d57c49b8"
+android-backend-url = "https://github.com/water-rs/android-backend.git"
+apple-backend-url = "https://github.com/water-rs/apple-backend.git"
+apple-backend-version = "0.3.0"
+hydrolysis-m3-version = "0.3.1"
+hydrolysis-version = "0.3.1"
+waterui-browser-cef-version = "0.5.1"
+waterui-core-version = "0.5.1"
+waterui-ffi-version = "0.5.2"
+waterui-gtk-version = "0.2.1"
+waterui-locale-version = "0.5.1"
+waterui-mcp-version = "0.5.1"
+waterui-preview-protocol-version = "0.5.1"
+waterui-preview-version = "0.5.1"
+waterui-testing-version = "0.5.1"
+waterui-version = "0.5.2"
+
+[framework.experimental-packages.waterui-dew]
+git = "https://github.com/water-rs/dew"
+rev = "96713f93d4ee8cf7125a4905a5d5b5677997b37a"
+version = "0.3.0"
+
+[framework.experimental-packages.waterui-winui]
+git = "https://github.com/water-rs/waterui-winui"
+rev = "3601e745aa51a070a71df1aa98bb7faa6b3895a9"
+version = "0.1.0"

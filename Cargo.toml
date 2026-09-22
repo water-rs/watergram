@@ -1,0 +1,63 @@
+[package]
+name = "watergram"
+version = "0.1.0"
+edition = "2024"
+authors = ["Lexo Liu"]
+description = "A Telegram client built with WaterUI"
+
+[lib]
+crate-type = ["lib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[features]
+dev = ["waterui/dynamic_linking"]
+# Video playback. Off by default: it links the framework's video stack, which
+# on Linux needs VA-API 1.19+ and PipeWire 0.3.65+ to build. Enable it when the
+# app uses video: `cargo build --features media`, or add it to `default`.
+media = ["waterui/media"]
+
+[dependencies.waterui]
+version = "=0.5.2"
+default-features = false
+
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "espidf")))'.dependencies.waterui]
+version = "=0.5.2"
+default-features = false
+features = [
+    "assets",
+    "flow-markdown",
+]
+
+[dependencies]
+tdlib-rs = { version = "1.4.0", features = ["download-tdlib", "static"] }
+async-channel = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+waterui-icons-material-icon = "0.5.1"
+waterui-barcode = "0.3.0"
+arboard = "3.6.1"
+
+[dev-dependencies]
+waterui-testing = "0.5.1"
+hydrolysis-m3 = "0.3.1"
+pollster = "1"
+
+[workspace]
+
+[workspace.metadata.dylint]
+libraries = [{ git = "https://github.com/water-rs/lints", rev = "b60983da70b4f9f553cef5cd813a8719168ee837" }]
