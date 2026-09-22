@@ -1034,6 +1034,7 @@ impl Store {
         let files = db_root.join("files").to_string_lossy().to_string();
         let _ = std::fs::create_dir_all(&db_root);
         self.screen.set(Screen::Loading);
+        let store = self.clone();
         spawn_local(async move {
             if let Err(e) = functions::set_tdlib_parameters(
                 cfg.test_dc,
@@ -1055,6 +1056,11 @@ impl Store {
             .await
             {
                 error!("setTdlibParameters failed: {e:?}");
+                store
+                    .auth_note
+                    .set_from(format!("{}: {}", e.code, e.message));
+                store.busy.set(false);
+                store.screen.set(Screen::ApiKeys);
             }
         })
         .detach();
@@ -1107,7 +1113,7 @@ impl Store {
     pub fn submit_api_keys(&self) {
         let id: i32 = self.api_id.get().trim().parse().unwrap_or(0);
         let hash = self.api_hash.get().to_string();
-        if id == 0 || hash.is_empty() {
+        if id <= 0 || hash.is_empty() {
             self.auth_note.set_from("Enter a valid api_id and api_hash (from my.telegram.org).");
             return;
         }
@@ -1148,9 +1154,18 @@ impl Store {
 
     pub fn request_qr(&self) {
         self.busy.set(true);
+        self.auth_note.set_from("");
         let client = self.client_id;
+        let store = self.clone();
         spawn_local(async move {
-            let _ = functions::request_qr_code_authentication(Vec::new(), client).await;
+            if let Err(e) =
+                functions::request_qr_code_authentication(Vec::new(), client).await
+            {
+                store.busy.set(false);
+                store
+                    .auth_note
+                    .set_from(format!("{}: {}", e.code, e.message));
+            }
         })
         .detach();
     }
@@ -1208,8 +1223,14 @@ impl Store {
         let last = self.last_name.get().to_string();
         self.busy.set(true);
         let client = self.client_id;
+        let store = self.clone();
         spawn_local(async move {
-            let _ = functions::register_user(first, last, false, client).await;
+            if let Err(e) = functions::register_user(first, last, false, client).await {
+                store.busy.set(false);
+                store
+                    .auth_note
+                    .set_from(format!("{}: {}", e.code, e.message));
+            }
         })
         .detach();
     }

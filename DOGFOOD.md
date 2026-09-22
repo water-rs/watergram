@@ -131,3 +131,28 @@ Findings collected while building a real Telegram client (Watergram) on
   live *inside* `.task(...)`/`.on_appear`, not in `fn main()`/Store::new.
   executor-core's docs don't say when the executor becomes valid; a sentence
   in `task::spawn_local` docs would have saved a crash-debug cycle.
+- **`tdlib_rs::receive()` returns `None` on tdjson's ~2s poll timeout** — a
+  `while let Some(...) = receive()` pump exits on the first idle gap, the
+  channel closes, and the app's update drain dies permanently (frozen
+  "Connecting…" while TDLib keeps working). The pump must `loop` and skip
+  `None`s. Verified live: with the fix the credentials→phone transition
+  proceeds; without it, `authorizationStateWaitPhoneNumber` never reaches
+  the UI. Not a WaterUI bug, but every nami/`spawn_local`-style host will
+  hit this — worth a doc line in tdlib-rs.
+- **hydrolysis winit windows are locked to layout size**: `platform.rs`
+  forwards min=max size limits to `set_{min,max}_inner_size`, so windows
+  can't be resized and collapse to tiny strips on small-content screens
+  (the Loading screen renders at 123x54; `xprop` confirms
+  min=max=123x54). Maximize is undone on every screen change.
+- **`water run`'s shared-dylib freshness check false-positives after a
+  failed/interrupted build**: "no dep-info was found beside it" for
+  `libwaterui_dylib.so` blocks every rebuild until
+  `water gc build-cache --shared-target` (12 GB wipe + full rebuild).
+  The check should repair the single unit instead of requiring a gc.
+- **No a11y bus on the hydrolysis Linux build** (accesskit-atspi not
+  wired?): the window exposes nothing to AT-SPI, so UI automation has to
+  drive raw coordinates. Real users on Orca get nothing either.
+- **GPU-less VMs can render via `WATER_HYDROLYSIS_FORCE_FALLBACK_ADAPTER=1`**
+  (llvmpipe compute actually works — the Material 3 auth screens draw
+  correctly, just slowly). Worth documenting as the standard way to run
+  hydrolysis in CI/headless instead of "diagnostics only".
