@@ -29,10 +29,10 @@
 | 头像 + 在线状态点 | ✅ | `chat.photo`/`user.status` + `downloadFile` | `chat_list_rows` |
 | typing/… 指示 | ✅ | `sendChatAction` + `updateChatAction` | — |
 | 草稿显示 | ✅ | `updateChatDraftMessage` | — |
-| 归档（Archive 文件夹） | ❌ | `ChatList::Archive` + `toggleChatIsPinned` 等位 | — |
+| 归档（Archive 文件夹） | ✅ | `addChatToList(Main/Archive)` + `ChatPosition` | `archive_toggle_rebuilds_list` |
 | 聊天文件夹（Chat Folders） | ❌ | `getChatFolderChatsToLeave`/`chatFolderInfo`/`createChatFolder` | — |
-| 已读回执标记 | 🟡 | `openChat`/`closeChat`/`viewMessages`（单向，无 UI 标记 out） | — |
-| 已标记为未读 | ❌ | `toggleChatIsMarkedAsUnread` | — |
+| 已读回执标记 | ✅ | `viewMessages` + `UpdateChatReadOutbox` → ✓/✓✓ | `read_receipt_double_check` |
+| 已标记为未读 | ✅ | `toggleChatIsMarkedAsUnread` + `UpdateChatIsMarkedAsUnread` | `marked_unread_shows_dot` |
 
 ## 3. 会话与消息
 
@@ -46,11 +46,11 @@
 | 回复 / 引用 | ✅ | `inputMessageReplyTo` | `reply_banner_shows` |
 | 复制文本 | ✅ | `getMessage` + 剪贴板 | — |
 | 已读标记（拉取后回执） | ✅ | `viewMessages` | — |
-| 消息内搜索 | ❌ | `searchChatMessages` | — |
-| 跳转到某条消息（日期/回复定位） | ❌ | `getChatHistory(from_message_id)` 定位模式 | — |
-| 置顶消息条 | ❌ | `chat.pinned_message`/`getChatPinnedMessage`/`pinChatMessage`/`unpinChatMessage` | — |
-| Reactions 展示 | 🟡 | `m.interaction_info.reactions`（仅文本展示） | — |
-| Reactions 发送 | ❌ | `addMessageReaction`/`removeMessageReaction` | — |
+| 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
+| 跳转到某条消息（日期/回复定位） | 🟡 | `getChatHistory` 以目标消息为中心加载窗口（无精确滚动定位） | — |
+| 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
+| Reactions 展示 | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
+| Reactions 发送 | 🟡 | `addMessageReaction`/`removeMessageReaction`（菜单固定 👍/❤️，无表情选择器） | — |
 | 发送中/失败状态 | 🟡 | `updateMessageSendSucceeded`/`Failed`（行内） | — |
 | 定时消息 / 静默发送 | ❌ | `sendMessage(scheduling_state)` | — |
 | 链接预览 | ❌ | `getWebPagePreview`/`link_preview` | — |
@@ -61,15 +61,15 @@
 
 | 功能 | 状态 | TDLib API | 测试 |
 |---|---|---|---|
-| 发送图片 | 🟡 | `sendMessage(inputMessagePhoto)`（FilePicker，无缩略图预览） | — |
-| 发送视频 | ❌ | `inputMessageVideo` | — |
-| 发送文件 | ❌ | `inputMessageDocument` | — |
+| 发送图片 | ✅ | `sendMessage(inputMessagePhoto)`（FilePicker，气泡内 Photo 渲染） | `attachment_content_dispatch` |
+| 发送视频 | ✅ | `sendMessage(inputMessageVideo)`（按扩展名分发） | `attachment_content_dispatch` |
+| 发送文件 | ✅ | `sendMessage(inputMessageDocument)`（默认兜底） | `attachment_content_dispatch` |
 | 语音消息（录制/发送/播放） | ❌ | `inputMessageVoiceNote` + `sendChatActionRecordingVoiceNote` | — |
 | 视频消息 | ❌ | `inputMessageVideoNote` | — |
 | 贴纸 | ❌ | `inputMessageSticker` + `getStickers` | — |
 | GIF | ❌ | `inputMessageAnimation` + `getSavedAnimations` | — |
-| 图片/视频气泡内预览 | 🟡 | `downloadFile` → `file_signal`（仅占位符+路径，无图像渲染） | — |
-| 下载进度指示 | 🟡 | `updateFile`（进度字段已收，UI 未展示） | — |
+| 图片/视频气泡内预览 | 🟡 | `downloadFile` → `file_signal`（图片经 Photo 渲染；视频/文件为标签占位） | `media_slot` |
+| 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ❌ | `sendMessageAlbum` | — |
 
 ## 5. 频道与群组
@@ -78,20 +78,20 @@
 |---|---|---|---|
 | 新建私聊 | ✅ | `createPrivateChat` | — |
 | 新建群组 | ✅ | `createNewSupergroupChat` | — |
-| 公开频道浏览/搜索加入 | 🟡 | `searchChatsOnServer` + `joinChat` | — |
+| 公开频道浏览/搜索加入 | ✅ | `searchChatsOnServer` + `joinChat`（行菜单） | — |
 | 加入/退出 | ✅ | `joinChat`/`leaveChat` | — |
-| 成员列表 | ❌ | `getSupergroupMembers`/`searchChatMembers` | — |
-| 基础管理（改标题/描述/头像、删成员） | ❌ | `setChatTitle`/`setChatDescription`/`setChatPhoto`/`banChatMember`/`setChatMemberStatus` | — |
+| 成员列表 | ✅ | `searchChatMembers`（名字+角色面板） | `members_panel_lists_members` |
+| 基础管理（改标题/描述/头像、删成员） | 🟡 | `setChatMemberStatus(Banned)` 踢人（标题/头像编辑未做） | — |
 | 频道简介/邀请链接 | ❌ | `getChatInviteLink`/`createChatInviteLink` | — |
 
 ## 6. 联系人与个人资料
 
 | 功能 | 状态 | TDLib API | 测试 |
 |---|---|---|---|
-| 联系人列表 | ❌ | `getContacts`/`importContacts`/`searchChatsOnServer` | — |
+| 联系人列表 | ✅ | `getContacts` + `getUser`（新建聊天页，点击开聊） | `contacts_list_renders` |
 | 添加/删除联系人 | ❌ | `addContact`/`removeContacts` | — |
 | 查看对方资料 | 🟡 | `getUser`（仅名字显示） | — |
-| 编辑自己资料（名/简介/用户名/头像） | ❌ | `setName`/`setBio`/`setUsername`/`setProfilePhoto` | — |
+| 编辑自己资料（名/简介/用户名/头像） | 🟡 | `setName`/`setBio`/`setUsername`（头像未做） | `settings_shows_sections` |
 
 ## 7. 设置
 
@@ -101,8 +101,8 @@
 | 账号信息展示 | ✅ | `getMe` | `settings_shows_account` |
 | 通知设置（全局/按聊天） | 🟡 | `setChatNotificationSettings`（仅单聊切换） | — |
 | 隐私设置 | ❌ | `getUserPrivacySettingRules`/`setUserPrivacySettingRules` | — |
-| 两步验证管理 | ❌ | `getPasswordState`/`setPassword` | — |
-| 活跃会话管理 | ❌ | `getActiveSessions`/`terminateSession`/`terminateAllOtherSessions` | — |
+| 两步验证管理 | 🟡 | `getPasswordState` 状态展示（SRP 设置未做） | `settings_shows_sections` |
+| 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`（无批量终止） | `settings_shows_sections` |
 | 语言 | ❌ | `setOption(language_pack_id)` | — |
 | 存储/缓存清理 | ❌ | `getStorageStatistics`/`optimizeStorage` | — |
 
