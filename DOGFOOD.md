@@ -106,3 +106,28 @@ Findings collected while building a real Telegram client (Watergram) on
 - **`water` CLI scaffold (`water create`) generates `Cargo.toml` with a
   misleading `media` feature comment** (see above) and no `.cargo/config.toml`
   hook for `PKG_CONFIG_PATH` — Linux users hit the libva wall on first build.
+- **`water run --backend hydrolysis` does not forward the repo's
+  `.cargo/config.toml` `[build] rustflags` to the managed backend build.**
+  The managed crate lives under
+  `~/.water/build_cache/<repo-path>/managed_backends/hydrolysis`, so cargo
+  config discovery starts there and never sees the app repo's config; even
+  `$HOME/.cargo/config.toml` is not applied (likely a `CARGO_HOME`/`--config`
+  override). Any project whose native deps need extra link flags — e.g.
+  tdlib-rs' prebuilt libtdjson needing `__isoc23_strtol`/`__libcpp_verbose_abort`
+  shims — fails at link with `undefined symbol`. Workaround: prefix the
+  command with `RUSTFLAGS="..."` (env var *does* reach the build). Repro:
+  add `-l dylib=foo` to `<repo>/.cargo/config.toml`, run `water run`, watch
+  `cargo rustc` stderr lack the flag.
+- **`water run` produces a dist dir whose `libwaterui_dylib.so` is renamed
+  (hash stripped) but the launcher binary links against the hashed name.**
+  Launch fails instantly: `error while loading shared libraries:
+  libwaterui_dylib-<hash>.so: cannot open shared object file`. RUNPATH is
+  `$ORIGIN`, so a `ln -s libwaterui_dylib.so libwaterui_dylib-<hash>.so`
+  inside `dist/linux/debug/` fixes it — water should either copy the hashed
+  filename or pass `-Wl,-soname`/rewrite the dep name.
+- **`waterui::task::spawn_local` called during view construction panics
+  (`Local executor not set`) on hydrolysis** — the local executor is only
+  installed once the backend runs the mounted view, so async init work must
+  live *inside* `.task(...)`/`.on_appear`, not in `fn main()`/Store::new.
+  executor-core's docs don't say when the executor becomes valid; a sentence
+  in `task::spawn_local` docs would have saved a crash-debug cycle.

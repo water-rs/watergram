@@ -22,9 +22,9 @@ use waterui::theme::Theme;
 fn main() -> impl View {
     let (client_id, rx) = td::spawn_client();
     let store = Store::new(client_id);
-    store.start();
     let s = store.clone();
     views::root(store).task(async move {
+        s.start();
         while let Ok(update) = rx.recv().await {
             s.update(update);
         }
@@ -34,7 +34,6 @@ fn main() -> impl View {
 pub fn app(mut env: Environment) -> App {
     let (client_id, rx) = td::spawn_client();
     let store = Store::new(client_id);
-    store.start();
     env.install(
         Theme::new().color_scheme(
             store
@@ -47,6 +46,7 @@ pub fn app(mut env: Environment) -> App {
             let s = store.clone();
             let rx2 = rx.clone();
             views::root(store.clone()).task(async move {
+                s.start();
                 while let Ok(update) = rx2.recv().await {
                     s.update(update);
                 }
