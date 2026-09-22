@@ -183,6 +183,7 @@ impl Ord for MessageRow {
 pub enum Route {
     Settings,
     NewChat,
+    Profile,
 }
 
 #[state]
@@ -288,6 +289,10 @@ pub struct Store {
     /// Which list the sidebar shows: 0 = Main, -1 = Archive, n = folder id.
     /// Kept in sync with `archive_mode` (which views already read).
     pub active_folder: Binding<i32>,
+    /// Peer profile card for the Profile route (None until loaded).
+    pub profile: Binding<Option<ProfileCard>>,
+    /// Picked file for the own-avatar upload on Settings.
+    pub avatar_pick: Binding<Vec<Url>>,
 }
 
 /// One chat folder tab in the sidebar strip.
@@ -299,6 +304,17 @@ pub struct FolderRow {
     pub title: Str,
     /// Currently selected tab (drives accent styling).
     pub active: bool,
+}
+
+/// Peer profile card for the Profile route.
+#[derive(Clone, Default)]
+pub struct ProfileCard {
+    pub user_id: i64,
+    pub name: Str,
+    pub username: Str,
+    pub phone: Str,
+    pub bio: Str,
+    pub online: bool,
 }
 
 /// One row of the read-only privacy summary in Settings.
@@ -586,6 +602,8 @@ impl Store {
             privacy_rows: Binding::<Vec<PrivacyRow>>::default(),
             folders: Binding::<Vec<FolderRow>>::default(),
             active_folder: Binding::i32(0),
+            profile: Binding::default(),
+            avatar_pick: Binding::<Vec<Url>>::default(),
         }
     }
 
@@ -2738,6 +2756,76 @@ impl Store {
             {
                 store.load_storage();
             }
+        })
+        .detach();
+    }
+
+    /// Load a user's profile into the Profile route card and push it.
+    pub fn open_profile(&self, user_id: i64) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let mut card = ProfileCard {
+                user_id,
+                ..Default::default()
+            };
+            if let Ok(enums::User::User(u)) = functions::get_user(user_id, client).await {
+                card.name = format!("{} {}", u.first_name, u.last_name)
+                    .trim()
+                    .to_string()
+                    .into();
+                card.username = u
+                    .usernames
+                    .as_ref()
+                    .and_then(|x| x.active_usernames.first())
+                    .map(|s| format!("@{s}"))
+                    .unwrap_or_default()
+                    .into();
+                card.phone = u.phone_number.clone().into();
+                card.online = matches!(u.status, enums::UserStatus::Online(_));
+            }
+            if let Ok(enums::UserFullInfo::UserFullInfo(f)) =
+                functions::get_user_full_info(user_id, client).await
+                && let Some(bio) = f.bio
+            {
+                card.bio = bio.text.into();
+            }
+            store.profile.set(Some(card));
+            store.nav.push(Route::Profile);
+        })
+        .detach();
+    }
+
+    /// Upload the picked Settings file as the account's profile photo.
+    pub fn set_avatar(&self) {
+        let client = self.client_id;
+        let urls = self.avatar_pick.get();
+        let Some(url) = urls.first() else { return };
+        if client == 0 {
+            return;
+        }
+        let path = url.path().to_string();
+        if path.is_empty() {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let ok = functions::set_profile_photo(
+                enums::InputChatPhoto::Static(types::InputChatPhotoStatic {
+                    photo: enums::InputFile::Local(types::InputFileLocal { path }),
+                }),
+                false,
+                client,
+            )
+            .await
+            .is_ok();
+            store.avatar_pick.set(Vec::new());
+            store
+                .profile_note
+                .set_from(if ok { "Avatar updated" } else { "Avatar upload failed" });
         })
         .detach();
     }

@@ -531,4 +531,22 @@ mod tests {
         app.query().label("Work").assert_exists();
         app.query().label("Archive").assert_exists();
     }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn profile_view_renders(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.profile.set(Some(crate::state::ProfileCard {
+            user_id: 42,
+            name: "Alice A".into(),
+            username: "@alice".into(),
+            phone: "+1999".into(),
+            bio: "hello world".into(),
+            online: true,
+        }));
+        let mut app = ui.mount(move || views::profile_view(store.clone()).state(&store));
+        app.query().label("Alice A").assert_exists();
+        app.query().label("@alice").assert_exists();
+        app.query().label("hello world").assert_exists();
+        app.query().label("online").assert_exists();
+    }
 }

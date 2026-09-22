@@ -20,6 +20,7 @@ use waterui::theme::color::{
 use waterui::views::ForEach;
 use waterui::widget::condition::when;
 use waterui_barcode::Barcode;
+use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
 use crate::state::{ChatRow, FolderRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
@@ -227,6 +228,7 @@ pub(crate) fn sidebar_stack(store: Store) -> impl View {
         move |route| match route {
             Route::Settings => settings_view(inner.clone()),
             Route::NewChat => new_chat_view(inner.clone()),
+            Route::Profile => profile_view(inner.clone()),
         },
     )
 }
@@ -613,6 +615,12 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     SignalCollection::new(store.members.clone()),
                     move |row: MemberRow| {
                         let r_kick = row.clone();
+                        let is_user =
+                            matches!(row.sender, enums::MessageSender::User(_));
+                        let uid = match &row.sender {
+                            enums::MessageSender::User(u) => u.user_id,
+                            _ => 0,
+                        };
                         hstack((
                             text(row.name.clone()).caption(),
                             spacer(),
@@ -620,6 +628,11 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         ))
                         .spacing(6.0)
                         .padding_with((10.0, 4.0))
+                        .on_tap(move |store: Store| {
+                            if is_user {
+                                store.open_profile(uid)
+                            }
+                        })
                         .context_menu((
                             "Kick".action(move |store: Store| {
                                 store.kick_member(&r_kick)
@@ -860,10 +873,16 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     };
     let r6 = row.clone();
     let r7 = row.clone();
+    let r8 = row.clone();
+    let r9 = row.clone();
+    let r10 = row.clone();
     let bubble = bubble.context_menu((
         "Reply".action(move |store: Store| store.start_reply(&r1)),
         react_label.action(move |store: Store| store.toggle_reaction(&r6, "👍")),
         "React ❤️".action(move |store: Store| store.toggle_reaction(&r7, "❤️")),
+        "React 😂".action(move |store: Store| store.toggle_reaction(&r8, "😂")),
+        "React 😮".action(move |store: Store| store.toggle_reaction(&r9, "😮")),
+        "React 😢".action(move |store: Store| store.toggle_reaction(&r10, "😢")),
         "Forward".action(move |store: Store| store.start_forward(&r2)),
         pin_label.action(move |store: Store| {
             if pinned {
@@ -973,6 +992,11 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 spacer(),
                 button("Save").action(|store: Store| store.save_profile()),
             )),
+            hstack((
+                FilePicker::open(label("Choose photo").icon(image_outline()), &store.avatar_pick),
+                button("Set avatar").action(|store: Store| store.set_avatar()),
+            ))
+            .spacing(8.0),
         ))
         .spacing(10.0)
         .leading(),
@@ -1061,6 +1085,49 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         }
     });
     NavigationView::new("Settings", content)
+}
+
+pub(crate) fn profile_view(store: Store) -> NavigationView {
+    let card = store.profile.clone();
+    let name = card.map(|c| {
+        c.as_ref().map(|c| c.name.clone()).unwrap_or_default()
+    });
+    let username = card.map(|c| {
+        c.as_ref().map(|c| c.username.clone()).unwrap_or_default()
+    });
+    let phone = card.map(|c| {
+        c.as_ref().map(|c| c.phone.clone()).unwrap_or_default()
+    });
+    let bio = card.map(|c| {
+        c.as_ref().map(|c| c.bio.clone()).unwrap_or_default()
+    });
+    let online = card.map(|c| c.as_ref().map(|c| c.online).unwrap_or(false));
+    let uid = card.map(|c| c.as_ref().map(|c| c.user_id).unwrap_or(0));
+
+    let content = scroll(vstack((
+        text!("{name}", name = name.clone()).headline(),
+        text!("{username}", username = username.clone())
+            .caption()
+            .muted(),
+        when(online.distinct(), || {
+            text("online").caption().foreground(Accent)
+        }),
+        hstack((text("Phone"), spacer(), text!("{phone}", phone = phone.clone()).muted())),
+        text!("{bio}", bio = bio.clone()).body().muted(),
+        hstack((
+            spacer(),
+            button("Message").action(move |store: Store| {
+                let id = uid.get();
+                if id != 0 {
+                    store.nav.pop();
+                    store.start_chat_with(id);
+                }
+            }),
+        )),
+    ))
+    .spacing(10.0)
+    .padding_with((16.0, 12.0)));
+    NavigationView::new("Profile", content)
 }
 
 pub(crate) fn new_chat_view(store: Store) -> NavigationView {

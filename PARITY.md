@@ -50,7 +50,7 @@
 | 跳转到某条消息（日期/回复定位） | 🟡 | `getChatHistory` 以目标消息为中心加载窗口（无精确滚动定位） | — |
 | 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
 | Reactions 展示 | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
-| Reactions 发送 | 🟡 | `addMessageReaction`/`removeMessageReaction`（菜单固定 👍/❤️，无表情选择器） | — |
+| Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
 | 发送中/失败状态 | 🟡 | `updateMessageSendSucceeded`/`Failed`（行内） | — |
 | 定时消息 / 静默发送 | ✅ | `sendMessage(MessageSendOptions{disable_notification,scheduling_state=SendAtDate})` — 发送按钮右键 | — (send_opt 路径） |
 | 链接预览 | ✅ | `MessageText.link_preview` → 站内一行卡片（site—title·desc) | `link_preview_line_shows` |
@@ -90,8 +90,8 @@
 |---|---|---|---|
 | 联系人列表 | ✅ | `getContacts` + `getUser`（新建聊天页，点击开聊） | `contacts_list_renders` |
 | 添加/删除联系人 | ✅ | `importContacts`（电话+姓名表单）/`removeContacts`（行右键菜单） | `contacts_add_form_opens` |
-| 查看对方资料 | 🟡 | `getUser`（仅名字显示） | — |
-| 编辑自己资料（名/简介/用户名/头像） | 🟡 | `setName`/`setBio`/`setUsername`（头像未做） | `settings_shows_sections` |
+| 查看对方资料 | ✅ | `getUser` + `getUserFullInfo` → Profile 路由（名/用户名/电话/简介/在线 + Message 按钮） | `profile_view_renders` |
+| 编辑自己资料（名/简介/用户名/头像） | ✅ | `setName`/`setBio`/`setUsername` + `setProfilePhoto`（Settings 选图上传） | `settings_shows_sections` |
 
 ## 7. 设置
 
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：49 项 ｜ 部分 🟡：14 项 ｜ 未实现 ❌：4 项
+- 已实现 ✅：52 项 ｜ 部分 🟡：11 项 ｜ 未实现 ❌：4 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
