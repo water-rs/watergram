@@ -66,7 +66,7 @@
 | 发送文件 | ✅ | `sendMessage(inputMessageDocument)`（默认兜底） | `attachment_content_dispatch` |
 | 语音消息（录制/发送/播放） | 🟡 | 播放：`downloadFile` → `video_player`；发送：ogg/opus 文件 → `inputMessageVoiceNote`；录制缺采集组件 | `media_play_fallback_row` |
 | 视频消息 | 🟡 | 播放：`downloadFile` → `video_player`；圆形视频消息录制缺采集组件 | `media_play_fallback_row` |
-| 贴纸 | 🟡 | `getRecentStickers` + `searchStickers`（emoji 搜索）→ `inputMessageSticker`；无贴纸包浏览 | `sticker_picker_toggles` |
+| 贴纸 | ✅ | `getRecentStickers`/`searchStickers`/`getInstalledStickerSets`/`getStickerSet`（emoji 搜索+贴纸包浏览）→ `inputMessageSticker` | `sticker_picker_toggles` |
 | GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（同贴纸面板，缩略图） | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
@@ -99,7 +99,7 @@
 |---|---|---|---|
 | 深色模式 | ✅ | env `ColorScheme` | `dark_mode_toggle` |
 | 账号信息展示 | ✅ | `getMe` | `settings_shows_account` |
-| 通知设置（全局/按聊天） | 🟡 | `setChatNotificationSettings`（仅单聊切换） | — |
+| 通知设置（全局/按聊天） | ✅ | `setChatNotificationSettings`（单聊）+ `setScopeNotificationSettings`（私聊/群/频道三项全局开关） | — |
 | 隐私设置 | 🟡 | `getUserPrivacySettingRules` + `setUserPrivacySettingRules`（右键菜单 Everyone/My contacts/Nobody 预设；无逐用户例外编辑） | `privacy_audience_mapping` |
 | 两步验证管理 | 🟡 | `getPasswordState` 状态展示（SRP 设置未做） | `settings_shows_sections` |
 | 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`/`terminateAllOtherSessions` | `settings_shows_sections` |

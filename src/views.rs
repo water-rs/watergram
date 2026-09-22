@@ -24,7 +24,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{AccountRow, ChatRow, FolderRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
+use crate::state::{AccountRow, ChatRow, FolderRow, PackRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
 use mdi::account;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -798,6 +798,25 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 ))
                 .spacing(6.0)
                 .padding_with((8.0, 2.0)),
+            {
+                let packs = store.sticker_packs.clone();
+                scroll(Lazy::hstack(ForEach::new(
+                    SignalCollection::new(packs.clone()),
+                    move |pack: PackRow| {
+                        let id = pack.id;
+                        text(pack.title.clone())
+                            .caption()
+                            .padding_with((8.0, 2.0))
+                            .background(
+                                RoundedRectangle::new(0.5).fill(SurfaceVariant),
+                            )
+                            .on_tap(move |store: Store| {
+                                store.open_sticker_pack(id)
+                            })
+                    },
+                )))
+                .max_height(28.0)
+            },
             scroll(Lazy::hstack(ForEach::new(
                 SignalCollection::new(sticker_items.clone()),
                 move |item: StickerItem| {
@@ -1103,6 +1122,7 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn settings_view(store: Store) -> NavigationView {
+    store.start_notification_watchers();
     let me = store.me.clone();
     let dark = store.dark.clone();
 
@@ -1185,6 +1205,13 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     ))
                 },
             )),
+            vstack((
+                text("Notifications").caption().muted(),
+                toggle("Private chats", &store.notif_private),
+                toggle("Groups", &store.notif_groups),
+                toggle("Channels", &store.notif_channels),
+            ))
+            .spacing(4.0),
             hstack((
                 text("Active sessions").caption().muted(),
                 spacer(),

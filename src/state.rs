@@ -311,6 +311,14 @@ pub struct Store {
     /// Account switcher rows + dropdown state.
     pub accounts: Binding<Vec<AccountRow>>,
     pub accounts_open: Binding<bool>,
+    /// Installed sticker packs shown above the sticker cells.
+    pub sticker_packs: Binding<Vec<PackRow>>,
+    /// Guards keeping notification-scope watchers alive.
+    notif_watchers: Rc<RefCell<Vec<Box<dyn std::any::Any>>>>,
+    /// Global notification toggles (per scope; true = notifications on).
+    pub notif_private: Binding<bool>,
+    pub notif_groups: Binding<bool>,
+    pub notif_channels: Binding<bool>,
 }
 
 /// One chat folder tab in the sidebar strip.
@@ -322,6 +330,15 @@ pub struct FolderRow {
     pub title: Str,
     /// Currently selected tab (drives accent styling).
     pub active: bool,
+}
+
+/// An installed sticker pack for the picker.
+#[derive(Clone, Identifiable)]
+pub struct PackRow {
+    /// TDLib sticker-set id (row key).
+    #[id]
+    pub id: i64,
+    pub title: Str,
 }
 
 /// A signed-in TDLib client in the account switcher.
@@ -643,6 +660,11 @@ impl Store {
             editing_folder: Binding::i32(0),
             accounts: Binding::<Vec<AccountRow>>::default(),
             accounts_open: Binding::bool(false),
+            sticker_packs: Binding::<Vec<PackRow>>::default(),
+            notif_watchers: Rc::new(RefCell::new(Vec::new())),
+            notif_private: Binding::bool(true),
+            notif_groups: Binding::bool(true),
+            notif_channels: Binding::bool(true),
         }
     }
 
@@ -2673,6 +2695,7 @@ impl Store {
         if client == 0 {
             return;
         }
+        self.load_sticker_packs();
         let store = self.clone();
         spawn_local(async move {
             let mut items: Vec<StickerItem> = Vec::new();
@@ -2711,6 +2734,106 @@ impl Store {
                 }
             }
             store.sticker_items.set(items);
+        })
+        .detach();
+    }
+
+    /// Load installed sticker packs into the picker's pack strip.
+    pub fn load_sticker_packs(&self) {
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::StickerSets::StickerSets(ss)) =
+                functions::get_installed_sticker_sets(
+                    enums::StickerType::Regular,
+                    client,
+                )
+                .await
+            {
+                store.sticker_packs.set(
+                    ss.sets
+                        .iter()
+                        .map(|i| PackRow {
+                            id: i.id,
+                            title: i.title.clone().into(),
+                        })
+                        .collect(),
+                );
+            }
+        })
+        .detach();
+    }
+
+    /// Load a sticker pack's stickers into the picker cells.
+    pub fn open_sticker_pack(&self, set_id: i64) {
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::StickerSet::StickerSet(set)) =
+                functions::get_sticker_set(set_id, client).await
+            {
+                store.replace_stickers_with(set.stickers);
+            }
+        })
+        .detach();
+    }
+
+    /// Register once-per-session watchers pushing toggle state to TDLib.
+    pub fn start_notification_watchers(&self) {
+        if !self.notif_watchers.borrow().is_empty() {
+            return;
+        }
+        for (binding, scope) in [
+            (self.notif_private.clone(), "private"),
+            (self.notif_groups.clone(), "groups"),
+            (self.notif_channels.clone(), "channels"),
+        ] {
+            let store = self.clone();
+            let guard = Signal::watch(
+                &binding,
+                move |ctx| store.set_scope_notifications(scope, ctx.into_value()),
+            );
+            self.notif_watchers
+                .borrow_mut()
+                .push(Box::new(guard) as Box<dyn std::any::Any>);
+        }
+    }
+
+    /// Apply a global notification mute toggle for one scope.
+    pub fn set_scope_notifications(&self, scope: &str, on: bool) {
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        let ns_scope = match scope {
+            "groups" => enums::NotificationSettingsScope::GroupChats,
+            "channels" => enums::NotificationSettingsScope::ChannelChats,
+            _ => enums::NotificationSettingsScope::PrivateChats,
+        };
+        let settings = types::ScopeNotificationSettings {
+            mute_for: if on { 0 } else { i32::MAX },
+            sound_id: 0,
+            show_preview: true,
+            use_default_mute_stories: true,
+            mute_stories: false,
+            story_sound_id: 0,
+            show_story_poster: false,
+            disable_pinned_message_notifications: false,
+            disable_mention_notifications: false,
+        };
+        spawn_local(async move {
+            let _ = functions::set_scope_notification_settings(
+                ns_scope,
+                settings,
+                client,
+            )
+            .await;
         })
         .detach();
     }
