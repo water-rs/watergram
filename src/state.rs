@@ -296,6 +296,18 @@ pub struct Store {
     pub profile: Binding<Option<ProfileCard>>,
     /// Picked file for the own-avatar upload on Settings.
     pub avatar_pick: Binding<Vec<Url>>,
+    /// Chat avatar picker (group admin section).
+    pub chat_avatar_pick: Binding<Vec<Url>>,
+    /// Sticker picker emoji-query field.
+    pub sticker_query: Binding<Str>,
+    /// Folder editor sheet state.
+    pub folder_open: Binding<bool>,
+    pub folder_name: Binding<Str>,
+    pub folder_contacts: Binding<bool>,
+    pub folder_groups: Binding<bool>,
+    pub folder_channels: Binding<bool>,
+    /// Folder being edited; 0 = creating a new one.
+    pub editing_folder: Binding<i32>,
 }
 
 /// One chat folder tab in the sidebar strip.
@@ -328,6 +340,8 @@ pub struct PrivacyRow {
     pub setting: Str,
     /// Who can see it: "Everyone" / "My contacts" / "Nobody" / "Custom".
     pub audience: Str,
+    /// TDLib setting this row controls.
+    pub key: enums::UserPrivacySetting,
 }
 
 /// How the composer's picked files are delivered.
@@ -607,6 +621,14 @@ impl Store {
             active_folder: Binding::i32(0),
             profile: Binding::default(),
             avatar_pick: Binding::<Vec<Url>>::default(),
+            chat_avatar_pick: Binding::<Vec<Url>>::default(),
+            sticker_query: Binding::<Str>::default(),
+            folder_open: Binding::bool(false),
+            folder_name: Binding::<Str>::default(),
+            folder_contacts: Binding::bool(true),
+            folder_groups: Binding::bool(true),
+            folder_channels: Binding::bool(true),
+            editing_folder: Binding::i32(0),
         }
     }
 
@@ -2163,7 +2185,18 @@ impl Store {
                     has_spoiler: false,
                 })
             }
-            "mp3" | "ogg" | "m4a" | "flac" | "wav" | "opus" => {
+            "ogg" | "opus" => {
+                enums::InputMessageContent::InputMessageVoiceNote(
+                    types::InputMessageVoiceNote {
+                        voice_note: file,
+                        duration: 0,
+                        waveform: String::new(),
+                        caption,
+                        self_destruct_type: None,
+                    },
+                )
+            }
+            "mp3" | "m4a" | "flac" | "wav" => {
                 enums::InputMessageContent::InputMessageAudio(types::InputMessageAudio {
                     audio: file,
                     album_cover_thumbnail: None,
@@ -2655,6 +2688,30 @@ impl Store {
         .detach();
     }
 
+    /// Replace picker contents with a TDLib sticker result set.
+    fn replace_stickers_with(&self, stickers: Vec<types::Sticker>) {
+        let client = self.client_id;
+        let store = self.clone();
+        spawn_local(async move {
+            let mut items = Vec::new();
+            for st in stickers {
+                let thumb = st.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0);
+                if thumb != 0 {
+                    let _ =
+                        functions::download_file(thumb, 8, 0, 0, false, client).await;
+                }
+                items.push(StickerItem {
+                    file_id: st.sticker.id,
+                    thumb,
+                    emoji: st.emoji.into(),
+                    gif: false,
+                });
+            }
+            store.sticker_items.set(items);
+        })
+        .detach();
+    }
+
     /// Send a sticker or saved GIF into the open chat.
     pub fn send_sticker(&self, item: StickerItem) {
         let chat_id = self.open_chat.get();
@@ -2798,6 +2855,164 @@ impl Store {
         .detach();
     }
 
+    /// Apply an audience preset to a privacy setting and reload.
+    pub fn set_privacy_audience(&self, key: enums::UserPrivacySetting, audience: &str) {
+        let client = self.client_id;
+        if client == 0 {
+            return;
+        }
+        let rule = match audience {
+            "Everyone" => enums::UserPrivacySettingRule::AllowAll,
+            "Nobody" => enums::UserPrivacySettingRule::RestrictAll,
+            _ => enums::UserPrivacySettingRule::AllowContacts,
+        };
+        let store = self.clone();
+        spawn_local(async move {
+            let _ = functions::set_user_privacy_setting_rules(
+                key,
+                types::UserPrivacySettingRules { rules: vec![rule] },
+                client,
+            )
+            .await;
+            store.load_privacy();
+        })
+        .detach();
+    }
+
+    /// Open the folder editor for `id` (0 = new folder).
+    pub fn open_folder_editor(&self, id: i32) {
+        self.editing_folder.set(id);
+        if id == 0 {
+            self.folder_name.set("".into());
+        } else {
+            let name = self
+                .folders
+                .get()
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| f.title.clone())
+                .unwrap_or_default();
+            self.folder_name.set(name);
+        }
+        self.folder_open.set(true);
+    }
+
+    /// Create or rename a chat folder from the editor form.
+    pub fn save_folder(&self) {
+        let client = self.client_id;
+        let name = self.folder_name.get().to_string();
+        if client == 0 || name.trim().is_empty() {
+            return;
+        }
+        let folder = types::ChatFolder {
+            name: types::ChatFolderName {
+                text: types::FormattedText {
+                    text: name,
+                    entities: Vec::new(),
+                },
+                animate_custom_emoji: false,
+            },
+            icon: None,
+            color_id: -1,
+            is_shareable: false,
+            pinned_chat_ids: Vec::new(),
+            included_chat_ids: Vec::new(),
+            excluded_chat_ids: Vec::new(),
+            exclude_muted: false,
+            exclude_read: false,
+            exclude_archived: false,
+            include_contacts: self.folder_contacts.get(),
+            include_non_contacts: false,
+            include_bots: false,
+            include_groups: self.folder_groups.get(),
+            include_channels: self.folder_channels.get(),
+        };
+        let id = self.editing_folder.get();
+        let store = self.clone();
+        spawn_local(async move {
+            let ok = if id == 0 {
+                functions::create_chat_folder(folder, client).await.is_ok()
+            } else {
+                functions::edit_chat_folder(id, folder, client)
+                    .await
+                    .is_ok()
+            };
+            store.folder_open.set(false);
+            let _ = ok;
+            // The folder list refreshes through Update::ChatFolders.
+        })
+        .detach();
+    }
+
+    /// Delete a chat folder by id (chats stay in the main list).
+    pub fn delete_folder(&self, id: i32) {
+        let client = self.client_id;
+        if client == 0 || id <= 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let _ = functions::delete_chat_folder(id, Vec::new(), client).await;
+            if store.active_folder.get() == id {
+                store.set_list(0);
+            }
+        })
+        .detach();
+    }
+
+    /// Search stickers by emoji text and show results in the picker.
+    pub fn search_stickers_by(&self) {
+        let client = self.client_id;
+        let emoji = self.sticker_query.get().to_string();
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Stickers::Stickers(set)) = functions::search_stickers(
+                enums::StickerType::Regular,
+                emoji.clone(),
+                String::new(),
+                Vec::new(),
+                0,
+                40,
+                client,
+            )
+            .await
+            {
+                store.replace_stickers_with(set.stickers);
+            }
+        })
+        .detach();
+    }
+
+    /// Upload the picked file as this chat's photo.
+    pub fn set_chat_avatar(&self) {
+        let client = self.client_id;
+        let chat_id = self.open_chat.get();
+        let urls = self.chat_avatar_pick.get();
+        let Some(url) = urls.first() else { return };
+        let path = url.path().to_string();
+        if client == 0 || chat_id == 0 || path.is_empty() {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let _ = functions::set_chat_photo(
+                chat_id,
+                Some(enums::InputChatPhoto::Static(
+                    types::InputChatPhotoStatic {
+                        photo: enums::InputFile::Local(types::InputFileLocal { path }),
+                    },
+                )),
+                client,
+            )
+            .await;
+            store.chat_avatar_pick.set(Vec::new());
+        })
+        .detach();
+    }
+
     /// Load a user's profile into the Profile route card and push it.
     pub fn open_profile(&self, user_id: i64) {
         let client = self.client_id;
@@ -2889,11 +3104,16 @@ impl Store {
             let mut rows = Vec::new();
             for (setting, label) in keys {
                 if let Ok(enums::UserPrivacySettingRules::UserPrivacySettingRules(rs)) =
-                    functions::get_user_privacy_setting_rules(setting, client).await
+                    functions::get_user_privacy_setting_rules(
+                        setting.clone(),
+                        client,
+                    )
+                    .await
                 {
                     rows.push(PrivacyRow {
                         setting: label.into(),
                         audience: privacy_audience(&rs.rules).into(),
+                        key: setting,
                     });
                 }
             }

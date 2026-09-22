@@ -26,6 +26,7 @@ use waterui_icons_material_icon as mdi;
 
 use crate::state::{ChatRow, FolderRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
 use mdi::account;
+use mdi::folder_plus;
 use mdi::account_group;
 use mdi::alert_circle;
 use mdi::archive;
@@ -303,30 +304,76 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         ))
         .padding_with((12.0, 6.0)),
         when(has_folders, move || {
-            scroll(Lazy::hstack(ForEach::new(
-                SignalCollection::new(folder_tabs.clone()),
-                move |tab: FolderRow| {
-                    let label = tab.title.clone();
-                    if tab.active {
-                        text(label)
-                            .caption()
-                            .bold()
-                            .foreground(Accent)
-                            .padding_with((10.0, 3.0))
-                            .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
-                            .on_tap(move |store: Store| store.set_list(tab.id))
-                            .anyview()
-                    } else {
-                        text(label)
-                            .caption()
-                            .muted()
-                            .padding_with((10.0, 3.0))
-                            .on_tap(move |store: Store| store.set_list(tab.id))
-                            .anyview()
-                    }
-                },
-            )))
-            .padding_with((8.0, 4.0))
+            let folder_edit = store.folder_open.clone();
+            vstack((
+                hstack((
+                    scroll(Lazy::hstack(ForEach::new(
+                        SignalCollection::new(folder_tabs.clone()),
+                        move |tab: FolderRow| {
+                            let label = tab.title.clone();
+                            let id = tab.id;
+                            let chip = if tab.active {
+                                text(label)
+                                    .caption()
+                                    .bold()
+                                    .foreground(Accent)
+                                    .anyview()
+                            } else {
+                                text(label).caption().muted().anyview()
+                            };
+                            let chip = chip
+                                .padding_with((10.0, 3.0))
+                                .background(if tab.active {
+                                    RoundedRectangle::new(0.5)
+                                        .fill(SurfaceVariant)
+                                        .anyview()
+                                } else {
+                                    AnyView::default()
+                                })
+                                .on_tap(move |store: Store| store.set_list(id));
+                            if id > 0 {
+                                chip.context_menu((
+                                    "Edit folder".action(move |store: Store| {
+                                        store.open_folder_editor(id)
+                                    }),
+                                    "Delete folder".action(
+                                        move |store: Store| store.delete_folder(id),
+                                    ),
+                                ))
+                                .anyview()
+                            } else {
+                                chip.anyview()
+                            }
+                        },
+                    ))),
+                    icon_button(folder_plus(), "New folder", |store: Store| {
+                        store.open_folder_editor(0)
+                    }),
+                ))
+                .padding_with((8.0, 4.0)),
+                {
+                    let fname = store.folder_name.clone();
+                    let fc = store.folder_contacts.clone();
+                    let fg = store.folder_groups.clone();
+                    let fch = store.folder_channels.clone();
+                    when(folder_edit, move || {
+                    vstack((
+                        field("Folder name", &fname).hide_label(),
+                        toggle("Contacts", &fc),
+                        toggle("Groups", &fg),
+                        toggle("Channels", &fch),
+                        hstack((
+                            spacer(),
+                            button("Save folder").action(|store: Store| {
+                                store.save_folder()
+                            }),
+                        )),
+                    ))
+                    .spacing(6.0)
+                    .padding_with((10.0, 4.0))
+                })
+                }
+            ))
         }),
         when(forward_mode, || {
             hstack((
@@ -602,6 +649,15 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 .spacing(6.0)
                 .padding_with((10.0, 0.0)),
                 hstack((
+                    FilePicker::open(
+                        label("Photo").icon(image_outline()),
+                        &store.chat_avatar_pick,
+                    ),
+                    button("Set photo").action(|store: Store| store.set_chat_avatar()),
+                ))
+                .spacing(6.0)
+                .padding_with((10.0, 0.0)),
+                hstack((
                     link_variant().tint(MutedForeground).size(14.0, 14.0),
                     text!("{invite_link}", invite_link = store.invite_link.clone())
                         .caption()
@@ -706,6 +762,17 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         }),
         when(stickers_open, move || {
             let cells = store_cells.clone();
+            vstack((
+                hstack((
+                    field("Emoji search", &store.sticker_query)
+                        .prompt("😀 emoji")
+                        .hide_label(),
+                    icon_button(magnify(), "Search stickers", |store: Store| {
+                        store.search_stickers_by()
+                    }),
+                ))
+                .spacing(6.0)
+                .padding_with((8.0, 2.0)),
             scroll(Lazy::hstack(ForEach::new(
                 SignalCollection::new(sticker_items.clone()),
                 move |item: StickerItem| {
@@ -736,7 +803,8 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         .on_tap(move |store: Store| store.send_sticker(it.clone()))
                 },
             )))
-            .max_height(96.0)
+            .max_height(96.0),
+            ))
         }),
         hstack((
             FilePicker::open(label("Attach file").icon(paperclip()), &store.attach)
@@ -1071,10 +1139,24 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             Lazy::vstack(ForEach::new(
                 SignalCollection::new(store.privacy_rows.clone()),
                 move |row: PrivacyRow| {
+                    let k = row.key.clone();
+                    let k2 = row.key.clone();
+                    let k3 = row.key.clone();
                     hstack((
                         text(row.setting.clone()).caption(),
                         spacer(),
                         text(row.audience.clone()).caption().muted(),
+                    ))
+                    .context_menu((
+                        "Everyone".action(move |store: Store| {
+                            store.set_privacy_audience(k.clone(), "Everyone")
+                        }),
+                        "My contacts".action(move |store: Store| {
+                            store.set_privacy_audience(k2.clone(), "My contacts")
+                        }),
+                        "Nobody".action(move |store: Store| {
+                            store.set_privacy_audience(k3.clone(), "Nobody")
+                        }),
                     ))
                 },
             )),

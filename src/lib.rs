@@ -58,7 +58,7 @@ pub fn app(mut env: Environment) -> App {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::{ChatRow, MessageRow, Screen, Store};
+    use crate::state::{ChatRow, FolderRow, MessageRow, Screen, Store};
     use crate::views;
     use waterui::prelude::*;
     use waterui_testing::{Role, Styled, UiBuilder};
@@ -562,5 +562,20 @@ mod tests {
         });
         // File 99 is not downloaded -> labelled progress fallback, no crash.
         app.query().label("Voice").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn folder_editor_opens(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.folders.set(vec![FolderRow {
+            id: 2,
+            title: "Work".into(),
+            active: false,
+        }]);
+        store.folder_open.set(true);
+        let mut app =
+            ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        app.query().label("Save folder").assert_exists();
+        app.query().label("New folder").assert_exists();
     }
 }

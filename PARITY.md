@@ -30,7 +30,7 @@
 | typing/… 指示 | ✅ | `sendChatAction` + `updateChatAction` | — |
 | 草稿显示 | ✅ | `updateChatDraftMessage` | — |
 | 归档（Archive 文件夹） | ✅ | `addChatToList(Main/Archive)` + `ChatPosition` | `archive_toggle_rebuilds_list` |
-| 聊天文件夹（Chat Folders） | 🟡 | `updateChatFolders` + `ChatList::Folder`/`loadChats` → 侧栏 tab 条（All/文件夹/Archive 切换）；创建/编辑文件夹未做 | `folder_tabs_render` |
+| 聊天文件夹（Chat Folders） | ✅ | `updateChatFolders` + `ChatList::Folder`/`loadChats` 侧栏 tab；`createChatFolder`/`editChatFolder`/`deleteChatFolder`（名称+联系人群组频道开关；不含逐聊包含/排除编辑） | `folder_tabs_render`、`folder_editor_opens` |
 | 已读回执标记 | ✅ | `viewMessages` + `UpdateChatReadOutbox` → ✓/✓✓ | `read_receipt_double_check` |
 | 已标记为未读 | ✅ | `toggleChatIsMarkedAsUnread` + `UpdateChatIsMarkedAsUnread` | `marked_unread_shows_dot` |
 
@@ -64,9 +64,9 @@
 | 发送图片 | ✅ | `sendMessage(inputMessagePhoto)`（FilePicker，气泡内 Photo 渲染） | `attachment_content_dispatch` |
 | 发送视频 | ✅ | `sendMessage(inputMessageVideo)`（按扩展名分发） | `attachment_content_dispatch` |
 | 发送文件 | ✅ | `sendMessage(inputMessageDocument)`（默认兜底） | `attachment_content_dispatch` |
-| 语音消息（录制/发送/播放） | 🟡 | 播放：`downloadFile` → `video_player`（waterui-video + video-gpu）；录制/发送缺采集组件 | `media_play_fallback_row` |
+| 语音消息（录制/发送/播放） | 🟡 | 播放：`downloadFile` → `video_player`；发送：ogg/opus 文件 → `inputMessageVoiceNote`；录制缺采集组件 | `media_play_fallback_row` |
 | 视频消息 | 🟡 | 播放：`downloadFile` → `video_player`；圆形视频消息录制缺采集组件 | `media_play_fallback_row` |
-| 贴纸 | 🟡 | `getRecentStickers` → `sendMessage(inputMessageSticker)`（picker 面板+缩略图；无表情搜索/包浏览） | `sticker_picker_toggles` |
+| 贴纸 | 🟡 | `getRecentStickers` + `searchStickers`（emoji 搜索）→ `inputMessageSticker`；无贴纸包浏览 | `sticker_picker_toggles` |
 | GIF | 🟡 | `getSavedAnimations` → `sendMessage(inputMessageAnimation)`（同贴纸面板，缩略图） | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
@@ -81,7 +81,7 @@
 | 公开频道浏览/搜索加入 | ✅ | `searchChatsOnServer` + `joinChat`（行菜单） | — |
 | 加入/退出 | ✅ | `joinChat`/`leaveChat` | — |
 | 成员列表 | ✅ | `searchChatMembers`（名字+角色面板） | `members_panel_lists_members` |
-| 基础管理（改标题/描述/头像、删成员） | 🟡 | `setChatTitle`/`setChatDescription`/`setChatMemberStatus(Banned)`/`setMessageSenderBlockList`（头像未做） | — |
+| 基础管理（改标题/描述/头像、删成员） | ✅ | `setChatTitle`/`setChatDescription`/`setChatPhoto`/`setChatMemberStatus(Banned)`/`setMessageSenderBlockList` | — |
 | 频道简介/邀请链接 | ✅ | `createChatInviteLink` → 成员面板显示链接（New link 按钮） | `members_invite_row` |
 
 ## 6. 联系人与个人资料
@@ -100,7 +100,7 @@
 | 深色模式 | ✅ | env `ColorScheme` | `dark_mode_toggle` |
 | 账号信息展示 | ✅ | `getMe` | `settings_shows_account` |
 | 通知设置（全局/按聊天） | 🟡 | `setChatNotificationSettings`（仅单聊切换） | — |
-| 隐私设置 | 🟡 | `getUserPrivacySettingRules` 只读摘要（手机/头像/在线/群邀请 → 所有人/联系人/无人；规则编辑器未做） | `privacy_audience_mapping` |
+| 隐私设置 | 🟡 | `getUserPrivacySettingRules` + `setUserPrivacySettingRules`（右键菜单 Everyone/My contacts/Nobody 预设；无逐用户例外编辑） | `privacy_audience_mapping` |
 | 两步验证管理 | 🟡 | `getPasswordState` 状态展示（SRP 设置未做） | `settings_shows_sections` |
 | 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`/`terminateAllOtherSessions` | `settings_shows_sections` |
 | 语言 | ❌ | `setOption(language_pack_id)` | — |
@@ -112,5 +112,5 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：53 项 ｜ 部分 🟡：12 项 ｜ 未实现 ❌：2 项
+- 已实现 ✅：55 项 ｜ 部分 🟡：10 项 ｜ 未实现 ❌：2 项
 - 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
