@@ -18,8 +18,10 @@ use waterui::reactive::collection::SignalCollection;
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
 use waterui::shape::{Circle, RoundedRectangle, ShapeExt};
+use waterui::graphics::color::WithOpacity;
 use waterui::theme::color::{
-    Accent, AccentForeground, Error, Foreground, MutedForeground, Surface, SurfaceVariant,
+    Accent, AccentContainer, AccentForeground, Error, Foreground, MutedForeground, Surface,
+    SurfaceVariant,
 };
 use waterui::views::ForEach;
 use waterui::widget::condition::when;
@@ -312,7 +314,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 .plain()
                 .action(|nav: Navigator<Route>| nav.push(Route::Settings)),
         ))
-        .padding_with((12.0, 6.0)),
+        .padding_with((6.0, 12.0)),
         when(store.accounts_open.clone(), move || {
             let rows = store.accounts.clone();
             vstack((
@@ -321,7 +323,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                     move |acc: AccountRow| {
                         let id = acc.id;
                         hstack((text(acc.label.clone()).caption(), spacer()))
-                            .padding_with((12.0, 4.0))
+                            .padding_with((4.0, 12.0))
                             .on_tap(move |store: Store| store.switch_account(id))
                     },
                 )),
@@ -330,7 +332,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                     text("Add account").caption().foreground(Accent),
                     spacer(),
                 ))
-                .padding_with((12.0, 4.0))
+                .padding_with((4.0, 12.0))
                 .on_tap(|store: Store| store.add_account()),
             ))
             .background(Surface)
@@ -339,7 +341,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             let folder_edit = store.folder_open.clone();
             vstack((
                 hstack((
-                    scroll(Lazy::hstack(ForEach::new(
+                    scroll_horizontal(Lazy::hstack(ForEach::new(
                         SignalCollection::new(folder_tabs.clone()),
                         move |tab: FolderRow| {
                             let label = tab.title.clone();
@@ -354,7 +356,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 text(label).caption().muted().anyview()
                             };
                             let chip = chip
-                                .padding_with((10.0, 3.0))
+                                .padding_with((3.0, 10.0))
                                 .background(if tab.active {
                                     RoundedRectangle::new(0.5)
                                         .fill(SurfaceVariant)
@@ -382,7 +384,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         store.open_folder_editor(0)
                     }),
                 ))
-                .padding_with((8.0, 4.0)),
+                .padding_with((4.0, 8.0)),
                 {
                     let fname = store.folder_name.clone();
                     let fc = store.folder_contacts.clone();
@@ -402,7 +404,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         )),
                     ))
                     .spacing(6.0)
-                    .padding_with((10.0, 4.0))
+                    .padding_with((4.0, 10.0))
                 })
                 }
             ))
@@ -418,7 +420,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                     store.forward_message.set(None)
                 }),
             ))
-            .padding_with((12.0, 8.0))
+            .padding_with((8.0, 12.0))
             .background(Surface)
         }),
         scroll(
@@ -432,7 +434,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         text("Global search results")
                             .caption()
                             .muted()
-                            .padding_with((12.0, 4.0)),
+                            .padding_with((4.0, 12.0)),
                     ))
                     .leading()
                 }),
@@ -517,7 +519,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                 } else {
                     Color::from(AccentForeground)
                 })
-                .padding_with((6.0, 2.0))
+                .padding_with((2.0, 6.0))
                 .background(if row.muted {
                     Circle.fill(SurfaceVariant)
                 } else {
@@ -553,7 +555,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         .leading(),
     ))
     .spacing(10.0)
-    .padding_with((10.0, 6.0))
+    .padding_with((6.0, 10.0))
     .context_menu((
         "Mark read".action(move |store: Store| store.mark_read(id)),
         if row.marked_unread {
@@ -646,7 +648,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     .foreground(Accent),
                 spacer(),
             ))
-            .padding_with((12.0, 6.0))
+            .padding_with((6.0, 12.0))
             .background(Surface)
             .on_tap(|store: Store| store.jump_to_message(store.pinned_id.get()))
         }),
@@ -658,7 +660,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             }),
             List::for_each(messages, move |row: MessageRow| {
                 ListItem::new(
-                    message_bubble(inner.clone(), row).padding_with((12.0, 2.0)),
+                    message_bubble(inner.clone(), row).padding_with((2.0, 12.0)),
                 )
             })
             .scroll_controller(&scroller),
@@ -674,19 +676,19 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         store.members_open.set(false)
                     }),
                 ))
-                .padding_with((10.0, 6.0)),
+                .padding_with((6.0, 10.0)),
                 hstack((
                     field("Group title", &store.admin_title).hide_label(),
                     button("Rename").action(|store: Store| store.rename_chat()),
                 ))
                 .spacing(6.0)
-                .padding_with((10.0, 0.0)),
+                .padding_with((0.0, 10.0)),
                 hstack((
                     field("Group description", &store.admin_desc).hide_label(),
                     button("Set").action(|store: Store| store.set_chat_desc()),
                 ))
                 .spacing(6.0)
-                .padding_with((10.0, 0.0)),
+                .padding_with((0.0, 10.0)),
                 hstack((
                     FilePicker::open(
                         label("Photo").icon(image_outline()),
@@ -695,7 +697,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     button("Set photo").action(|store: Store| store.set_chat_avatar()),
                 ))
                 .spacing(6.0)
-                .padding_with((10.0, 0.0)),
+                .padding_with((0.0, 10.0)),
                 hstack((
                     link_variant().tint(MutedForeground).size(14.0, 14.0),
                     text!("{invite_link}", invite_link = store.invite_link.clone())
@@ -706,7 +708,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     button("New link").action(|store: Store| store.create_invite()),
                 ))
                 .spacing(6.0)
-                .padding_with((10.0, 4.0)),
+                .padding_with((4.0, 10.0)),
                 scroll(Lazy::vstack(ForEach::new(
                     SignalCollection::new(store.members.clone()),
                     move |row: MemberRow| {
@@ -723,7 +725,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                             text(row.status.clone()).caption().muted(),
                         ))
                         .spacing(6.0)
-                        .padding_with((10.0, 4.0))
+                        .padding_with((4.0, 10.0))
                         .on_tap(move |store: Store| {
                             if is_user {
                                 store.open_profile(uid)
@@ -756,7 +758,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     }),
                 ))
                 .spacing(6.0)
-                .padding_with((10.0, 6.0)),
+                .padding_with((6.0, 10.0)),
                 scroll(Lazy::vstack(ForEach::new(
                     SignalCollection::new(search_results_b.clone()),
                     move |row: MessageRow| {
@@ -766,7 +768,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                             spacer(),
                         ))
                         .spacing(6.0)
-                        .padding_with((10.0, 4.0))
+                        .padding_with((4.0, 10.0))
                         .on_tap(move |store: Store| store.jump_to_message(row.id))
                     },
                 )))
@@ -798,7 +800,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     store.toggle_voice_record()
                 }),
             ))
-            .padding_with((12.0, 6.0))
+            .padding_with((6.0, 12.0))
             .background(Surface)
         }),
         when(has_capture_error, move || {
@@ -820,7 +822,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     store.attach.set(Vec::new())
                 }),
             ))
-            .padding_with((12.0, 6.0))
+            .padding_with((6.0, 12.0))
             .background(Surface)
         }),
         when(stickers_open, move || {
@@ -841,16 +843,16 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     },
                 ))
                 .spacing(6.0)
-                .padding_with((8.0, 2.0)),
+                .padding_with((2.0, 8.0)),
             {
                 let packs = store.sticker_packs.clone();
-                scroll(Lazy::hstack(ForEach::new(
+                scroll_horizontal(Lazy::hstack(ForEach::new(
                     SignalCollection::new(packs.clone()),
                     move |pack: PackRow| {
                         let id = pack.id;
                         text(pack.title.clone())
                             .caption()
-                            .padding_with((8.0, 2.0))
+                            .padding_with((2.0, 8.0))
                             .background(
                                 RoundedRectangle::new(0.5).fill(SurfaceVariant),
                             )
@@ -861,7 +863,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 )))
                 .max_height(28.0)
             },
-            scroll(Lazy::hstack(ForEach::new(
+            scroll_horizontal(Lazy::hstack(ForEach::new(
                 SignalCollection::new(sticker_items.clone()),
                 move |item: StickerItem| {
                     let cell_store = cells.clone();
@@ -925,7 +927,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             )),
         ))
         .spacing(6.0)
-        .padding_with((10.0, 8.0))
+        .padding_with((8.0, 10.0))
         .background(Surface),
     ))
     .on_change(&search_debounced, |q: Str, store: Store| store.run_chat_search(q))
@@ -945,7 +947,7 @@ pub(crate) fn banner(
         spacer(),
         icon_button(close(), "Dismiss", move |store: Store| on_close(store)),
     ))
-    .padding_with((12.0, 6.0))
+    .padding_with((6.0, 12.0))
     .background(Surface)
 }
 
@@ -972,30 +974,64 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let r4 = row.clone();
     let r5 = row.id;
 
-    let bubble = vstack((
-        when(has_fwd, move || {
-            text(fwd.clone()).italic(true).caption().line_limit(ONE).muted()
-        }),
-        when(has_reply, move || {
-            text(reply_excerpt.clone()).caption().line_limit(TWO).muted()
-        }),
-        media,
-        when(
-            !row.outgoing && !row.sender.is_empty(),
-            move || text(sender.clone()).caption().bold().foreground(Accent),
-        ),
-        when(has_text, move || -> AnyView {
-            if has_styled {
-                text(body_styled.clone()).body().anyview()
-            } else {
-                text(body_text.clone()).body().anyview()
-            }
-        }),
-        when(has_webpage, move || {
-            text(webpage.clone()).caption().line_limit(TWO).muted()
-        }),
+    // Secondary text inside the bubble: `MutedForeground` on a plain
+    // background, a translucent on-accent color inside an outgoing bubble —
+    // the fixed muted token is unreadable on the accent fill.
+    let row_outgoing = row.outgoing;
+    let muted_parts = move |v: AnyView| -> AnyView {
+        if row_outgoing {
+            v.foreground(WithOpacity::new(AccentForeground, 0.78)).anyview()
+        } else {
+            v.muted().anyview()
+        }
+    };
+    let has_media = row.media_file != 0 || row.play_file != 0 || !row.media_label.is_empty();
+
+    let mut parts: Vec<AnyView> = Vec::new();
+    if has_fwd {
+        parts.push(muted_parts(
+            text(fwd.clone()).italic(true).caption().line_limit(ONE).anyview(),
+        ));
+    }
+    if has_reply {
+        parts.push(muted_parts(
+            text(reply_excerpt.clone())
+                .caption()
+                .line_limit(TWO)
+                .anyview(),
+        ));
+    }
+    if has_media {
+        parts.push(media.anyview());
+    }
+    if !row.outgoing && !sender.is_empty() {
+        parts.push(
+            text(sender.clone())
+                .caption()
+                .bold()
+                .foreground(Accent)
+                .anyview(),
+        );
+    }
+    if has_text {
+        if has_styled {
+            parts.push(text(body_styled.clone()).body().anyview());
+        } else {
+            parts.push(text(body_text.clone()).body().anyview());
+        }
+    }
+    if has_webpage {
+        parts.push(muted_parts(
+            text(webpage.clone()).caption().line_limit(TWO).anyview(),
+        ));
+    }
+    parts.push(
         hstack((
-            when(has_reactions, move || text(reactions.clone()).caption()),
+            if has_reactions {
+                text(reactions.clone()).caption().anyview()
+            } else {
+                spacer().width(1.0).anyview()
+            },
             spacer(),
             text(time).caption(),
             if row.pending {
@@ -1014,19 +1050,22 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                 spacer().width(1.0).anyview()
             },
         ))
-        .spacing(3.0),
-    ))
-    .spacing(4.0)
-    .padding_with(10.0)
-    .max_width(420.0)
-    .leading()
-    .background(if row.highlighted {
-        RoundedRectangle::new(0.18).fill(SurfaceVariant)
-    } else if row.outgoing {
-        RoundedRectangle::new(0.18).fill(Accent)
-    } else {
-        RoundedRectangle::new(0.18).fill(Surface)
-    });
+        .spacing(3.0)
+        .anyview(),
+    );
+
+    let bubble = vstack(parts)
+        .spacing(4.0)
+        .leading()
+        .padding_with(10.0)
+        .max_width(420.0)
+        .background(if row.highlighted {
+            RoundedRectangle::new(0.18).fill(AccentContainer)
+        } else if row.outgoing {
+            RoundedRectangle::new(0.18).fill(Accent)
+        } else {
+            RoundedRectangle::new(0.18).fill(SurfaceVariant)
+        });
 
     let bubble = bubble.foreground(if row.outgoing {
         Color::from(AccentForeground)
@@ -1135,7 +1174,7 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
                     .caption()
                     .muted(),
                 ))
-                .padding_with((8.0, 4.0))
+                .padding_with((4.0, 8.0))
             }),
         ))
         .anyview()
@@ -1163,7 +1202,7 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
                     .caption()
                     .muted(),
                 ))
-                .padding_with((8.0, 4.0))
+                .padding_with((4.0, 8.0))
                 .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
             }).anyview()
     } else if !row.media_label.is_empty() {
@@ -1171,7 +1210,7 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
                 file().tint(MutedForeground).size(14.0, 14.0),
                 text(row.media_label.clone()).caption().muted(),
             ))
-            .padding_with((8.0, 4.0))
+            .padding_with((4.0, 8.0))
             .background(RoundedRectangle::new(0.2).fill(SurfaceVariant)).anyview()
     } else {
         spacer().width(0.0).anyview()
@@ -1211,7 +1250,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         )),
         vstack((
             text("Edit profile").caption().muted(),
-            hstack((
+            // Narrow pane: the M3 field's fixed 280 dp minimum cannot share
+            // an hstack below ~560 dp (see DOGFOOD), so names stack vertically.
+            vstack((
                 field("First name", &store.edit_first).hide_label(),
                 field("Last name", &store.edit_last).hide_label(),
             ))
@@ -1304,7 +1345,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                         spacer(),
                         when(is_current, || text("current").caption().foreground(Accent)),
                     ))
-                    .padding_with((0.0, 4.0))
+                    .padding_with((4.0, 0.0))
                     .context_menu(("Terminate".action(move |store: Store| {
                         store.terminate_session_by_id(row.id)
                     }),))
@@ -1339,7 +1380,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         button("Log out").action(|store: Store| store.logout()),
     ))
     .spacing(10.0)
-    .padding_with((16.0, 12.0)))
+    .padding_with((12.0, 16.0)))
     .task({
         let store = store.clone();
         async move {
@@ -1392,7 +1433,7 @@ fn twofa_sheet(store: Store) -> impl View {
         )),
     ))
     .spacing(8.0)
-    .padding_with((16.0, 10.0))
+    .padding_with((10.0, 16.0))
     .background(Surface)
 }
 
@@ -1414,13 +1455,13 @@ fn privacy_picker_view(store: Store) -> impl View {
                     text(row.name.clone()).caption(),
                     spacer(),
                 ))
-                .padding_with((0.0, 4.0))
+                .padding_with((4.0, 0.0))
                 .on_tap(move |store: Store| store.pick_privacy_exception(uid))
             },
         )),
     ))
     .spacing(6.0)
-    .padding_with((16.0, 10.0))
+    .padding_with((10.0, 16.0))
     .background(Surface)
 }
 
@@ -1463,7 +1504,7 @@ pub(crate) fn profile_view(store: Store) -> NavigationView {
         )),
     ))
     .spacing(10.0)
-    .padding_with((16.0, 12.0)));
+    .padding_with((12.0, 16.0)));
     NavigationView::new("Profile", content)
 }
 
@@ -1528,7 +1569,7 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
                     text(row.status.clone()).caption().muted(),
                 ))
                 .spacing(6.0)
-                .padding_with((0.0, 4.0))
+                .padding_with((4.0, 0.0))
                 .on_tap(move |store: Store| store.start_chat_with(row.key))
                 .context_menu(("Remove contact".action(move |store: Store| {
                     store.remove_contact(row.key)
@@ -1537,7 +1578,7 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
         )),
     ))
     .spacing(10.0)
-    .padding_with((16.0, 12.0)))
+    .padding_with((12.0, 16.0)))
     .task({
         let store = store.clone();
         async move {
@@ -1585,6 +1626,6 @@ fn video_note_sheet(store: Store) -> impl View {
         ))
         .spacing(12.0),
     ))
-    .padding_with((12.0, 10.0))
+    .padding_with((10.0, 12.0))
     .background(Surface)
 }

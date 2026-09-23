@@ -776,4 +776,347 @@ mod tests {
         app.query().label("Bob").assert_exists();
         app.query().label("Add account").assert_exists();
     }
+
+    // ------------------------------------------------------------------
+    // Layout probes (r7): print semantic bounds to answer "who gets how
+    // much space" instead of guessing. Run with:
+    //   cargo test --lib probe_ -- --nocapture
+    // ------------------------------------------------------------------
+
+    use waterui::shape::{RoundedRectangle, ShapeExt};
+    use waterui::theme::color::Surface;
+    use waterui::widget::condition::when;
+
+    fn dump_bounds(path: &str, app: &mut waterui_testing::OffscreenApp) {
+        let nodes = app
+            .semantic_mut()
+            .resolve_elements(&waterui_testing::Selector::default());
+        let mut out = String::new();
+        for el in nodes.iter() {
+            let n = el.node();
+            let line = format!(
+                "#{id} {role:?} {label:?} bounds={bounds:?} children={children:?}\n",
+                id = el.id().as_u64(),
+                role = n.role(),
+                label = n.label().unwrap_or(""),
+                bounds = n.bounds().map(|b| (b.x(), b.y(), b.width(), b.height())),
+                children = n.children().len(),
+            );
+            out.push_str(&line);
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_bubble_incoming(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut app = ui.viewport(800, 700).mount_offscreen(move || {
+            views::message_bubble(
+                store.clone(),
+                msg(1, "morning! did the camera filters example work?", false),
+            )
+            .padding_with((2.0, 12.0))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_incoming.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_incoming.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_bubble_outgoing(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut m = msg(2, "yes — device.clone() into Arc, preview straight on the GpuSurface", true);
+        m.reply_excerpt = "morning! did the camera…".into();
+        let mut app = ui.viewport(800, 700).mount_offscreen(move || {
+            views::message_bubble(store.clone(), m.clone()).padding_with((2.0, 12.0))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_outgoing.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_outgoing.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_leading_stack(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let mut app = ui.viewport(460, 200).mount_offscreen(move || {
+            vstack((text("Alice"), text("morning! did the camera filters example work?")))
+                .leading()
+                .padding()
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_leading.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_spacer_hstack(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let mut app = ui.viewport(460, 120).mount_offscreen(move || {
+            hstack((text("L"), spacer(), text("R"))).padding()
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_spacer.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_two_fields(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let a = Binding::container(Str::from(""));
+        let b = Binding::container(Str::from(""));
+        let mut app = ui.viewport(340, 300).mount_offscreen(move || {
+            hstack((
+                field("First name", &a).hide_label(),
+                field("Last name", &b).hide_label(),
+            ))
+            .spacing(8.0)
+            .padding_with(8.0)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_fields.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_fields.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_message_list_rows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        let store = store();
+        let msgs = vec![
+            msg(1, "morning! did the camera filters example work?", false),
+            msg(2, "yes — device.clone() into Arc, preview straight on the GpuSurface", true),
+            msg(3, "nice. and the NV12 conversion?", false),
+        ];
+        let mut app = ui.viewport(460, 400).mount_offscreen(move || {
+            let inner = store.clone();
+            vstack((List::for_each(msgs.clone(), move |row: MessageRow| {
+                ListItem::new(views::message_bubble(inner.clone(), row).padding_with((2.0, 12.0)))
+            }),))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_list.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_list.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_list_plain_row(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        let rows = vec![
+            msg(1, "morning! did the camera filters example work?", false),
+            msg(2, "yes", true),
+        ];
+        let mut app = ui.viewport(460, 300).mount_offscreen(move || {
+            vstack((List::for_each(rows.clone(), move |row| {
+                let _ = row;
+                ListItem::new(
+                    vstack((
+                        text("Alice").caption().bold(),
+                        text("morning! did the camera filters example work?").body(),
+                        hstack((spacer(), text("12:00").caption())),
+                    ))
+                    .spacing(4.0)
+                    .padding_with(10.0)
+                    .max_width(420.0)
+                    .leading()
+                    .background(RoundedRectangle::new(0.18).fill(Surface))
+                    .padding_with((2.0, 12.0)),
+                )
+            }),))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_list_plain.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_bubble_inset(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Same bubble as probe_bubble_incoming but WITHOUT outer padding —
+        // isolates whether `.padding_with((12,2))` or `List` inflates the row.
+        let store = store();
+        let mut app = ui.viewport(800, 300).mount_offscreen(move || {
+            views::message_bubble(
+                store.clone(),
+                msg(1, "morning! did the camera filters example work?", false),
+            )
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_inset.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_list_when_row(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        let rows = vec![
+            msg(1, "morning! did the camera filters example work?", false),
+            msg(2, "yes", true),
+        ];
+        let mut app = ui.viewport(460, 300).mount_offscreen(move || {
+            vstack((List::for_each(rows.clone(), move |row| {
+                let _ = row;
+                let hidden = Binding::bool(false);
+                ListItem::new(
+                    vstack((
+                        when(hidden.clone(), || text("fwd").caption().muted()),
+                        when(hidden.clone(), || text("reply").caption().muted()),
+                        text("Alice").caption().bold(),
+                        text("morning! did the camera filters example work?").body(),
+                        hstack((spacer(), text("12:00").caption())),
+                    ))
+                    .spacing(4.0)
+                    .padding_with(10.0)
+                    .max_width(420.0)
+                    .leading()
+                    .background(RoundedRectangle::new(0.18).fill(Surface))
+                    .padding_with((2.0, 12.0)),
+                )
+            }),))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_list_when.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_list_fixed_row(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        let rows = vec![
+            msg(1, "morning! did the camera filters example work?", false),
+            msg(2, "yes", true),
+        ];
+        let mut app = ui.viewport(460, 300).mount_offscreen(move || {
+            vstack((List::for_each(rows.clone(), move |row| {
+                let _ = row;
+                ListItem::new(text("fixed").width(100.0).height(50.0))
+            }),))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_list_fixed.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_list_pad_rows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        let rows = vec![
+            msg(1, "a", false),
+            msg(2, "b", false),
+        ];
+        let mut app = ui.viewport(460, 200).mount_offscreen(move || {
+            vstack((List::for_each(rows.clone(), move |row| {
+                if row.id == 1 {
+                    ListItem::new(text("a").anyview())
+                } else {
+                    ListItem::new(text("b").padding_with(10.0).anyview())
+                }
+            }),))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_list_pad.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_list_ladder(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        // 8 rows, one wrapping layer per row — row index identifies the layer.
+        let rows: Vec<MessageRow> = (0..9).map(|i| msg(i, "a", false)).collect();
+        let mut app = ui.viewport(460, 700).mount_offscreen(move || {
+            vstack((List::for_each(rows.clone(), move |row| {
+                let body = || {
+                    vstack((
+                        text("Alice").caption().bold(),
+                        text("morning! did the camera filters example work?").body(),
+                        hstack((spacer(), text("12:00").caption())),
+                    ))
+                    .spacing(4.0)
+                };
+                let i = row.id;
+                ListItem::new(match i {
+                    0 => body().anyview(),
+                    1 => body().padding_with(10.0).anyview(),
+                    2 => body().padding_with(10.0).max_width(420.0).anyview(),
+                    3 => body()
+                        .padding_with(10.0)
+                        .max_width(420.0)
+                        .leading()
+                        .anyview(),
+                    4 => body()
+                        .padding_with(10.0)
+                        .max_width(420.0)
+                        .leading()
+                        .background(RoundedRectangle::new(0.18).fill(Surface))
+                        .anyview(),
+                    5 => hstack((
+                        body()
+                            .padding_with(10.0)
+                            .max_width(420.0)
+                            .leading()
+                            .background(RoundedRectangle::new(0.18).fill(Surface)),
+                        spacer(),
+                    ))
+                    .anyview(),
+                    6 => hstack((
+                        spacer(),
+                        body()
+                            .padding_with(10.0)
+                            .max_width(420.0)
+                            .leading()
+                            .background(RoundedRectangle::new(0.18).fill(Surface)),
+                    ))
+                    .anyview(),
+                    7 => hstack((
+                        vstack((
+                            text("Alice").caption().bold(),
+                            text("morning! did the camera filters example work?").body(),
+                            hstack((spacer(), text("12:00").caption())),
+                        ))
+                        .leading()
+                        .spacing(4.0)
+                        .padding_with(10.0)
+                        .max_width(420.0)
+                        .background(RoundedRectangle::new(0.18).fill(Surface)),
+                        spacer(),
+                    ))
+                    .anyview(),
+                    _ => hstack((
+                        body()
+                            .padding_with(10.0)
+                            .max_width(420.0)
+                            .leading()
+                            .background(RoundedRectangle::new(0.18).fill(Surface)),
+                        spacer(),
+                    ))
+                    .padding_with((2.0, 12.0))
+                    .anyview(),
+                })
+            }),))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_ladder.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_scroll_horizontal_stretch(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        let rows: Vec<MessageRow> = (0..3).map(|i| msg(i, "a", false)).collect();
+        let chips: Vec<MessageRow> = (0..3).map(|i| msg(10 + i, "chip", false)).collect();
+        let mut app = ui.viewport(340, 400).mount_offscreen(move || {
+            vstack((
+                scroll_horizontal(waterui::component::lazy::Lazy::hstack(
+                    waterui::views::ForEach::new(chips.clone(), move |_c| {
+                        text("Chip").caption().padding_with((3.0, 10.0))
+                    }),
+                )),
+                List::for_each(rows.clone(), move |row| {
+                    let _ = row;
+                    ListItem::new(text("row").padding_with(8.0))
+                }),
+            ))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_hscroll.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_hscroll.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_sidebar_scrolls(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
+            views::sidebar_view(store.clone()).state(&store)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_sidebar.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_sidebar.png");
+    }
 }

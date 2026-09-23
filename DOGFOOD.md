@@ -291,3 +291,90 @@ list now uses it for exact jump-to-message + highlight. The remaining
 gap is only key/id-based scrolling (`scroll_to(id: i64)`): the app keeps
 the message→index lookup itself — fine for Telegram, where the target id
 is known and the index is resolved before scrolling.
+
+## Layout findings (r7) — two confirmed framework bugs, one API trap
+
+Measured with `waterui-testing` offscreen mounts (semantic bounds) +
+`water mcp` tree dumps, not by eye. Watergram probes live in
+`src/lib.rs` (`probe_*` tests) and are kept as the measurement harness.
+
+### `ScrollView` reports `StretchAxis::Both` regardless of its axis
+
+`raw_view!(ScrollView, StretchAxis::Both)` (waterui-layout `collections/
+scroll.rs`) bakes the stretch contract in statically for all axes, so a
+`scroll_horizontal` view claims the *vertical* surplus of a `vstack`,
+leaving only the remainder to a sibling that should get it all. Per
+`docs/layout-spec.md` §6 a scroll answers "its intrinsic extent on the
+non-scrolling axis" — for `Axis::Horizontal` the vertical axis is
+non-scrolling, so the frame should hug content (~30), not claim half the
+pane.
+
+Minimal repro (semantic mount, 340×400):
+
+```rust
+vstack((
+    scroll_horizontal(Lazy::hstack(ForEach::new(chips, |c|
+        text("Chip").caption().padding_with((3.0, 10.0))))),
+    List::for_each(rows, |r| ListItem::new(text("row").padding_with(8.0))),
+))
+```
+
+- chips `scroll_horizontal` ScrollView bounds: `(0, 0, 340, 195)` —
+  measured. Expected height ≈ 26–30 (content intrinsic, non-scrolling
+  axis). Content (~26 pt) renders vertically centred inside the 195 px
+  band — the empty space above/below is what reads as "large gaps" in
+  the sidebar between toolbar, chips and chat list.
+- `List` bounds: `(0, 205, 340, 195)` — measured; expected ≈ 370.
+
+Same root cause hit three places in Watergram (folder chips, sticker
+pack strip, sticker cell strip): all were `scroll()` (vertical axis!)
+around an hstack and shared the sidebar's surplus with the chat list
+roughly evenly (208 px chips + 234 px list in an 800×700 mount; 272 px
+chips + 298 px list in a 340×700 mount). The app-side correction —
+using the semantically-correct `scroll_horizontal` — does not change
+the outcome until the stretch contract is axis-aware.
+
+### M3 `TextField` reports a fixed 280 dp minimum — hstack overflow
+
+`hydrolysis-m3 0.3.1` `INPUT_FIELD_MIN_WIDTH = 280.0`
+(`theme/dimensions.rs`, "TextFieldDefaults.MinWidth"). A field answers
+the proposal width but never measures below 280, so under §4.2 a stack
+whose children minima exceed the offer overflows rather than shares.
+
+Minimal repro (semantic mount, 340×300, after `padding_with((8,8))`):
+
+```rust
+hstack((
+    field("First name", &a).hide_label(),
+    field("Last name", &b).hide_label(),
+)).spacing(8.0).padding_with(8.0)
+```
+
+- measured: field1 `(8, 122, 280, 56)`, field2 `(296, 122, 280, 56)` —
+  total 568 > 340 offer → second field clipped at the right edge.
+- expected: ~158 each (`(340 - 16 - 8) / 2`) or a documented overflow
+  policy. 280 is the M3 single-field floor; two fields in a row need a
+  smaller per-field minimum or a stacking policy.
+
+Watergram settings (sidebar-width pane) now stacks the name fields
+vertically — a legitimate narrow-pane layout — but the underlying
+question stands: `TextField` cannot compose two-across below 560 dp.
+
+### `EdgeInsets` tuple order is `(vertical, horizontal)` — ergonomics trap
+
+`impl From<(f64, f64)> for EdgeInsets` is documented as
+`(vertical, horizontal)` — the opposite of the CSS/`margin: v h`
+intuition every other API trains you for (`padding_with((12, 2))`
+reads as 12 horizontal, 2 vertical). In Watergram, 38 call sites were
+written with the (h, v) reading; the silent result was rows ~24 pt
+taller than designed (12 vertical instead of 2) — invisible in code
+review, only caught by bounds probes. Not a bug — documented — but a
+strong footgun; consider a named constructor
+(`EdgeInsets::hv(h, v)`), `padding_with(h, v)` two-arg form, or a
+dylint that flags asymmetric tuples.
+
+### Emoji tofu: resolved by font, not framework
+
+Installing `fonts-noto-color-emoji` on the VM fixed all tofu — emoji
+now rasterize correctly in bubbles/icons. The earlier entry stands as
+an environment note only (headless VMs need the font installed).

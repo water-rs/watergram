@@ -771,10 +771,11 @@ impl Store {
             mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "📢"),
             mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, ""),
         ]);
+        // Mirrors TDLib `chatFolders`: only user-created folders — the
+        // built-in All/Archive lists are synthesized by the sidebar itself.
         self.folders.set(vec![
-            FolderRow { id: 0, title: "All".into(), active: true },
-            FolderRow { id: -1, title: "Archived".into(), active: false },
             FolderRow { id: 2, title: "Work".into(), active: false },
+            FolderRow { id: 3, title: "Personal".into(), active: false },
         ]);
         let styled = styled_from_formatted(&types::FormattedText {
             text: "check https://waterui.dev for the docs".into(),
