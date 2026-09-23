@@ -377,6 +377,21 @@ pub struct Store {
     /// Live window frame (cloned from the `Window`), used to switch the
     /// info panel between docked and overlay below a width threshold.
     pub win_frame: Binding<Rect>,
+    /// Poll creator (composer → attach menu): open flag, question, option
+    /// texts in fixed slots gated by `poll_option_count`, and poll flags.
+    /// Telegram's `poll_answer_count_max` option is 10; TDLib lets the
+    /// question go up to `poll_question_length_max` (255) chars.
+    pub poll_open: Binding<bool>,
+    pub poll_question: Binding<Str>,
+    pub poll_option_fields: Vec<Binding<Str>>,
+    pub poll_option_count: Binding<usize>,
+    /// `PollTypeRegular::allow_multiple_answers` (regular polls only).
+    pub poll_multiple: Binding<bool>,
+    /// Regular poll vs quiz (`PollTypeQuiz::correct_option_id` =
+    /// `poll_correct`).
+    pub poll_quiz: Binding<bool>,
+    pub poll_anonymous: Binding<bool>,
+    pub poll_correct: Binding<usize>,
     /// Forward without author attribution (`forwardMessages send_copy`).
     pub forward_noattr: Binding<bool>,
     /// Batch of message ids awaiting a forward target.
@@ -789,6 +804,17 @@ impl Store {
             // Attachment preview caption.
             attach_caption: Binding::<Str>::default(),
             win_frame: Binding::container(Rect::from_size(Size::zero())),
+            // Poll creator (attach menu → Poll).
+            poll_open: Binding::bool(false),
+            poll_question: Binding::<Str>::default(),
+            poll_option_fields: (0..Self::POLL_MAX_OPTIONS)
+                .map(|_| Binding::<Str>::default())
+                .collect(),
+            poll_option_count: Binding::usize(2),
+            poll_multiple: Binding::bool(false),
+            poll_quiz: Binding::bool(false),
+            poll_anonymous: Binding::bool(true),
+            poll_correct: Binding::usize(0),
             // Forward "without attribution" (forwardMessages send_copy).
             forward_noattr: Binding::bool(false),
             forward_ids: Binding::<Vec<i64>>::default(),
@@ -2228,6 +2254,7 @@ impl Store {
         self.members_open.set(false);
         self.scheduled_open.set(false);
         self.info_open.set(false);
+        self.poll_open.set(false);
         self.shared_media.set(Vec::new());
         self.attach_caption.set_from("");
         self.selected_msgs.set(Vec::new());
@@ -2617,6 +2644,110 @@ impl Store {
             let _ =
                 functions::set_poll_answer(chat_id, message_id, vec![option as i32], client)
                     .await;
+        })
+        .detach();
+    }
+
+    /// Telegram's `poll_answer_count_max` option value (TDLib default 10).
+    pub const POLL_MAX_OPTIONS: usize = 10;
+
+    /// Toggle the composer poll creator (attach menu → Poll).
+    pub fn toggle_poll_creator(&self) {
+        self.poll_open.toggle();
+    }
+
+    /// Append one empty option slot, capped at `POLL_MAX_OPTIONS`.
+    pub fn add_poll_option(&self) {
+        let n = self.poll_option_count.get();
+        if n < self.poll_option_fields.len() {
+            self.poll_option_count.set(n + 1);
+        }
+    }
+
+    /// Remove the option at `ix`, shifting later texts up; a poll keeps at
+    /// least two options.
+    pub fn remove_poll_option(&self, ix: usize) {
+        let n = self.poll_option_count.get();
+        if n <= 2 || ix >= n {
+            return;
+        }
+        for i in ix..n - 1 {
+            let next = self.poll_option_fields[i + 1].get();
+            self.poll_option_fields[i].set(next);
+        }
+        self.poll_option_fields[n - 1].set_from("");
+        self.poll_option_count.set(n - 1);
+        let correct = self.poll_correct.get();
+        if correct >= n - 1 {
+            self.poll_correct.set(0);
+        }
+    }
+
+    /// Send the poll via `sendMessage inputMessagePoll`; no-op until the
+    /// question and at least two non-empty options are filled.
+    pub fn send_poll(&self) {
+        let chat_id = self.open_chat.get();
+        let question = self.poll_question.get().to_string().trim().to_string();
+        let n = self.poll_option_count.get();
+        let options: Vec<String> = (0..n)
+            .map(|i| {
+                self.poll_option_fields[i]
+                    .get()
+                    .to_string()
+                    .trim()
+                    .to_string()
+            })
+            .filter(|o| !o.is_empty())
+            .collect();
+        if chat_id == 0 || question.is_empty() || options.len() < 2 {
+            return;
+        }
+        let quiz = self.poll_quiz.get();
+        let correct = self.poll_correct.get().min(options.len() - 1) as i32;
+        let multiple = self.poll_multiple.get();
+        let anonymous = self.poll_anonymous.get();
+        self.poll_open.set(false);
+        self.poll_question.set_from("");
+        for field in &self.poll_option_fields {
+            field.set_from("");
+        }
+        self.poll_option_count.set(2);
+        self.poll_quiz.set(false);
+        self.poll_multiple.set(false);
+        self.poll_anonymous.set(true);
+        self.poll_correct.set(0);
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let content = enums::InputMessageContent::InputMessagePoll(
+                types::InputMessagePoll {
+                    question: types::FormattedText {
+                        text: question,
+                        entities: Vec::new(),
+                    },
+                    options: options
+                        .into_iter()
+                        .map(|text| types::FormattedText {
+                            text,
+                            entities: Vec::new(),
+                        })
+                        .collect(),
+                    is_anonymous: anonymous,
+                    r#type: if quiz {
+                        enums::PollType::Quiz(types::PollTypeQuiz {
+                            correct_option_id: correct,
+                            explanation: types::FormattedText {
+                                text: String::new(),
+                                entities: Vec::new(),
+                            },
+                        })
+                    } else {
+                        enums::PollType::Regular(types::PollTypeRegular {
+                            allow_multiple_answers: multiple,
+                        })
+                    },
+                },
+            );
+            let _ = functions::send_message(chat_id, None, None, None, content, client).await;
         })
         .detach();
     }

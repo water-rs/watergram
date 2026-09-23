@@ -161,7 +161,7 @@ pub fn app(mut env: Environment) -> App {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::{ChatRow, FolderRow, MessageRow, Screen, Store};
+    use crate::state::{ChatRow, FolderRow, MessageRow, Screen, SharedMediaRow, Store};
     use crate::views;
     use waterui::layout::frame::Frame;
     use waterui::prelude::*;
@@ -1586,6 +1586,75 @@ mod tests {
         app.query().label("Close info").assert_exists();
     }
 
+    /// Rendered evidence for the poll creator (item 3): question field,
+    /// option fields gated by `poll_option_count`, Quiz/Multiple toggles.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_poll_creator(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.poll_option_count.set(4);
+        let st = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount_offscreen(move || views::poll_creator(st.clone()));
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_poll.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_poll.png");
+        app.query().label("Question").assert_exists();
+        app.query().label("Option 4").assert_exists();
+        app.query().label("Option 5").assert_not_exists();
+    }
+
+    /// Minimal: does a ZStack's `.alignment(TopTrailing)` place a finite
+    /// child at the trailing edge under SemanticApp?
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_zstack_align(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::theme::color::{Foreground, Surface};
+        let store = store();
+        store.seed_demo();
+        let mut app = ui.viewport(1000, 700).mount_offscreen(move || {
+            zstack((
+                Color::from(Foreground)
+                    .opacity(0.3)
+                    .on_tap(|_s: Store| {}),
+                Frame::new(
+                    text("probe")
+                        .padding_with(20.0)
+                        .background(Color::from(Surface)),
+                )
+                .max_height(f32::INFINITY),
+            ))
+            .alignment(TopTrailing)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_zalign.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_zalign.png");
+    }
+
+    /// Overlay info panel (<1120px window): full-height elevated panel at
+    /// the trailing edge over a scrim, with the shared-media grid visible
+    /// — SemanticApp bounds prove the panel spans the viewport height and
+    /// the lazy grid gets real rows (empty-grid bug from r11 is closed).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_overlay_chunk(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.shared_media.set(vec![
+            SharedMediaRow { file: 0, label: "🌄".into() },
+            SharedMediaRow { file: 0, label: "📷".into() },
+            SharedMediaRow { file: 0, label: "🎞".into() },
+        ]);
+        let st = store.clone();
+        let mut app = ui
+            .viewport(1000, 700)
+            .mount_offscreen(move || views::info_overlay_chunk(st.clone()));
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_overlay.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_overlay.png");
+        app.query().label("Shared media").assert_exists();
+        app.query().label("🌄").assert_exists();
+    }
+
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn unread_divider_renders(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
@@ -1670,6 +1739,48 @@ mod tests {
         app.query().label("@bob").assert_not_exists();
         store.apply_mention("alice");
         assert!(store.composer.get().contains("@alice "));
+    }
+
+    /// Poll creator: opening the panel shows question + 2 option fields,
+    /// Create sends the poll and resets the creator.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn poll_creator_sends_and_resets(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 7).state(&inner));
+        store.toggle_poll_creator();
+        app.query().label("Question").assert_exists();
+        // Empty question/options: send is a no-op, panel stays open.
+        store.send_poll();
+        assert!(store.poll_open.get());
+        app.query().label("Option 1").single().set_text(&mut app, "yes");
+        app.query().label("Option 2").single().set_text(&mut app, "no");
+        app.query().label("Option 3").assert_not_exists();
+        store.add_poll_option();
+        app.query().label("Option 3").assert_exists();
+        store.poll_question.set(Str::from("pick one"));
+        app.query().role(Role::BUTTON).label("Create").tap();
+        assert!(!store.poll_open.get());
+        assert_eq!(store.poll_question.get().to_string(), "");
+        assert_eq!(store.poll_option_count.get(), 2);
+    }
+
+    /// Option removal shifts later texts up and keeps at least two slots.
+    #[test]
+    fn poll_option_remove_shifts() {
+        let store = store();
+        store.poll_option_fields[0].set_from("a");
+        store.poll_option_fields[1].set_from("b");
+        store.poll_option_fields[2].set_from("c");
+        store.poll_option_count.set(3);
+        store.remove_poll_option(1);
+        assert_eq!(store.poll_option_fields[0].get().to_string(), "a");
+        assert_eq!(store.poll_option_fields[1].get().to_string(), "c");
+        assert_eq!(store.poll_option_count.get(), 2);
+        // Floor at two options.
+        store.remove_poll_option(0);
+        assert_eq!(store.poll_option_count.get(), 2);
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]

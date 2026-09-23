@@ -619,7 +619,7 @@ not restructured around it.
 
 ---
 
-## r11-3: `#[waterui::test]` cannot reproduce nami#23 — testing-runtime gap
+## r11-3: `#[waterui::test]` cannot reproduce nami#23 — testing-runtime gap → water-rs/waterui#1213
 
 **Versions:** waterui-testing 0.5.1 (patched to waterui dev `b838d73`),
 nami-core 0.3.3, hydrolysis dev `47b1081`.
@@ -658,11 +658,11 @@ test and this minimal test both go green while the real renderer panics
 (`RefCell already borrowed` at `nami-core-0.3.3/src/watcher.rs:357`).
 Result: nami#23 needs a runtime-level repro or a renderer-level harness;
 `#[waterui::test]` alone cannot guard against this class of watcher
-re-entrancy.
+re-entrancy. **Filed as water-rs/waterui#1213.**
 
 ---
 
-## r11-2b: `Frame` signal props sampled at mount — no re-propagation
+## r11-2b: `Frame` signal props sampled at mount — no re-propagation → water-rs/waterui#1214
 
 **Version:** waterui dev `b838d73` (facade), hydrolysis `47b1081`.
 
@@ -677,8 +677,14 @@ same signal change (panel docked at 1400px). Symptom: every bubble
 wrapped at ~135px under a 1400px window; expected cap ≈ 480px once the
 frame signal emitted the real width. If signal props on Frame are meant
 to be live, the Frame realization must subscribe and re-measure on
-change; today it samples once. Workaround used: static 480dp cap
-(Telegram's absolute bubble ceiling makes the precision unnecessary).
+change; today it samples once. **Filed as water-rs/waterui#1214.**
+
+**r12 status:** the r11 static-480 workaround is reverted — the bubble cap
+is again the signal-derived `win_frame.map(|f| ((f.width() - 340.0) *
+0.72).clamp(220.0, 480.0))`, which latches at the mount-time pane width
+(220dp under `Window.frame = 0`). This is the honest reproduction; every
+bubble pins to the stale cap until #1214 lands. Repro: `WATERGRAM_DEMO=1
+water mcp --viewport 1400x900` → any long message row.
 
 ---
 
@@ -703,7 +709,16 @@ still holds `borrow_mut`. Two mutually-exclusive plain `when`s on the same
 signals mount and run fine on both renderers — the crash is specific to
 `WhenComplete`'s shape, not to watching the zip'd `Binding<Rect>`.
 `#[waterui::test]` mounting the same tree passes (same testing-runtime gap as
-r11-3). App now uses two exclusive `when` branches.
+r11-3). **Filed as water-rs/nami#23** (fix session running).
+
+**r12 status:** the r11 two-`when` mitigation is reverted — the info-panel
+switch is back to the honest `when(docked, ..).otherwise(..)` form shown
+above, so every page containing `chat_detail` **panics at mount** on both
+the winit renderer and `water mcp`'s SemanticRuntime until nami#23 lands.
+Repro: `WATERGRAM_DEMO=1 water mcp` or `water run` → any chat page.
+Real-renderer verification of the chat page, the docked/overlay switch,
+and the media grid is therefore **blocked on nami#23** — the equivalent
+`#[waterui::test]` probes stay green (waterui#1213).
 
 ---
 
@@ -714,22 +729,25 @@ r11-3). App now uses two exclusive `when` branches.
 Three divergences on the identical view tree, all reproducible via
 `WATERGRAM_DEMO=1 WATERGRAM_DEMO_PAGE=info water mcp`:
 
-1. **`Window.frame` is never driven.** The SemanticRuntime runner builds its
-   own `Window` and never writes the app-facing frame binding, so
-   `win.frame` stays at whatever `app()` seeded (here 1280×800 or the
-   `WATERGRAM_WIN_SIZE` demo hook) regardless of `--viewport`. Signals
-   derived from it (`info_docked` at ≥1120) can never turn true under mcp
-   without the seed. Expected: the runner seeds/drives `Window.frame` from
-   the viewport like the winit runner does on `Moved`/`Resized`.
-2. **`when`-materialized sibling does not shrink the flex sibling.** With
-   `hstack((chat_column, when(docked, panel)))` and `docked=true` at mount,
-   the winit renderer and SemanticApp place the column at 780 and the panel
-   at 1120 (bounds: list `(340,160,780,556)`); SemanticRuntime gives the
-   column `(340,160,1060,556)` — its measured-before-materialize width —
-   and overlays the panel on top of it. App-side mitigation in place: the
-   column is a `Frame` whose `width` is a `Computed` (`pane − 281 · docked`),
-   so all three renderers agree; the divergence itself stands.
-3. **Text does not wrap inside a container `max_width` under SemanticRuntime.**
+1. **`Window.frame` is never driven** — filed as **water-rs/hydrolysis#128**.
+   The SemanticRuntime runner builds its own `Window` and never writes the
+   app-facing frame binding, so `win.frame` stays at whatever `app()`
+   seeded (here 1280×800 or the `WATERGRAM_WIN_SIZE` demo hook) regardless
+   of `--viewport`. Signals derived from it (`info_docked` at ≥1120) can
+   never turn true under mcp without the seed. Expected: the runner
+   seeds/drives `Window.frame` from the viewport like the winit runner
+   does on `Moved`/`Resized`.
+2. **`when`-materialized sibling does not shrink the flex sibling** — filed
+   as **water-rs/hydrolysis#129**. With `hstack((chat_column,
+   when(docked, panel)))` and `docked=true` at mount, the winit renderer
+   and SemanticApp place the column at 780 and the panel at 1120 (bounds:
+   list `(340,160,780,556)`); SemanticRuntime gives the column
+   `(340,160,1060,556)` — its measured-before-materialize width — and
+   overlays the panel on top of it. **r12: the computed-width mitigation
+   is reverted** — the column is a bare `chat_column(...)` again, so #129
+   is the honest repro until it lands.
+3. **Text does not wrap inside a container `max_width` under
+   SemanticRuntime** — filed as **water-rs/hydrolysis#130**.
    `Frame::new(bubble).max_width(480)` wrapping `text()` that exceeds the
    cap: winit renderer and SemanticApp wrap the text (bounds e.g.
    `118.8×93.75` ≈ 5 lines at cap 120); SemanticRuntime renders one line

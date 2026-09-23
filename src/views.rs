@@ -58,6 +58,7 @@ use mdi::lock;
 use mdi::magnify;
 use mdi::paperclip;
 use mdi::pin;
+use mdi::poll;
 use mdi::plus;
 use mdi::send;
 use mdi::share_variant;
@@ -727,6 +728,8 @@ pub(crate) fn chat_column(store: Store) -> impl View {
     let mention_show = mention_sig
         .map(|v: Vec<MemberRow>| !v.is_empty())
         .distinct();
+    let poll_open = store.poll_open.clone();
+    let store_for_poll = store.clone();
             vstack((
     when(has_pinned, move || {
         hstack((
@@ -1144,28 +1147,38 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             }),
         ))
     }),
-    when(mention_show, move || {
-        VStack::for_each(mention_rows.clone(), move |m: MemberRow| {
-            let uname = m.username.clone();
-            hstack((
-                text!("@{u}", u = uname.clone()).caption().bold().foreground(Accent),
-                text(m.name.clone()).caption().muted(),
-                spacer(),
-            ))
-            .spacing(8.0)
-            .padding_with((6.0, 12.0))
-            .on_tap(move |store: Store| store.apply_mention(&uname))
-        })
-        .spacing(0.0)
-        .padding_with((4.0, 0.0))
-        .background(Surface)
-        .clip(RoundedRectangle::new(0.12))
-    }),
+    vstack((
+        when(mention_show, move || {
+            VStack::for_each(mention_rows.clone(), move |m: MemberRow| {
+                let uname = m.username.clone();
+                hstack((
+                    text!("@{u}", u = uname.clone()).caption().bold().foreground(Accent),
+                    text(m.name.clone()).caption().muted(),
+                    spacer(),
+                ))
+                .spacing(8.0)
+                .padding_with((6.0, 12.0))
+                .on_tap(move |store: Store| store.apply_mention(&uname))
+            })
+            .spacing(0.0)
+            .padding_with((4.0, 0.0))
+            .background(Surface)
+            .clip(RoundedRectangle::new(0.12))
+        }),
+        when(poll_open, {
+            let st = store_for_poll.clone();
+            move || poll_creator(st.clone())
+        }),
+    ))
+    .spacing(0.0),
     hstack((
         FilePicker::open(
             label("Attach file").icon(paperclip()).icon_only(),
             &store.attach,
-        ),
+        )
+        .context_menu(("Create poll".action(|store: Store| {
+            store.toggle_poll_creator()
+        }),)),
         icon_button(emoticon(), "Stickers & GIFs", |store: Store| {
             store.toggle_stickers()
         }),
@@ -1241,58 +1254,33 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         .map(|(open, f)| open && f.width() < 1120.0)
         .distinct();
     let store_for_info_overlay = store.clone();
-    // Column width follows Telegram Desktop's math: pane minus the docked
-    // panel (280 + 1 divider) when it is docked, full pane otherwise. Kept as
-    // a signal so the `when`-materialized panel and the column resize in the
-    // same flush.
-    let col_w = store
-        .info_open
-        .zip(&store.win_frame)
-        .map(|(open, f)| {
-            let pane = (f.width() - 340.0).max(0.0);
-            if open && f.width() >= 1120.0 {
-                (pane - 281.0).max(0.0)
-            } else {
-                pane
-            }
-        });
-
-    // NOTE: `when(a).otherwise(b)` (WhenComplete) is intentionally not used
-    // here: its drop cascades a watcher cancel inside an in-flight cancel
-    // (nami#23) and panics the real renderer at mount. Two exclusive `when`s
-    // give the same tree without WhenComplete.
+    // Honest reproduction: `when(a).otherwise(b)` (WhenComplete) panics at
+    // mount on the shipped renderers — nami#23, DOGFOOD r11-4a. Kept in this
+    // form until the upstream fix lands; no workarounds.
     zstack((
         when(info_docked, {
             let st = store.clone();
             let s2 = store_for_info.clone();
-            let cw = col_w.clone();
             move || {
                 hstack((
-                    Frame::new(chat_column(st.clone())).width(cw.clone()),
+                    chat_column(st.clone()),
                     Color::from(BorderColor).width(1.0),
                     info_panel(s2.clone()),
                 ))
             }
-        }),
-        when(info_overlay, {
+        })
+        .otherwise({
             let st = store.clone();
-            let s2 = store_for_info_overlay.clone();
-            let cw = col_w.clone();
+            let ov = info_overlay.clone();
+            let s3 = store_for_info_overlay.clone();
             move || {
+                let ov2 = ov.clone();
+                let s4 = s3.clone();
                 zstack((
-                    Frame::new(chat_column(st.clone())).width(cw.clone()),
-                    hstack((
-                        spacer(),
-                        Color::from(BorderColor).width(1.0),
-                        info_panel(s2.clone()),
-                    )),
+                    chat_column(st.clone()),
+                    when(ov2, move || info_overlay_chunk(s4.clone())),
                 ))
             }
-        }),
-        when(store.info_open.not(), {
-            let st = store.clone();
-            let cw = col_w.clone();
-            move || Frame::new(chat_column(st.clone())).width(cw.clone())
         }),
         when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
     ))
@@ -1476,23 +1464,27 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     .spacing(3.0)
     .padding_with([0.0, 8.0, 0.0, 8.0]);
 
-    // No `max_width` on the bubble: in this layout system a max'd frame
-    // resolves to `min(offer, max)` — it would pin every bubble to the cap
-    // instead of hugging content. The stack's own allocation already clamps
-    // a non-stretching child to `min(ideal, available)`, so long text wraps
-    // at the row's available width and short text stays tight. Media parts
-    // carry their own fixed frames (320), which pins media bubbles.
-    // Static 480dp cap (Telegram Desktop's absolute bubble ceiling):
-    // `Frame::max_width` with a signal is only sampled at mount — see
-    // DOGFOOD "signal props on Frame don't re-propagate".
+    // Signal-derived cap — Telegram Desktop's ~72%-of-pane rule with its
+    // absolute 480dp ceiling. Honest repro: `Frame::max_width` samples a
+    // signal only at mount (waterui#1214, DOGFOOD r11-2b), so the cap is
+    // whatever the mount-time pane width produces; no wrap inside the cap
+    // on hydrolysis yet (hydrolysis#130). No workaround applied.
+    let bubble_cap = store
+        .win_frame
+        .map(|f| ((f.width() - 340.0) * 0.72).clamp(220.0, 480.0));
     let bubble = Frame::new(
         zstack((
             zstack((content, reactions_overlay)).alignment(BottomLeading),
-            meta_overlay,
+            // The meta overlay needs a trailing anchor: an infinite-width
+            // Frame fills the zstack's bounds, so `.alignment` can reach
+            // the trailing edge (a finite child only gets its own size).
+            Frame::new(meta_overlay)
+                .max_width(f32::INFINITY)
+                .alignment(BottomTrailing),
         ))
-        .alignment(BottomTrailing),
+        .alignment(BottomLeading),
     )
-    .max_width(480.0)
+    .max_width(bubble_cap)
     .background(if row.highlighted {
             RoundedRectangle::new(0.18).fill(AccentContainer)
         } else if row.outgoing {
@@ -2111,9 +2103,139 @@ fn video_note_sheet(store: Store) -> impl View {
 }
 
 
+/// Composer poll creator (attach menu → Poll, Telegram Desktop parity):
+/// question, 2–`POLL_MAX_OPTIONS` option slots, anonymous / multiple /
+/// quiz toggles; quiz mode adds a per-row correct-answer marker.
+pub(crate) fn poll_creator(store: Store) -> impl View {
+    let question_b = store.poll_question.clone();
+    let anon_b = store.poll_anonymous.clone();
+    let multi_b = store.poll_multiple.clone();
+    let quiz_b = store.poll_quiz.clone();
+    let regular = store.poll_quiz.not().distinct();
+    let mut option_rows: Vec<AnyView> = Vec::new();
+    for i in 0..Store::POLL_MAX_OPTIONS {
+        let shown = store
+            .poll_option_count
+            .map(move |n: usize| i < n)
+            .distinct();
+        let quiz_correct = store
+            .poll_correct
+            .zip(&store.poll_quiz)
+            .map(move |(c, q)| q && c == i)
+            .distinct();
+        let quiz_empty = store
+            .poll_correct
+            .zip(&store.poll_quiz)
+            .map(move |(c, q)| q && c != i)
+            .distinct();
+        let can_remove = store.poll_option_count.gt(2).distinct();
+        let field_b = store.poll_option_fields[i].clone();
+        option_rows.push(
+            when(shown, move || {
+                let qc = quiz_correct.clone();
+                let qe = quiz_empty.clone();
+                let rm = can_remove.clone();
+                let fb = field_b.clone();
+                hstack((
+                    when(qc, move || {
+                        text("●")
+                            .caption()
+                            .foreground(Accent)
+                            .on_tap(move |s: Store| s.poll_correct.set(i))
+                    }),
+                    when(qe, move || {
+                        text("○")
+                            .caption()
+                            .muted()
+                            .on_tap(move |s: Store| s.poll_correct.set(i))
+                    }),
+                    field(text!("Option {#index}", index = i + 1), &fb)
+                        .prompt("Option")
+                        .hide_label(),
+                    when(rm, move || {
+                        icon_button(close(), "Remove option", move |s: Store| {
+                            s.remove_poll_option(i)
+                        })
+                    }),
+                ))
+                .spacing(6.0)
+            })
+            .anyview(),
+        );
+    }
+    let option_stack: VStack<(Vec<AnyView>,)> = option_rows.into_iter().collect();
+    vstack((
+        hstack((
+            poll().tint(Accent).size(16.0, 16.0),
+            text("Create poll").caption().bold(),
+            spacer(),
+            icon_button(close(), "Close poll", |store: Store| {
+                store.poll_open.set(false)
+            }),
+        ))
+        .padding_with((4.0, 10.0)),
+        field("Question", &question_b).prompt("Ask a question"),
+        option_stack.spacing(4.0),
+        hstack((
+            text("+ Add an option")
+                .caption()
+                .foreground(Accent)
+                .on_tap(|store: Store| store.add_poll_option()),
+            spacer(),
+        ))
+        .padding_with((0.0, 10.0)),
+        toggle("Anonymous votes", &anon_b),
+        when(regular, move || toggle("Multiple answers", &multi_b)),
+        toggle("Quiz mode", &quiz_b),
+        hstack((
+            button("Create").action(|store: Store| store.send_poll()),
+            spacer(),
+            button("Cancel").action(|store: Store| store.poll_open.set(false)),
+        ))
+        .padding_with((0.0, 10.0)),
+    ))
+    .spacing(6.0)
+    .padding_with((6.0, 0.0))
+    .background(Surface)
+}
+
+/// Info panel below the dock threshold — Telegram Desktop's narrow-window
+/// treatment: a full-height elevated surface pinned to the pane's trailing
+/// edge, over a dimmed tap-to-dismiss scrim. Full height keeps the divider
+/// reading as the panel's edge (it crosses the composer, as on Desktop) and
+/// gives the shared-media scroll real room — a content-high panel leaves the
+/// lazy grid with no visible rows.
+pub(crate) fn info_overlay_chunk(store: Store) -> impl View {
+    Frame::new(
+        zstack((
+            Color::from(Foreground)
+                .opacity(0.32)
+                .on_tap(|store: Store| store.info_open.set(false)),
+            Frame::new(zstack((
+                Color::from(Surface),
+                hstack((
+                    Color::from(BorderColor).width(1.0),
+                    info_panel(store),
+                )),
+            )))
+            .width(281.0)
+            .max_height(f32::INFINITY)
+            .shadow(Shadow::new(
+                Color::srgb_hex("#000000").with_opacity(0.30),
+                Vector::new(-2.0, 0.0),
+                8.0,
+                0.0,
+            )),
+        ))
+        .alignment(TopTrailing),
+    )
+    .max_width(f32::INFINITY)
+    .max_height(f32::INFINITY)
+}
+
 /// Right-side info panel (Desktop's wide-layout details panel): chat
 /// profile header, members shortcut, shared-media grid.
-fn info_panel(store: Store) -> impl View {
+pub(crate) fn info_panel(store: Store) -> impl View {
     let media_chunks = SignalCollection::new(
         store
             .shared_media
