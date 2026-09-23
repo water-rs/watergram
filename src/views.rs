@@ -12,7 +12,11 @@ use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
 use waterui::media::Photo;
 use waterui::video::video_player;
-use waterui::navigation::{ColumnWidth, NavigationSplitView, NavigationView, Navigator};
+use waterui::accessibility::{AccessibilityChildren, AccessibilityRole};
+use waterui::navigation::{
+    ColumnWidth, NavigationSplitView, NavigationToolbar, NavigationToolbarItem,
+    NavigationToolbarPlacement, NavigationView, Navigator,
+};
 use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
 use waterui::text::IntoText;
@@ -20,8 +24,8 @@ use waterui::form::picker::file::FilePicker;
 use waterui::shape::{Circle, RoundedRectangle, ShapeExt};
 use waterui::graphics::color::WithOpacity;
 use waterui::theme::color::{
-    Accent, AccentContainer, AccentForeground, Error, Foreground, MutedForeground, Surface,
-    SurfaceVariant,
+    Accent, AccentContainer, AccentForeground, Background, Error, Foreground,
+    MutedForeground, Surface, SurfaceVariant,
 };
 use waterui::views::ForEach;
 use waterui::widget::condition::when;
@@ -29,7 +33,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{AccountRow, ChatRow, FolderRow, PackRow, MemberRow, MessageRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store};
+use crate::state::{AccountRow, ChatRow, FolderRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store, ViewerRow};
 use mdi::account;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -60,6 +64,7 @@ use mdi::share_variant;
 
 const ONE: NonZeroUsize = NonZeroUsize::new(1).unwrap();
 const TWO: NonZeroUsize = NonZeroUsize::new(2).unwrap();
+const THREE: NonZeroUsize = NonZeroUsize::new(3).unwrap();
 
 // ---------------------------------------------------------------------------
 // Root: switch on the top-level screen
@@ -247,7 +252,13 @@ pub(crate) fn sidebar_stack(store: Store) -> impl View {
 #[allow(if_else_view)] // tab styling picks between two text looks, not reactive content
 pub(crate) fn sidebar_view(store: Store) -> impl View {
     let conn = store.connection.clone();
-    let forward_mode = store.forward_message.is_some();
+    // Single-message forward (context menu) sets `forward_message`; the
+    // multi-select bar sets `forward_ids`. The banner shows for either.
+    let forward_mode = store
+        .forward_message
+        .is_some()
+        .or(&store.forward_ids.map(|ids| !ids.is_empty()))
+        .distinct();
     let filtered: SignalCollection<_> = SignalCollection::new(
         store
             .chats
@@ -296,10 +307,9 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
 
     vstack((
         hstack((
-            button(label("New chat").icon(plus()))
-                .label_style(LabelDisplayMode::IconOnly)
-                .plain()
-                .action(|nav: Navigator<Route>| nav.push(Route::NewChat)),
+            icon_button_nav(plus(), "New chat", |nav: Navigator<Route>| {
+                nav.push(Route::NewChat)
+            }),
             icon_button(archive(), "Archive", |store: Store| {
                 store.toggle_archive_view()
             }),
@@ -309,10 +319,9 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             spacer(),
             text!("{conn}").caption().muted(),
             spacer(),
-            button(label("Settings").icon(cog()))
-                .label_style(LabelDisplayMode::IconOnly)
-                .plain()
-                .action(|nav: Navigator<Route>| nav.push(Route::Settings)),
+            icon_button_nav(cog(), "Settings", |nav: Navigator<Route>| {
+                nav.push(Route::Settings)
+            }),
         ))
         .padding_with((6.0, 12.0)),
         when(store.accounts_open.clone(), move || {
@@ -337,8 +346,44 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             ))
             .background(Surface)
         }),
+        when(forward_mode, move || {
+            let noattr = store.forward_noattr.clone();
+            hstack((
+                share_variant().tint(Accent).size(16.0, 16.0),
+                text("Select a chat to forward to")
+                    .caption()
+                    .foreground(Accent),
+                spacer(),
+                text!(
+                    "Without attribution{mark}",
+                    mark = noattr.map(|b: bool| Str::from(if b { " ✓" } else { "" }))
+                )
+                .caption()
+                .padding_with((2.0, 8.0))
+                .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+                .on_tap(|store: Store| {
+                    let v = !store.forward_noattr.get();
+                    store.forward_noattr.set(v);
+                })
+                .a11y_label("Forward without attribution")
+                .a11y_role(AccessibilityRole::Button),
+                icon_button(close(), "Cancel", |store: Store| {
+                    store.forward_message.set(None);
+                    store.forward_ids.set(Vec::new());
+                }),
+            ))
+            .padding_with((8.0, 12.0))
+            .background(Surface)
+        }),
         when(has_folders, move || {
             let folder_edit = store.folder_open.clone();
+            // Chip metrics: caption line ~17dp + 2×3dp vertical chip padding.
+            // The row frame takes exactly the chip height; ScrollView is
+            // `StretchAxis::Both` per layout-spec §3, so without this fixed
+            // content height the horizontal scroller would share the sidebar
+            // surplus with the chat List.
+            let chip_pad_v = 3.0_f32;
+            let chip_row_h = 17.0 + 2.0 * chip_pad_v;
             vstack((
                 hstack((
                     scroll_horizontal(Lazy::hstack(ForEach::new(
@@ -356,7 +401,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 text(label).caption().muted().anyview()
                             };
                             let chip = chip
-                                .padding_with((3.0, 10.0))
+                                .padding_with((chip_pad_v, 10.0_f32))
                                 .background(if tab.active {
                                     RoundedRectangle::new(0.5)
                                         .fill(SurfaceVariant)
@@ -380,10 +425,18 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                             }
                         },
                     ))),
-                    icon_button(folder_plus(), "New folder", |store: Store| {
-                        store.open_folder_editor(0)
-                    }),
+                    // Same chip metrics as the tab chips so the row stays at
+                    // chip height (the 40dp icon chip would stretch the row).
+                    folder_plus()
+                        .foreground(Accent)
+                        .size(14.0, 14.0)
+                        .padding_with((chip_pad_v, 8.0_f32))
+                        .on_tap(|store: Store| store.open_folder_editor(0))
+                        .a11y_label("New folder")
+                        .a11y_role(AccessibilityRole::Button)
+                        .a11y_children(AccessibilityChildren::ExcludeDescendants),
                 ))
+                .height(chip_row_h)
                 .padding_with((4.0, 8.0)),
                 {
                     let fname = store.folder_name.clone();
@@ -408,20 +461,6 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 })
                 }
             ))
-        }),
-        when(forward_mode, || {
-            hstack((
-                share_variant().tint(Accent).size(16.0, 16.0),
-                text("Select a chat to forward to")
-                    .caption()
-                    .foreground(Accent),
-                spacer(),
-                icon_button(close(), "Cancel", |store: Store| {
-                    store.forward_message.set(None)
-                }),
-            ))
-            .padding_with((8.0, 12.0))
-            .background(Surface)
         }),
         scroll(
             vstack((
@@ -448,14 +487,41 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
     .on_change(&debounced, |q: Str, store: Store| store.run_search(q))
 }
 
+// A `button()` carries a ~58-72dp minimum box and measured 72dp wide in the
+// semantic tree; five of them plus a label overflow the 340dp sidebar and the
+// 460dp composer. Compose a 40dp icon chip from primitives instead (M3 icon
+// button: 40dp state layer in a 48dp target).
+fn icon_chip(icon: impl View + Clone + 'static) -> impl View {
+    icon.foreground(Accent)
+        .size(20.0, 20.0)
+        .padding_with((10.0_f32, 10.0_f32))
+        .size(40.0, 40.0)
+}
+
+fn a11y_icon_button(view: impl View + 'static, name: &'static str) -> impl View {
+    view.a11y_label(name)
+        .a11y_role(AccessibilityRole::Button)
+        .a11y_children(AccessibilityChildren::ExcludeDescendants)
+}
+
 pub(crate) fn icon_button<F>(icon: impl View + Clone + 'static, name: &'static str, on_tap: F) -> impl View
 where
     F: Fn(Store) + 'static,
 {
-    button(label(name).icon(icon))
-        .label_style(LabelDisplayMode::IconOnly)
-        .plain()
-        .action(move |store: Store| on_tap(store))
+    a11y_icon_button(
+        icon_chip(icon).on_tap(move |store: Store| on_tap(store)),
+        name,
+    )
+}
+
+pub(crate) fn icon_button_nav<F>(icon: impl View + Clone + 'static, name: &'static str, on_tap: F) -> impl View
+where
+    F: Fn(Navigator<Route>) + 'static,
+{
+    a11y_icon_button(
+        icon_chip(icon).on_tap(move |nav: Navigator<Route>| on_tap(nav)),
+        name,
+    )
 }
 
 pub(crate) fn kind_icon(kind: &str) -> impl View {
@@ -573,6 +639,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         .action(move |store: Store| store.toggle_archive(id)),
         if row.muted { "Unmute" } else { "Mute" }.action(move |store: Store| store.toggle_mute(id)),
         "Join chat".action(move |store: Store| store.join(id)),
+        "Clear history".action(move |store: Store| store.clear_history(id)),
         "Leave chat".action(move |store: Store| store.leave(id)),
     ))
     .on_tap(move |store: Store| store.select_chat(id))
@@ -621,6 +688,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         .map(|s: Str| !s.is_empty())
         .distinct();
     let capture_error_text = store.capture_error.clone();
+    let composer_empty = store.composer.str_is_empty().distinct();
     let video_note_open = store.video_note_open.clone();
     let voice_elapsed = store.voice_elapsed.clone();
     let store_for_sheet = store.clone();
@@ -637,8 +705,24 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let sticker_items = store.sticker_items.clone();
     let store_cells = store.clone();
     let inner = store.clone();
+    let viewer_open = store.viewer.is_some().distinct();
+    let store_for_viewer = store.clone();
+    let sel_active = store
+        .selected_msgs
+        .map(|v: Vec<i64>| !v.is_empty())
+        .distinct();
+    let sel_active_rows = sel_active.clone();
+    let sel_msgs_rows = store.selected_msgs.clone();
+    let sel_count = store
+        .selected_msgs
+        .map(|v: Vec<i64>| v.len())
+        .distinct();
+    let scheduled_open = store.scheduled_open.clone();
+    let scheduled_b = store.scheduled.clone();
+    let emoji_tab = store.panel_tab.is_zero().distinct();
 
-    vstack((
+    zstack((
+        vstack((
         when(has_pinned, move || {
             hstack((
                 pin().tint(Accent).size(14.0, 14.0),
@@ -652,6 +736,27 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .background(Surface)
             .on_tap(|store: Store| store.jump_to_message(store.pinned_id.get()))
         }),
+        // Multi-select action bar (Desktop's "N selected" header state).
+        when(sel_active, move || {
+            hstack((
+                text!("{n} selected", n = sel_count.clone())
+                    .caption()
+                    .bold(),
+                spacer(),
+                icon_button(share_variant(), "Forward selected", |store: Store| {
+                    store.forward_selected()
+                }),
+                icon_button(delete_sweep(), "Delete selected", |store: Store| {
+                    store.delete_selected()
+                }),
+                icon_button(close(), "Clear selection", |store: Store| {
+                    store.clear_selection()
+                }),
+            ))
+            .spacing(6.0)
+            .padding_with((6.0, 12.0))
+            .background(Surface)
+        }),
         vstack((
             when(has_more, || {
                 button("Load earlier messages…")
@@ -659,8 +764,29 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     .action(|store: Store| store.load_older())
             }),
             List::for_each(messages, move |row: MessageRow| {
+                let rid = row.id;
+                let check = sel_msgs_rows
+                    .map(move |v: Vec<i64>| v.contains(&rid))
+                    .distinct();
                 ListItem::new(
-                    message_bubble(inner.clone(), row).padding_with((2.0, 12.0)),
+                    hstack((
+                        when(sel_active_rows.clone(), move || {
+                            let check = check.clone();
+                            when(check, || text("☑").body().foreground(Accent))
+                                .otherwise(|| text("☐").body().muted())
+                                .padding_with((0.0, 4.0))
+                        }),
+                        message_bubble(inner.clone(), row),
+                    ))
+                    .spacing(4.0)
+                    .on_tap(move |store: Store| {
+                        // Only multi-select mode: context-menu "Select"
+                        // seeds the set; further taps toggle membership.
+                        if !store.selected_msgs.get().is_empty() {
+                            store.toggle_select(rid);
+                        }
+                    })
+                    .padding_with((2.0, 12.0)),
                 )
             })
             .scroll_controller(&scroller),
@@ -742,6 +868,45 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     },
                 )))
                 .max_height(200.0),
+            ))
+            .background(Surface)
+        }),
+        // Scheduled messages panel (nav-toolbar clock icon).
+        when(scheduled_open, move || {
+            vstack((
+                hstack((
+                    text("Scheduled messages").caption().muted(),
+                    spacer(),
+                    icon_button(close(), "Close scheduled", |store: Store| {
+                        store.scheduled_open.set(false)
+                    }),
+                ))
+                .padding_with((4.0, 10.0)),
+                scroll(Lazy::vstack(ForEach::new(
+                    SignalCollection::new(scheduled_b.clone()),
+                    |row: MessageRow| {
+                        let mid = row.id;
+                        let label = if row.text.is_empty() {
+                            row.media_label.clone()
+                        } else {
+                            row.text.clone()
+                        };
+                        hstack((
+                            clock_outline()
+                                .tint(MutedForeground)
+                                .size(12.0, 12.0),
+                            text(label).caption().line_limit(ONE),
+                            spacer(),
+                            text(row.time.clone()).caption().muted(),
+                        ))
+                        .spacing(6.0)
+                        .padding_with((4.0, 10.0))
+                        .context_menu(("Send now".action(move |store: Store| {
+                            store.scheduled_send_now(mid)
+                        }),))
+                    },
+                )))
+                .max_height(150.0),
             ))
             .background(Surface)
         }),
@@ -827,73 +992,89 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         }),
         when(stickers_open, move || {
             let cells = store_cells.clone();
+            let emoji_tab2 = emoji_tab.clone();
+            let sticker_q = store.sticker_query.clone();
+            let packs_b = store.sticker_packs.clone();
+            let items_b = sticker_items.clone();
             vstack((
+                // Picker tabs: Emoji grid is local; Stickers/GIFs query TDLib.
                 hstack((
-                    field("Emoji search", &store.sticker_query)
-                        .prompt("😀 emoji")
-                        .hide_label(),
-                    icon_button(magnify(), "Search stickers", |store: Store| {
-                        store.search_stickers_by()
-                    }),
-                    {
-                        let q = store.sticker_query.clone();
-                        icon_button(file_gif_box(), "Search GIFs", move |store: Store| {
-                            store.search_gifs_by(q.get().to_string())
-                        })
-                    },
+                    panel_tab_chip("Emoji", 0),
+                    panel_tab_chip("Stickers", 1),
+                    panel_tab_chip("GIFs", 2),
+                    spacer(),
                 ))
-                .spacing(6.0)
+                .spacing(4.0)
                 .padding_with((2.0, 8.0)),
-            {
-                let packs = store.sticker_packs.clone();
-                scroll_horizontal(Lazy::hstack(ForEach::new(
-                    SignalCollection::new(packs.clone()),
-                    move |pack: PackRow| {
-                        let id = pack.id;
-                        text(pack.title.clone())
-                            .caption()
-                            .padding_with((2.0, 8.0))
-                            .background(
-                                RoundedRectangle::new(0.5).fill(SurfaceVariant),
-                            )
-                            .on_tap(move |store: Store| {
-                                store.open_sticker_pack(id)
-                            })
-                    },
-                )))
-                .max_height(28.0)
-            },
-            scroll_horizontal(Lazy::hstack(ForEach::new(
-                SignalCollection::new(sticker_items.clone()),
-                move |item: StickerItem| {
-                    let cell_store = cells.clone();
-                    let thumb = item.thumb;
-                    let fallback: Str = if item.gif {
-                        "GIF".into()
-                    } else {
-                        item.emoji.clone()
-                    };
-                    let it = item.clone();
-                    let cell = if thumb != 0 {
-                        let has = cell_store
-                            .file_signal(thumb)
-                            .map(|p: Str| !p.is_empty())
-                            .distinct();
-                        let url = cell_store.file_signal(thumb).map(Url::from_file_path_str);
-                        when(has, move || {
-                            Photo::new(url.clone()).max_width(72.0).max_height(72.0)
-                        })
-                        .otherwise(move || text(fallback.clone()).headline())
-                        .anyview()
-                    } else {
-                        text(fallback).headline().anyview()
-                    };
-                    cell.padding_with((6.0, 6.0))
-                        .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
-                        .on_tap(move |store: Store| store.send_sticker(it.clone()))
-                },
-            )))
-            .max_height(96.0),
+                when(emoji_tab2, emoji_grid).otherwise(move || {
+                    let cells = cells.clone();
+                    vstack((
+                        hstack((
+                            field("Emoji search", &sticker_q)
+                                .prompt("😀 emoji")
+                                .hide_label(),
+                            icon_button(magnify(), "Search stickers", |store: Store| {
+                                store.search_stickers_by()
+                            }),
+                            {
+                                let q = sticker_q.clone();
+                                icon_button(file_gif_box(), "Search GIFs", move |store: Store| {
+                                    store.search_gifs_by(q.get().to_string())
+                                })
+                            },
+                        ))
+                        .spacing(6.0)
+                        .padding_with((2.0, 8.0)),
+                        scroll_horizontal(Lazy::hstack(ForEach::new(
+                            SignalCollection::new(packs_b.clone()),
+                            move |pack: PackRow| {
+                                let id = pack.id;
+                                text(pack.title.clone())
+                                    .caption()
+                                    .padding_with((2.0, 8.0))
+                                    .background(
+                                        RoundedRectangle::new(0.5).fill(SurfaceVariant),
+                                    )
+                                    .on_tap(move |store: Store| {
+                                        store.open_sticker_pack(id)
+                                    })
+                            },
+                        )))
+                        .max_height(28.0),
+                        scroll_horizontal(Lazy::hstack(ForEach::new(
+                            SignalCollection::new(items_b.clone()),
+                            move |item: StickerItem| {
+                                let cell_store = cells.clone();
+                                let thumb = item.thumb;
+                                let fallback: Str = if item.gif {
+                                    "GIF".into()
+                                } else {
+                                    item.emoji.clone()
+                                };
+                                let it = item.clone();
+                                let cell = if thumb != 0 {
+                                    let has = cell_store
+                                        .file_signal(thumb)
+                                        .map(|p: Str| !p.is_empty())
+                                        .distinct();
+                                    let url = cell_store.file_signal(thumb).map(Url::from_file_path_str);
+                                    when(has, move || {
+                                        Photo::new(url.clone()).max_width(72.0).max_height(72.0)
+                                    })
+                                    .otherwise(move || text(fallback.clone()).headline())
+                                    .anyview()
+                                } else {
+                                    text(fallback).headline().anyview()
+                                };
+                                cell.padding_with((6.0, 6.0))
+                                    .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
+                                    .on_tap(move |store: Store| store.send_sticker(it.clone()))
+                            },
+                        )))
+                        .max_height(96.0),
+                    ))
+                    .spacing(4.0)
+                }),
             ))
         }),
         hstack((
@@ -905,35 +1086,62 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             field("Message", &composer_b)
                 .prompt("Message")
                 .hide_label(),
-            icon_button(microphone(), "Record voice note", |store: Store| {
-                store.toggle_voice_record()
+            // Search/members/scheduled live in the navigation toolbar
+            // (Telegram Desktop parity). A `Spacer` before the mic/send slot
+            // keeps it trailing-aligned.
+            spacer(),
+            when(composer_empty, || {
+                icon_button(microphone(), "Record voice note", |store: Store| {
+                    store.toggle_voice_record()
+                })
+            })
+            .otherwise(|| {
+                icon_button(send(), "Send", |store: Store| store.send()).context_menu((
+                    "Send silently".action(|store: Store| store.send_silent()),
+                    "Send in 1 hour".action(|store: Store| store.send_later(3600)),
+                ))
             }),
             icon_button(camera(), "Video note", |store: Store| {
                 store.open_video_note()
             }),
-            icon_button(magnify(), "Search in chat", move |store: Store| {
-                store.chat_search_open.set(!search_open2.get())
-            }),
-            icon_button(account_group(), "Members", move |store: Store| {
-                let open = !store.members_open.get();
-                store.members_open.set(open);
-                if open {
-                    store.load_members();
-                }
-            }),
-            icon_button(send(), "Send", |store: Store| store.send()).context_menu((
-                "Send silently".action(|store: Store| store.send_silent()),
-                "Send in 1 hour".action(|store: Store| store.send_later(3600)),
-            )),
         ))
-        .spacing(6.0)
-        .padding_with((8.0, 10.0))
+        .spacing(4.0)
+        .padding_with((4.0, 6.0))
         .background(Surface),
+        )),
+        when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
     ))
     .on_change(&search_debounced, |q: Str, store: Store| store.run_chat_search(q))
     .on_change(&composer_b, |_: Str, store: Store| store.typing_ping())
     .title(text!("{title}"))
     .navigation_subtitle(text!("{subtitle}"))
+    .navigation_toolbar(
+        // `::new` keeps the 40dp icon chip; `::action` draws label+icon and
+        // measured ~170dp, which crowds the title in a 460dp pane.
+        NavigationToolbar::default()
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarTrailing,
+                icon_button(magnify(), "Search in chat", move |store: Store| {
+                    store.chat_search_open.set(!search_open2.get())
+                }),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarTrailing,
+                icon_button(account_group(), "Members", move |store: Store| {
+                    let open = !store.members_open.get();
+                    store.members_open.set(open);
+                    if open {
+                        store.load_members();
+                    }
+                }),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarTrailing,
+                icon_button(clock_outline(), "Scheduled messages", |store: Store| {
+                    store.toggle_scheduled()
+                }),
+            )),
+    )
 }
 
 pub(crate) fn banner(
@@ -973,6 +1181,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let r3 = row.clone();
     let r4 = row.clone();
     let r5 = row.id;
+    let r_view = row.clone();
 
     // Secondary text inside the bubble: `MutedForeground` on a plain
     // background, a translucent on-accent color inside an outgoing bubble —
@@ -1002,7 +1211,14 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         ));
     }
     if has_media {
-        parts.push(media.anyview());
+        parts.push(
+            media
+                .on_tap(move |store: Store| store.open_viewer(&r_view))
+                .anyview(),
+        );
+    }
+    if let Some(poll) = &row.poll {
+        parts.push(poll_block(row.id, poll).anyview());
     }
     if !row.outgoing && !sender.is_empty() {
         parts.push(
@@ -1025,40 +1241,58 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             text(webpage.clone()).caption().line_limit(TWO).anyview(),
         ));
     }
-    parts.push(
-        hstack((
-            if has_reactions {
-                text(reactions.clone()).caption().anyview()
-            } else {
-                spacer().width(1.0).anyview()
-            },
-            spacer(),
-            text(time).caption(),
-            if row.pending {
-                clock_outline().size(11.0, 11.0).anyview()
-            } else if row.failed {
-                alert_circle()
-                    .tint(Error)
-                    .size(11.0, 11.0)
-                    .on_tap(move |store: Store| store.resend_failed(row.id))
-                    .anyview()
-            } else if row.outgoing && row.read_out {
-                text("✓✓").caption().anyview()
-            } else if row.outgoing {
-                text("✓").caption().anyview()
-            } else {
-                spacer().width(1.0).anyview()
-            },
-        ))
-        .spacing(3.0)
-        .anyview(),
-    );
-
-    let bubble = vstack(parts)
+    // Timestamp + ticks and reactions overlay the bubble's bottom band in
+    // zstack layers: a `Spacer`-driven meta row would make the bubble greedy
+    // on the cross axis and pin it at max width. Content reserves the band
+    // via its bottom inset; the overlays sit inside it, so the bubble hugs
+    // the widest real content part.
+    let meta_band = 20.0;
+    let content = vstack(parts)
         .spacing(4.0)
         .leading()
-        .padding_with(10.0)
-        .max_width(420.0)
+        .padding_with([10.0, 10.0 + meta_band, 10.0, 10.0]);
+
+    let reactions_overlay: AnyView = if has_reactions {
+        text(reactions.clone())
+            .caption()
+            .padding_with([0.0, 11.0, 0.0, 10.0])
+            .anyview()
+    } else {
+        AnyView::default()
+    };
+
+    let meta_overlay = hstack((
+        text(time).caption(),
+        if row.pending {
+            clock_outline().size(11.0, 11.0).anyview()
+        } else if row.failed {
+            alert_circle()
+                .tint(Error)
+                .size(11.0, 11.0)
+                .on_tap(move |store: Store| store.resend_failed(row.id))
+                .anyview()
+        } else if row.outgoing && row.read_out {
+            text("✓✓").caption().anyview()
+        } else if row.outgoing {
+            text("✓").caption().anyview()
+        } else {
+            AnyView::default()
+        },
+    ))
+    .spacing(3.0)
+    .padding_with([0.0, 8.0, 0.0, 8.0]);
+
+    // No `max_width` on the bubble: in this layout system a max'd frame
+    // resolves to `min(offer, max)` — it would pin every bubble to the cap
+    // instead of hugging content. The stack's own allocation already clamps
+    // a non-stretching child to `min(ideal, available)`, so long text wraps
+    // at the row's available width and short text stays tight. Media parts
+    // carry their own fixed frames (320), which pins media bubbles.
+    let bubble = zstack((
+        zstack((content, reactions_overlay)).alignment(BottomLeading),
+        meta_overlay,
+    ))
+    .alignment(BottomTrailing)
         .background(if row.highlighted {
             RoundedRectangle::new(0.18).fill(AccentContainer)
         } else if row.outgoing {
@@ -1089,8 +1323,10 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let r8 = row.clone();
     let r9 = row.clone();
     let r10 = row.clone();
+    let r11 = row.id;
     let bubble = bubble.context_menu((
         "Reply".action(move |store: Store| store.start_reply(&r1)),
+        "Select".action(move |store: Store| store.toggle_select(r11)),
         react_label.action(move |store: Store| store.toggle_reaction(&r6, "👍")),
         "React ❤️".action(move |store: Store| store.toggle_reaction(&r7, "❤️")),
         "React 😂".action(move |store: Store| store.toggle_reaction(&r8, "😂")),
@@ -1253,14 +1489,12 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             // Narrow pane: the M3 field's fixed 280 dp minimum cannot share
             // an hstack below ~560 dp (see DOGFOOD), so names stack vertically.
             vstack((
-                field("First name", &store.edit_first).hide_label(),
-                field("Last name", &store.edit_last).hide_label(),
+                field("First name", &store.edit_first),
+                field("Last name", &store.edit_last),
             ))
             .spacing(8.0),
-            field("Bio", &store.edit_bio).prompt("a few words about you").hide_label(),
-            field("Username", &store.edit_username)
-                .prompt("username (no @)")
-                .hide_label(),
+            field("Bio", &store.edit_bio).prompt("a few words about you"),
+            field("Username", &store.edit_username).prompt("username (no @)"),
             hstack((
                 text!("{profile_note}", profile_note = store.profile_note.clone())
                     .caption()
@@ -1331,6 +1565,23 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     .foreground(Error)
                     .on_tap(|store: Store| store.terminate_all_sessions()),
             )),
+            vstack((
+                text("Blocked users").caption().muted(),
+                Lazy::vstack(ForEach::new(
+                    SignalCollection::new(store.blocked.clone()),
+                    |row: MemberRow| {
+                        hstack((
+                            text(row.name.clone()).caption(),
+                            spacer(),
+                            text("Unblock").caption().foreground(Accent),
+                        ))
+                        .padding_with((4.0, 0.0))
+                        .on_tap(move |store: Store| store.unblock_sender(&row))
+                    },
+                )),
+            ))
+            .spacing(4.0)
+            .leading(),
             Lazy::vstack(ForEach::new(
                 SignalCollection::new(store.sessions.clone()),
                 move |row: SessionRow| {
@@ -1388,6 +1639,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             store.load_twofa();
             store.load_storage();
             store.load_privacy();
+            store.load_blocked();
         }
     });
     let store_for_twofa = store.clone();
@@ -1571,9 +1823,14 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
                 .spacing(6.0)
                 .padding_with((4.0, 0.0))
                 .on_tap(move |store: Store| store.start_chat_with(row.key))
-                .context_menu(("Remove contact".action(move |store: Store| {
-                    store.remove_contact(row.key)
-                }),))
+                .context_menu((
+                    "New secret chat".action(move |store: Store| {
+                        store.new_secret_chat(row.key)
+                    }),
+                    "Remove contact".action(move |store: Store| {
+                        store.remove_contact(row.key)
+                    }),
+                ))
             },
         )),
     ))
@@ -1629,3 +1886,163 @@ fn video_note_sheet(store: Store) -> impl View {
     .padding_with((10.0, 12.0))
     .background(Surface)
 }
+
+/// Poll block inside a bubble: question, tappable options showing vote
+/// share, and a totals footer. Tapping an option calls `setPollAnswer`.
+#[allow(if_else_view)] // color pick, not a view
+fn poll_block(message_id: i64, poll: &PollRow) -> impl View {
+    let mut opts: Vec<AnyView> = Vec::new();
+    for o in &poll.options {
+        let ix = o.ix;
+        let mark = if o.chosen { " ✓" } else { "" };
+        let chosen = o.chosen;
+        let bar_w = (o.pct.max(2) as f32) * 2.0;
+        opts.push(
+            vstack((
+                hstack((
+                    text(format!("{}{}", o.text, mark)).caption(),
+                    spacer(),
+                    text(format!("{}%", o.pct)).caption().muted(),
+                ))
+                .spacing(6.0),
+                RoundedRectangle::new(0.5)
+                    .fill(if chosen {
+                        Color::from(Accent)
+                    } else {
+                        Color::from(SurfaceVariant)
+                    })
+                    .size(bar_w, 4.0),
+            ))
+            .spacing(2.0)
+            .leading()
+            .on_tap(move |store: Store| store.vote_poll(message_id, ix))
+            .anyview(),
+        );
+    }
+    vstack((
+        text(poll.question.clone()).body().bold(),
+        vstack(opts).spacing(6.0),
+        text(if poll.closed {
+            format!("{} votes · closed", poll.voters)
+        } else {
+            format!("{} votes", poll.voters)
+        })
+        .caption()
+        .muted(),
+    ))
+    .spacing(6.0)
+    .leading()
+}
+
+/// In-pane media viewer (Desktop's viewer is fullscreen; ours covers the
+/// detail pane): photo or playable payload with sender, caption, close.
+#[allow(signal_get_in_view)] // the `when` gate rebuilds this view when the
+// viewer opens; `url.get()` then reads the resolved path at rebuild time.
+fn viewer_layer(store: Store) -> impl View {
+    // The `when(viewer_open)` gate on the caller side hides this layer until
+    // a viewer row exists; file 0 simply resolves to the Downloading branch.
+    let row = store.viewer.get().unwrap_or(ViewerRow {
+        file: 0,
+        video: false,
+        caption: "".into(),
+        from: "".into(),
+    });
+    let file = row.file;
+    let video = row.video;
+    let has = store
+        .file_signal(file)
+        .map(|p: Str| !p.is_empty())
+        .distinct();
+    let url = store.file_signal(file).map(Url::from_file_path_str);
+    let url_photo = url.clone();
+    let media = when(has, move || {
+        let url_v = url.clone();
+        let url_p = url_photo.clone();
+        when(video, move || video_player(url_v.get()).max_height(420.0)).otherwise(
+            move || {
+                Photo::new(url_p.get())
+                    .max_width(430.0)
+                    .max_height(430.0)
+                    .clip(RoundedRectangle::new(0.05))
+            },
+        )
+    })
+    .otherwise(|| text("Downloading…").caption().muted());
+    vstack((
+        hstack((
+            text(row.from.clone()).body().bold(),
+            spacer(),
+            icon_button(close(), "Close viewer", |store: Store| {
+                store.close_viewer()
+            }),
+        ))
+        .spacing(8.0)
+        .padding_with((8.0, 12.0))
+        .background(Surface),
+        spacer(),
+        media,
+        spacer(),
+        text(row.caption.clone())
+            .caption()
+            .line_limit(THREE)
+            .padding_with((8.0, 12.0)),
+    ))
+    .background(WithOpacity::new(Background, 0.97))
+}
+
+/// Picker tab chip (Emoji / Stickers / GIFs) with the same metrics as the
+/// folder chips so the row stays at chip height.
+fn panel_tab_chip(label: &'static str, tab: i32) -> impl View {
+    text(label)
+        .caption()
+        .padding_with((3.0, 10.0))
+        .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+        .on_tap(move |store: Store| store.pick_panel_tab(tab))
+        .a11y_label(label)
+        .a11y_role(AccessibilityRole::Button)
+        .a11y_children(AccessibilityChildren::ExcludeDescendants)
+}
+
+/// Emoji grid — the picker panel's first tab. Local data only (Desktop's
+/// emoji tab is also local); tapping inserts into the composer.
+fn emoji_grid() -> impl View {
+    let mut rows: Vec<AnyView> = Vec::new();
+    for chunk in EMOJI_SET.chunks(8) {
+        let mut cells: Vec<AnyView> = Vec::new();
+        for e in chunk {
+            let s = (*e).to_string();
+            cells.push(
+                text(s.clone())
+                    .headline()
+                    .padding_with((4.0, 4.0))
+                    .on_tap(move |store: Store| store.insert_emoji(&s))
+                    .anyview(),
+            );
+        }
+        rows.push(hstack(cells).spacing(2.0).anyview());
+    }
+    scroll(vstack(rows).spacing(2.0).leading().padding_with((4.0, 8.0)))
+        .max_height(160.0)
+}
+
+/// Common emoji, one grapheme each (VS16 sequences kept whole so chunking
+/// can't split a variation selector from its base).
+const EMOJI_SET: &[&str] = &[
+    "😀", "😁", "😂", "🤣", "😃", "😄", "😅", "😆", "😉", "😊", "😋", "😎", "😍", "😘", "🥰", "😗",
+    "😙", "😚", "🙂", "🤗", "🤔", "😐", "😑", "😶", "🙄", "😏", "😣", "😥", "😮", "🤐", "😯", "😪",
+    "😫", "🥱", "😴", "😌", "😛", "😜", "😝", "🤤", "😒", "😓", "😔", "😕", "🙃", "🤑", "😲", "🙁",
+    "😖", "😞", "😟", "😤", "😢", "😭", "😦", "😧", "😨", "😩", "🤯", "😬", "😰", "😱", "🥵", "🥶",
+    "😳", "🤪", "😵", "🥴", "😠", "😡", "🤬", "😷", "🤒", "🤕", "🤢", "🤮", "😇", "🥳", "🥺", "🤠",
+    "🤡", "🤥", "🤫", "🤭", "🧐", "🤓", "😈", "👿", "👹", "👺", "💀", "👻", "👽", "🤖", "💩", "😺",
+    "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "👍", "👎", "👏", "🙌", "👐", "🤝", "🙏", "✌️",
+    "🤞", "🤟", "🤘", "🤙", "👌", "🤌", "🤏", "👈", "👉", "👆", "👇", "☝️", "✋", "🤚", "🖐", "🖖",
+    "👋", "💪", "🖕", "✍️", "🤳", "💅", "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔",
+    "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "🔥", "✨", "🌟", "⭐", "💯", "✅", "❌", "⚠️",
+    "🎉", "🎊", "🎁", "🎈", "🎂", "🏆", "⚽", "🏀", "🎯", "🎮", "🎲", "🧩", "🚗", "✈️", "🚀", "🏠",
+    "📱", "💻", "⌚", "📷", "🔒", "🔑", "💡", "📌", "✏️", "📝", "📖", "🔍", "💰", "☕", "🍕", "🍔",
+    "🍎", "🍉", "🍺", "🥂", "⏰", "📅", "🌍", "🌙", "☀️", "🌈", "☔", "❄️", "⚡", "🐱", "🐶", "🐭",
+    "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🐔", "🐧", "🐦", "🦆",
+    "🦅", "🦉", "🦇", "🐺", "🐗", "🐴", "🦄", "🐝", "🐛", "🦋", "🐌", "🐞", "🐜", "🐢", "🐍", "🦎",
+    "🐙", "🦑", "🦐", "🦀", "🐡", "🐠", "🐟", "🐬", "🐳", "🐋", "🦈", "🐊", "🐅", "🐆", "🦓", "🦍",
+    "🐘", "🦛", "🦏", "🐪", "🐫", "🦒", "🦘", "🐎", "🐖", "🐏", "🐑", "🦙", "🐐", "🦌", "🐕", "🐈",
+];

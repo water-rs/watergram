@@ -56,6 +56,17 @@
 | 链接预览 | ✅ | `MessageText.link_preview` → 站内一行卡片（site—title·desc) | `link_preview_line_shows` |
 | 富文本实体（粗/斜/剧透/超链） | ✅ | `FormattedText.entities` → `StyledStr`（粗/斜/下划/删除/剧透/代码/引用/链接，UTF-16→byte 映射+重叠合并） | `styled_entities_merge` |
 | 转发带出处徽标 | ✅ | `m.forward_info.origin`（User/HiddenUser/Chat/Channel 出处行内徽标） | — |
+| 消息右键菜单（回复/编辑/复制/转发/删除/反应/置顶/选择） | ✅ | 行 context_menu → 对应 API | — |
+| 多选消息（批量删除/批量转发） | ✅ | `deleteMessages(revoke)` / `forwardMessages` 批处理 + 选择条（☑/☐ 行内勾选） | `multi_select_bar_appears` |
+| 投票显示与投票 | ✅ | `MessagePoll` → 问题/选项/得票条/已选✓/总数；`setPollAnswer` 投票 | `poll_renders_in_bubble` |
+| 创建投票 | ❌ | `sendMessage(inputMessagePoll)` | — |
+| 定时消息列表/立即发送 | ✅ | `getChatScheduledMessages` 面板 + `editMessageSchedulingState(None)`（工具栏时钟） | `scheduled_panel_lists_rows` |
+| 草稿跨端同步 | ✅ | `setChatDraftMessage`（切换会话时把本地草稿推到服务器，`updateChatDraftMessage` 端已收） | `drafts_saved_per_chat` |
+| 转发不带署名 | ✅ | `forwardMessages(send_copy)`（转发横幅「Without attribution」切换） | `forward_banner_has_noattr_chip` |
+| 转发带评论 | ❌ | forwardMessages 不支持附言（需转发后单独发文本） | — |
+| @提及/用户名补全 | ❌ | `getChatMember` 逐成员补全 UI 未做 | — |
+| 共享媒体浏览（聊天内图/视频网格） | ❌ | `searchChatMessages(filter PhotoAndVideo)` 界面未做 | — |
+| 未读消息分隔线 | ❌ | `unread_count`/`last_read_inbox` 分隔条未画 | — |
 
 ## 4. 媒体与附件
 
@@ -71,12 +82,16 @@
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
+| 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭（占满会话面板；非全屏） | `media_viewer_overlay` |
+| Emoji 选择面板 | ✅ | 本地 Emoji 网格（~300 项，VS16 整段）→ 插入输入框；与贴纸/GIF 同一面板三 tab | `emoji_tab_shows_grid` |
+| 发送前预览+说明编辑 | 🟡 | 附件指示条「File attached — press send」，无预览缩略图/说明输入框 | — |
 
 ## 5. 频道与群组
 
 | 功能 | 状态 | TDLib API | 测试 |
 |---|---|---|---|
 | 新建私聊 | ✅ | `createPrivateChat` | — |
+| 发起加密聊天 | ✅ | `createNewSecretChat`（联系人右键菜单） | — |
 | 新建群组 | ✅ | `createNewSupergroupChat` | — |
 | 公开频道浏览/搜索加入 | ✅ | `searchChatsOnServer` + `joinChat`（行菜单） | — |
 | 加入/退出 | ✅ | `joinChat`/`leaveChat` | — |
@@ -105,12 +120,16 @@
 | 活跃会话管理 | ✅ | `getActiveSessions` + `terminateSession`/`terminateAllOtherSessions` | `settings_shows_sections` |
 | 语言 | ❌ | `setOption(language_pack_id)` | — |
 | 存储/缓存清理 | ✅ | `getStorageStatistics` 摘要 + `optimizeStorage` 清理按钮 | `settings_storage_section` |
+| 屏蔽用户管理 | ✅ | `getBlockedMessageSenders` + `setMessageSenderBlockList(None)` 解除（Privacy 区块） | `settings_blocked_section` |
+| 会话右键菜单（已读/未读/置顶/归档/静音/加入/离开/清空历史） | ✅ | 行 context_menu；`deleteChatHistory` 清空历史 | — |
+| 收藏夹（Saved Messages） | ✅ | TDLib 中即本人私聊，走普通会话路径 | — |
 
 ## 8. 明确不计划（本期范围外）
 
-语音/视频通话（`call_*`）、Stories、支付/商品、Bot 内联查询、Poll 投票 UI、Live Location、Passport、Proxy 设置、导出聊天历史。
+语音/视频通话（`call_*`）、Stories、支付/商品、Bot 内联查询（GIF bot 除外）、Live Location、Passport、Proxy 设置、导出聊天历史、创建投票、话题/Forum。
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：66 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：1 项
-- 现有测试：11 个 `#[waterui::test]` + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
+- 已实现 ✅：78 项 ｜ 部分 🟡：1 项 ｜ 未实现 ❌：7 项（含语言包、投票创建、@提及补全、共享媒体、转发附言、未读分隔线）
+- 现有测试：18 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
+- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；缺失行按日常使用频率补录为 ❌（创建投票、@提及、共享媒体、转发附言、未读分隔线、发送前预览🟡）。

@@ -292,49 +292,33 @@ gap is only key/id-based scrolling (`scroll_to(id: i64)`): the app keeps
 the message→index lookup itself — fine for Telegram, where the target id
 is known and the index is resolved before scrolling.
 
-## Layout findings (r7) — two confirmed framework bugs, one API trap
+## Layout findings (r7–r8) — one confirmed framework bug, API gaps
 
 Measured with `waterui-testing` offscreen mounts (semantic bounds) +
 `water mcp` tree dumps, not by eye. Watergram probes live in
 `src/lib.rs` (`probe_*` tests) and are kept as the measurement harness.
 
-### `ScrollView` reports `StretchAxis::Both` regardless of its axis
+### `ScrollView` reports `StretchAxis::Both` regardless of its axis — working as specified
 
-`raw_view!(ScrollView, StretchAxis::Both)` (waterui-layout `collections/
-scroll.rs`) bakes the stretch contract in statically for all axes, so a
-`scroll_horizontal` view claims the *vertical* surplus of a `vstack`,
-leaving only the remainder to a sibling that should get it all. Per
-`docs/layout-spec.md` §6 a scroll answers "its intrinsic extent on the
-non-scrolling axis" — for `Axis::Horizontal` the vertical axis is
-non-scrolling, so the frame should hug content (~30), not claim half the
-pane.
+Layout-spec §3 states plainly: "`ScrollView` is `Both`", and a lazy
+container (`List`) reports `None` because it cannot enumerate its
+children. So in a `vstack`, a `scroll_horizontal` chips row is the
+*only* stretching child and correctly takes all free space; the chat
+`List` gets none (measured: chips `(0,0,340,195)`, list `(0,205,340,195)`
+in a 340×400 mount — the §3 contract, not a bug).
 
-Minimal repro (semantic mount, 340×400):
-
-```rust
-vstack((
-    scroll_horizontal(Lazy::hstack(ForEach::new(chips, |c|
-        text("Chip").caption().padding_with((3.0, 10.0))))),
-    List::for_each(rows, |r| ListItem::new(text("row").padding_with(8.0))),
-))
-```
-
-- chips `scroll_horizontal` ScrollView bounds: `(0, 0, 340, 195)` —
-  measured. Expected height ≈ 26–30 (content intrinsic, non-scrolling
-  axis). Content (~26 pt) renders vertically centred inside the 195 px
-  band — the empty space above/below is what reads as "large gaps" in
-  the sidebar between toolbar, chips and chat list.
-- `List` bounds: `(0, 205, 340, 195)` — measured; expected ≈ 370.
-
-Same root cause hit three places in Watergram (folder chips, sticker
-pack strip, sticker cell strip): all were `scroll()` (vertical axis!)
-around an hstack and shared the sidebar's surplus with the chat list
-roughly evenly (208 px chips + 234 px list in an 800×700 mount; 272 px
-chips + 298 px list in a 340×700 mount). The app-side correction —
-using the semantically-correct `scroll_horizontal` — does not change
-the outcome until the stretch contract is axis-aware.
+The app-side fix per §3's note that a lazy container that must fill "is
+placed by a parent that stretches it (`ScrollView`, `Absolute`, a `Frame`
+with `max = INFINITY`)": give the chips row its content height (chip
+metrics: caption ~17 + 2×3 padding = 23) and let the chat `List`'s
+`scroll` parent claim the rest. Verified bounds after fix: chips scroll
+`(8, 214, 284, 23)`, chat list `(0, 261, 340, 439)` reaching the 700 dp
+viewport bottom.
 
 ### M3 `TextField` reports a fixed 280 dp minimum — hstack overflow
+
+**Now tracked as water-rs/hydrolysis#107** (violates §7 "a text field
+answers the proposal width").
 
 `hydrolysis-m3 0.3.1` `INPUT_FIELD_MIN_WIDTH = 280.0`
 (`theme/dimensions.rs`, "TextFieldDefaults.MinWidth"). A field answers
@@ -356,9 +340,72 @@ hstack((
   policy. 280 is the M3 single-field floor; two fields in a row need a
   smaller per-field minimum or a stacking policy.
 
-Watergram settings (sidebar-width pane) now stacks the name fields
-vertically — a legitimate narrow-pane layout — but the underlying
-question stands: `TextField` cannot compose two-across below 560 dp.
+Watergram settings (sidebar-width pane) stacks the name fields
+vertically as a legitimate narrow-pane layout; when #107 lands they
+should return to one row, as in Telegram Desktop. The same floor shapes
+the chat composer: a 280 dp field plus even a few controls cannot fit a
+460 dp pane, so composer actions are minimized and search/members moved
+to the navigation toolbar.
+
+### API gap: `max_width(N)` is greedy, not a content cap
+
+`frame_resolved_axis` (waterui-layout `containers/frame.rs`) resolves a
+bounded axis to the parent's proposal whenever `max.is_some()` and the
+proposal ≠ 0. Under §4.2 the stack's ideal probe is `INFINITY`, so a
+`.max_width(420)` frame reports `min(∞, 420) = 420` — its *cap* — as its
+ideal, regardless of content size.
+
+Minimal repro (semantic mount, 800×200):
+
+```rust
+hstack((
+    text("short").padding_with(10.0).max_width(420.0)
+        .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
+    spacer(),
+))
+```
+
+- measured: background `(0, 30.6, 420, 38.75)` — always the cap.
+- expected (Telegram bubble semantics): as wide as the text (~80), up to
+  the 420 cap. Spec-conformant behaviour, but it means "hug content with
+  a ceiling" is not expressible via `max_width` — there is no construct
+  for `min(intrinsic, cap)`. A `Spacer` inside the max'd frame makes it
+  worse (the spacer fills to the cap on the same axis).
+
+Watergram bubbles now drop the cap frame entirely and let the stack's
+`min(ideal, available)` clamp hug content; media parts keep their own
+fixed media frames. Post-fix bounds: incoming `(12, 311.6, 347.9, 76.8)`,
+outgoing `(308.3, 311.6, 479.7, 76.8)` — timestamps/reactions are zstack
+overlays at the bubble's trailing/leading bottom so they cannot make the
+bubble greedy.
+
+### API gap: no compact icon-button semantic
+
+`button()` carries `BUTTON_MIN_WIDTH = 58` (hydrolysis-m3
+`theme/dimensions.rs`) and an icon-only `button` measured ~72 wide in
+practice. There is no waterui-level semantic for the ~40-48 dp icon
+button every chat/composer toolbar needs; hydrolysis-m3 ships an
+`icon_button` helper but it lives in the backend crate, so a
+backend-agnostic app cannot use it. Watergram composes a 40 dp icon chip
+from primitives (`icon.size(20).padding(10).size(40).on_tap` + a11y
+label/role/children) — without it, both the sidebar toolbar (measured
+~354 > 340 → last button's icon rendered clipped inside the detail pane)
+and the composer (measured ~784 > 460) overflow.
+
+**FilePicker has the same box.** `FilePicker::open(label, …)` wraps
+`Button::new`, so its trigger inherits the ~72 dp box with no way to
+compose a compact one — measured `Attach file` at `(6,648,72,40)` in a
+660 dp pane. Combined with the `TextField` 280 dp floor
+(hydrolysis#107), the composer row's minimum width is ~500 dp: on any
+pane narrower than that the whole chat `vstack` adopts the composer's
+ideal width, gets centered in the offered space, and every sibling
+shifts left — in the 460 dp probe the pinned-bar icon lands at
+`x = -10` and `Attach` at `x = -16`, clipped at the pane edge (the
+"stray clipped icon" from r7 was this exact mechanism, at ~640 dp
+composer width with the old 72 dp buttons). After the icon-chip change
+the row fits at pane ≥ ~500 dp — verified `(12, 70)` for the pin icon
+at 660 dp — but the floor cannot shrink below ~500 until #107 lands
+and FilePicker accepts a custom trigger view.
 
 ### `EdgeInsets` tuple order is `(vertical, horizontal)` — ergonomics trap
 
@@ -378,3 +425,4 @@ dylint that flags asymmetric tuples.
 Installing `fonts-noto-color-emoji` on the VM fixed all tofu — emoji
 now rasterize correctly in bubbles/icons. The earlier entry stands as
 an environment note only (headless VMs need the font installed).
+

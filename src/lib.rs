@@ -149,6 +149,7 @@ mod tests {
             styled: waterui::text::styled::StyledStr::empty(),
             webpage: "".into(),
             forwarded_from: "".into(),
+            poll: None,
         }
     }
 
@@ -784,7 +785,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use waterui::shape::{RoundedRectangle, ShapeExt};
-    use waterui::theme::color::Surface;
+    use waterui::theme::color::{Surface, SurfaceVariant};
     use waterui::widget::condition::when;
 
     fn dump_bounds(path: &str, app: &mut waterui_testing::OffscreenApp) {
@@ -919,6 +920,97 @@ mod tests {
         });
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_list_plain.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_bubble_hug(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Layer ladder: measure who inflates a max_width-limited bubble.
+        let mut app = ui.viewport(800, 200).mount_offscreen(move || {
+            hstack((
+                zstack((
+                    zstack((
+                        vstack((text("short").body(),))
+                            .leading()
+                            .padding_with([10.0, 30.0, 10.0, 10.0]),
+                        text("👍1").caption(),
+                    ))
+                    .alignment(BottomLeading),
+                    hstack((text("12:00").caption(), text("✓✓").caption()))
+                        .spacing(3.0)
+                        .padding_with([0.0, 8.0, 0.0, 8.0]),
+                ))
+                .alignment(BottomTrailing)
+                .max_width(420.0)
+                .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
+                spacer(),
+            ))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_hug.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_hug.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_bubble_hug_noz(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Control: identical bubble minus the zstack overlay.
+        let mut app = ui.viewport(800, 200).mount_offscreen(move || {
+            hstack((
+                vstack((text("short").body(),))
+                    .leading()
+                    .padding_with([10.0, 30.0, 10.0, 10.0])
+                    .max_width(420.0)
+                    .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
+                spacer(),
+            ))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_hug_noz.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_bubble_hug_text(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Minimal: one text in a max_width frame beside a spacer.
+        let mut app = ui.viewport(800, 100).mount_offscreen(move || {
+            hstack((
+                text("short")
+                    .padding_with(10.0)
+                    .max_width(420.0)
+                    .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
+                spacer(),
+            ))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_hug_text.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_chat_detail(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Full chat pane to find the stray clipped node under the pinned bar.
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui.viewport(460, 700).mount_offscreen(move || {
+            views::chat_detail(inner.clone(), 1).state(&store)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_chat.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_chat.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_chat_detail_wide(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Real-window pane width (~660): composer must fit without overflow.
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui.viewport(660, 700).mount_offscreen(move || {
+            views::chat_detail(inner.clone(), 1).state(&store)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_chat_wide.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_chat_wide.png");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1118,5 +1210,122 @@ mod tests {
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_sidebar.txt", &mut app);
         let _ = app.snapshot().save_png("/tmp/probe_sidebar.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_chat_all_labels(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let els = app.resolve_elements(&waterui_testing::Selector::default());
+        for e in els.iter() {
+            let n = e.node();
+            println!("{:?} label={:?} value={:?}", n.role(), n.label(), n.value());
+        }
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn poll_renders_in_bubble(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let mut m = msg(18, "", false);
+        m.poll = Some(crate::state::PollRow {
+            question: "Ship the r8 bundle today?".into(),
+            options: vec![
+                crate::state::PollOptRow { ix: 0, text: "Yes".into(), pct: 67, chosen: true },
+                crate::state::PollOptRow { ix: 1, text: "Tomorrow".into(), pct: 33, chosen: false },
+            ],
+            voters: 3,
+            closed: false,
+        });
+        store.messages.set(vec![m]);
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 7).state(&inner));
+        app.query().label_contains("Ship the r8 bundle today?").assert_exists();
+        app.query().label_contains("Yes ✓").assert_exists();
+        app.query().label_contains("67%").assert_exists();
+        app.query().label_contains("3 votes").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn emoji_tab_shows_grid(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.stickers_open.set(true);
+        store.panel_tab.set(0);
+        app.query().label("Emoji").assert_exists();
+        app.query().label("😀").assert_exists();
+        app.query().label("🚀").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn multi_select_bar_appears(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.selected_msgs.set(vec![11, 12]);
+        app.query().label("2 selected").assert_exists();
+        app.query().label("Forward selected").assert_exists();
+        app.query().label("Delete selected").assert_exists();
+        app.query().label("Clear selection").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn media_viewer_overlay(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.viewer.set(Some(crate::state::ViewerRow {
+            file: 0,
+            video: false,
+            caption: "sunset".into(),
+            from: "Alice".into(),
+        }));
+        app.query().label("Close viewer").assert_exists();
+        app.query().label("Downloading…").assert_exists();
+        app.query().label("sunset").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn scheduled_panel_lists_rows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.scheduled.set(vec![msg(90, "remind tomorrow", false)]);
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.scheduled_open.set(true);
+        app.query().label("Scheduled messages").assert_exists();
+        app.query().label("remind tomorrow").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn forward_banner_has_noattr_chip(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.forward_ids.set(vec![1, 2]);
+        let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        app.query().label("Select a chat to forward to").assert_exists();
+        app.query().label("Forward without attribution").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn settings_blocked_section(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.blocked.set(vec![crate::state::MemberRow {
+            key: 42,
+            name: "Spammer".into(),
+            status: "@spam".into(),
+            sender: tdlib_rs::enums::MessageSender::User(tdlib_rs::types::MessageSenderUser {
+                user_id: 42,
+            }),
+        }]);
+        let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
+        app.query().label("Blocked users").assert_exists();
+        app.query().label("Spammer").assert_exists();
+        app.query().label("Unblock").assert_exists();
     }
 }

@@ -169,6 +169,38 @@ pub struct MessageRow {
     pub pending: bool,
     /// Flash-highlighted after a jump-to-message.
     pub highlighted: bool,
+    /// Poll content (question/options/votes) when the message is a poll.
+    pub poll: Option<PollRow>,
+}
+
+/// A single poll answer option as shown inside a poll bubble.
+#[derive(Clone)]
+pub struct PollOptRow {
+    /// Option index (the `option_ids` value `setPollAnswer` expects).
+    pub ix: usize,
+    pub text: Str,
+    pub pct: i32,
+    pub chosen: bool,
+}
+
+/// Renderable form of `messagePoll`.
+#[derive(Clone)]
+pub struct PollRow {
+    pub question: Str,
+    pub options: Vec<PollOptRow>,
+    pub voters: i32,
+    pub closed: bool,
+}
+
+/// Media opened in the in-pane viewer overlay (photo or playable file).
+#[derive(Clone)]
+pub struct ViewerRow {
+    /// File id whose local path the viewer resolves via `file_signal`.
+    pub file: i32,
+    /// True for playable payloads (video/animation); false for photos.
+    pub video: bool,
+    pub caption: Str,
+    pub from: Str,
 }
 
 impl PartialEq for MessageRow {
@@ -306,6 +338,21 @@ pub struct Store {
     pub chat_avatar_pick: Binding<Vec<Url>>,
     /// Sticker picker emoji-query field.
     pub sticker_query: Binding<Str>,
+    /// Media opened in the in-pane viewer overlay (`None` = closed).
+    pub viewer: Binding<Option<ViewerRow>>,
+    /// Picker panel tab: 0 Emoji, 1 Stickers, 2 GIFs.
+    pub panel_tab: Binding<i32>,
+    /// Privacy → blocked message senders.
+    pub blocked: Binding<Vec<MemberRow>>,
+    /// Scheduled messages of the open chat + panel visibility.
+    pub scheduled: Binding<Vec<MessageRow>>,
+    pub scheduled_open: Binding<bool>,
+    /// Forward without author attribution (`forwardMessages send_copy`).
+    pub forward_noattr: Binding<bool>,
+    /// Batch of message ids awaiting a forward target.
+    pub forward_ids: Binding<Vec<i64>>,
+    /// Message multi-selection (batch forward/delete).
+    pub selected_msgs: Binding<Vec<i64>>,
     /// Folder editor sheet state.
     pub folder_open: Binding<bool>,
     pub folder_name: Binding<Str>,
@@ -693,6 +740,20 @@ impl Store {
             avatar_pick: Binding::<Vec<Url>>::default(),
             chat_avatar_pick: Binding::<Vec<Url>>::default(),
             sticker_query: Binding::<Str>::default(),
+            // Media viewer overlay (photo/video opened from a bubble).
+            viewer: Binding::<Option<ViewerRow>>::default(),
+            // Sticker/emoji/GIF panel active tab: 0 Emoji, 1 Stickers, 2 GIFs.
+            panel_tab: Binding::i32(0),
+            // Privacy → blocked users.
+            blocked: Binding::<Vec<MemberRow>>::default(),
+            // Scheduled messages of the open chat.
+            scheduled: Binding::<Vec<MessageRow>>::default(),
+            scheduled_open: Binding::bool(false),
+            // Forward "without attribution" (forwardMessages send_copy).
+            forward_noattr: Binding::bool(false),
+            forward_ids: Binding::<Vec<i64>>::default(),
+            // Message multi-selection (Select → batch forward/delete).
+            selected_msgs: Binding::<Vec<i64>>::default(),
             folder_open: Binding::bool(false),
             folder_name: Binding::<Str>::default(),
             folder_contacts: Binding::bool(true),
@@ -805,6 +866,7 @@ impl Store {
             styled: StyledStr::empty(),
             webpage: Str::from(""),
             forwarded_from: Str::from(fwd.to_string()),
+            poll: None,
         };
         let mut msgs = vec![
             m(10, "Alice", "morning! did the camera filters example work?", "09:41", false, false, "", "", "", ""),
@@ -819,6 +881,19 @@ impl Store {
         msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
         msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
         msgs.push(m(17, "Alice", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
+        {
+            let mut poll_msg = m(18, "Alice", "", "09:48", false, false, "", "", "", "");
+            poll_msg.poll = Some(PollRow {
+                question: "Ship the r8 bundle today?".into(),
+                options: vec![
+                    PollOptRow { ix: 0, text: "Yes".into(), pct: 67, chosen: true },
+                    PollOptRow { ix: 1, text: "Tomorrow".into(), pct: 33, chosen: false },
+                ],
+                voters: 3,
+                closed: false,
+            });
+            msgs.push(poll_msg);
+        }
         self.messages.set(msgs);
         self.pinned_label.set_from("Alice: shipping it 🚀");
         self.sessions.set(vec![
@@ -1240,6 +1315,28 @@ impl Store {
                 }
             })
             .unwrap_or_else(|| Str::from(""));
+        let poll = match &m.content {
+            enums::MessageContent::MessagePoll(mp) => {
+                let p = &mp.poll;
+                Some(PollRow {
+                    question: p.question.text.clone().into(),
+                    options: p
+                        .options
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, o)| PollOptRow {
+                            ix,
+                            text: o.text.text.clone().into(),
+                            pct: o.vote_percentage,
+                            chosen: o.is_chosen,
+                        })
+                        .collect(),
+                    voters: p.total_voter_count,
+                    closed: p.is_closed,
+                })
+            }
+            _ => None,
+        };
         MessageRow {
             id: m.id,
             sender: self.sender_name(&m.sender_id),
@@ -1260,6 +1357,7 @@ impl Store {
             failed,
             pending,
             highlighted: false,
+            poll,
         }
     }
 
@@ -1997,21 +2095,26 @@ impl Store {
     }
 
     pub fn select_chat(&self, chat_id: i64) {
-        // Forwarding mode: a pending forwarded message routes the tap to
-        // forwardMessages instead of opening the chat.
-        if let Some((from, msg_id)) = self.forward_message.get() {
+        // Forwarding mode: a pending forwarded message (or a selected
+        // batch) routes the tap to forwardMessages instead of opening the
+        // chat. `send_copy` forwards without author attribution.
+        let batch = self.forward_ids.get();
+        let single = self.forward_message.get();
+        if !batch.is_empty() || single.is_some() {
+            let (from, msg_ids) = if !batch.is_empty() {
+                (self.open_chat.get(), batch)
+            } else {
+                let (from, msg_id) = single.unwrap_or_default();
+                (from, vec![msg_id])
+            };
+            let send_copy = self.forward_noattr.get();
             self.forward_message.set(None);
+            self.forward_ids.set(Vec::new());
+            self.forward_noattr.set(false);
             let client = self.client_id.get();
             spawn_local(async move {
                 let _ = functions::forward_messages(
-                    chat_id,
-                    None,
-                    from,
-                    vec![msg_id],
-                    None,
-                    false,
-                    false,
-                    client,
+                    chat_id, None, from, msg_ids, None, send_copy, false, client,
                 )
                 .await;
             })
@@ -2040,8 +2143,9 @@ impl Store {
             if cur.is_empty() {
                 self.drafts.borrow_mut().remove(&prev);
             } else {
-                self.drafts.borrow_mut().insert(prev, cur);
+                self.drafts.borrow_mut().insert(prev, cur.clone());
             }
+            self.sync_draft(prev, cur);
         }
         if let Some(d) = self.drafts.borrow().get(&chat_id) {
             self.composer.set(d.clone());
@@ -2049,6 +2153,9 @@ impl Store {
             self.composer.set_from("");
         }
         self.members_open.set(false);
+        self.scheduled_open.set(false);
+        self.selected_msgs.set(Vec::new());
+        self.viewer.set(None);
         if self.client_id.get() == 0 {
             // Unit-test store: no TDLib client to talk to.
             return;
@@ -2234,6 +2341,266 @@ impl Store {
             }
         })
         .detach();
+    }
+
+    /// Sync the composer's draft for `chat_id` to the server so it follows
+    /// the account across devices (`setChatDraftMessage`; `None` clears).
+    fn sync_draft(&self, chat_id: i64, cur: Str) {
+        if self.client_id.get() == 0 {
+            return;
+        }
+        let draft = if cur.is_empty() {
+            None
+        } else {
+            Some(types::DraftMessage {
+                reply_to: None,
+                date: 0,
+                input_message_text: enums::InputMessageContent::InputMessageText(
+                    types::InputMessageText {
+                        text: types::FormattedText {
+                            text: cur.to_string(),
+                            entities: Vec::new(),
+                        },
+                        link_preview_options: None,
+                        clear_draft: false,
+                    },
+                ),
+                effect_id: 0,
+                suggested_post_info: None,
+            })
+        };
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ = functions::set_chat_draft_message(chat_id, None, draft, client).await;
+        })
+        .detach();
+    }
+
+    /// Append an emoji (or any text) to the composer from the picker.
+    pub fn insert_emoji(&self, emoji: &str) {
+        let mut s = self.composer.get().to_string();
+        s.push_str(emoji);
+        self.composer.set_from(s);
+    }
+
+    /// Open the media viewer overlay for a bubble's photo/playable file.
+    pub fn open_viewer(&self, row: &MessageRow) {
+        let (file, video) = if row.play_file != 0 {
+            (
+                row.play_file,
+                !matches!(row.media_label.as_str(), "Voice" | "Audio"),
+            )
+        } else {
+            (row.media_file, false)
+        };
+        if file == 0 {
+            return;
+        }
+        self.viewer.set(Some(ViewerRow {
+            file,
+            video,
+            caption: row.text.clone(),
+            from: row.sender.clone(),
+        }));
+    }
+
+    pub fn close_viewer(&self) {
+        self.viewer.set(None);
+    }
+
+    /// Vote in a poll (`setPollAnswer` takes option indices).
+    pub fn vote_poll(&self, message_id: i64, option: usize) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ =
+                functions::set_poll_answer(chat_id, message_id, vec![option as i32], client)
+                    .await;
+        })
+        .detach();
+    }
+
+    /// Delete the whole history of a chat without leaving it.
+    pub fn clear_history(&self, chat_id: i64) {
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ = functions::delete_chat_history(chat_id, false, false, client).await;
+        })
+        .detach();
+    }
+
+    /// Load the main block list into `blocked` (settings → privacy).
+    #[allow(if_else_view)] // string fallback, not a view
+    pub fn load_blocked(&self) {
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::MessageSenders::MessageSenders(list)) =
+                functions::get_blocked_message_senders(
+                    enums::BlockList::Main,
+                    0,
+                    50,
+                    client,
+                )
+                .await
+            {
+                let mut rows = Vec::new();
+                for sender in list.senders {
+                    if let enums::MessageSender::User(u) = &sender {
+                        // Blocked senders usually aren't in the user cache
+                        // yet; resolve the name before building the row.
+                        if let Ok(enums::User::User(user)) =
+                            functions::get_user(u.user_id, client).await
+                        {
+                            store.users.borrow_mut().insert(u.user_id, user);
+                        }
+                    }
+                    let name = match &sender {
+                        enums::MessageSender::User(_) => {
+                            store.sender_name(&sender).to_string()
+                        }
+                        enums::MessageSender::Chat(c) => store.chat_name(c.chat_id),
+                    };
+                    let key = match &sender {
+                        enums::MessageSender::User(u) => u.user_id,
+                        enums::MessageSender::Chat(c) => c.chat_id,
+                    };
+                    rows.push(MemberRow {
+                        key,
+                        name: if name.is_empty() { "Blocked".into() } else { name.into() },
+                        status: "".into(),
+                        sender: sender.clone(),
+                    });
+                }
+                store.blocked.set(rows);
+            }
+        })
+        .detach();
+    }
+
+    /// Unblock a sender (block list `None` = not blocked), then refresh.
+    pub fn unblock_sender(&self, member: &MemberRow) {
+        let sender = member.sender.clone();
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            let _ =
+                functions::set_message_sender_block_list(sender, None, client).await;
+            store.load_blocked();
+        })
+        .detach();
+    }
+
+    /// Start an end-to-end encrypted secret chat with a contact.
+    pub fn new_secret_chat(&self, user_id: i64) {
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Chat::Chat(chat)) =
+                functions::create_new_secret_chat(user_id, client).await
+            {
+                store.nav.pop();
+                store.select_chat(chat.id);
+            }
+        })
+        .detach();
+    }
+
+    /// Fetch the open chat's scheduled messages and open the panel.
+    pub fn toggle_scheduled(&self) {
+        let open = !self.scheduled_open.get();
+        self.scheduled_open.set(open);
+        if open {
+            self.load_scheduled();
+        }
+    }
+
+    pub fn load_scheduled(&self) {
+        let chat_id = self.open_chat.get();
+        let client = self.client_id.get();
+        if chat_id == 0 || client == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Messages::Messages(list)) =
+                functions::get_chat_scheduled_messages(chat_id, client).await
+            {
+                let mut rows: Vec<MessageRow> = list
+                    .messages
+                    .iter()
+                    .flatten()
+                    .map(|m| store.message_row(m))
+                    .collect();
+                rows.sort();
+                store.scheduled.set(rows);
+            }
+        })
+        .detach();
+    }
+
+    /// Send a scheduled message immediately (`editMessageSchedulingState`
+    /// with no state), then refresh the panel.
+    pub fn scheduled_send_now(&self, message_id: i64) {
+        let chat_id = self.open_chat.get();
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            let _ = functions::edit_message_scheduling_state(
+                chat_id, message_id, None, client,
+            )
+            .await;
+            store.load_scheduled();
+        })
+        .detach();
+    }
+
+    /// Multi-selection: context-menu "Select" starts it, tapping a bubble
+    /// toggles membership; an empty selection ends the mode.
+    pub fn toggle_select(&self, message_id: i64) {
+        let mut sel = self.selected_msgs.get();
+        if sel.contains(&message_id) {
+            sel.retain(|&x| x != message_id);
+        } else {
+            sel.push(message_id);
+        }
+        self.selected_msgs.set(sel);
+    }
+
+    pub fn clear_selection(&self) {
+        self.selected_msgs.set(Vec::new());
+    }
+
+    /// Batch-delete the selected messages (revoke for everyone).
+    pub fn delete_selected(&self) {
+        let chat_id = self.open_chat.get();
+        let ids = self.selected_msgs.get();
+        self.selected_msgs.set(Vec::new());
+        if chat_id == 0 || ids.is_empty() {
+            return;
+        }
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ = functions::delete_messages(chat_id, ids, true, client).await;
+        })
+        .detach();
+    }
+
+    /// Stage the selected batch for forwarding; the next chat tap delivers
+    /// it (same pick-a-chat flow as single-message forward).
+    pub fn forward_selected(&self) {
+        let ids = self.selected_msgs.get();
+        if ids.is_empty() {
+            return;
+        }
+        self.selected_msgs.set(Vec::new());
+        self.forward_ids.set(ids);
     }
 
     async fn load_history(&self, chat_id: i64, from: i64, offset: i32) {
@@ -3164,6 +3531,19 @@ impl Store {
             }
         })
         .detach();
+    }
+
+    /// Picker tab switch: Emoji (local grid), Stickers, GIFs (inline bot).
+    pub fn pick_panel_tab(&self, tab: i32) {
+        self.panel_tab.set(tab);
+        match tab {
+            1 => self.load_stickers(),
+            2 => {
+                let q = self.sticker_query.get().to_string();
+                self.search_gifs_by(q);
+            }
+            _ => {}
+        }
     }
 
     /// Toggle the sticker/GIF picker; loads recent stickers + saved GIFs
