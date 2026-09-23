@@ -169,6 +169,9 @@ pub struct MessageRow {
     pub pending: bool,
     /// Flash-highlighted after a jump-to-message.
     pub highlighted: bool,
+    /// Render the "Unread messages" divider above this row (first incoming
+    /// message after `last_read_inbox_message_id`).
+    pub unread_divider: bool,
     /// Poll content (question/options/votes) when the message is a poll.
     pub poll: Option<PollRow>,
 }
@@ -190,6 +193,24 @@ pub struct PollRow {
     pub options: Vec<PollOptRow>,
     pub voters: i32,
     pub closed: bool,
+}
+
+/// One cell in the info panel's shared-media grid (photo/video from
+/// `searchChatMessages` with the PhotoAndVideo filter).
+#[derive(Clone, Identifiable)]
+pub struct SharedMediaRow {
+    #[id]
+    pub file: i32,
+    /// Fallback label (emoji or "GIF") while the file downloads.
+    pub label: Str,
+}
+
+/// A three-cell row of the shared-media grid.
+#[derive(Clone, Identifiable)]
+pub struct MediaChunkRow {
+    #[id]
+    pub ix: usize,
+    pub cells: Vec<SharedMediaRow>,
 }
 
 /// Media opened in the in-pane viewer overlay (photo or playable file).
@@ -347,6 +368,12 @@ pub struct Store {
     /// Scheduled messages of the open chat + panel visibility.
     pub scheduled: Binding<Vec<MessageRow>>,
     pub scheduled_open: Binding<bool>,
+    /// Right info panel (Desktop's wide-layout details panel): chat
+    /// profile + shared media grid.
+    pub info_open: Binding<bool>,
+    pub shared_media: Binding<Vec<SharedMediaRow>>,
+    /// Caption typed in the attachment preview strip.
+    pub attach_caption: Binding<Str>,
     /// Forward without author attribution (`forwardMessages send_copy`).
     pub forward_noattr: Binding<bool>,
     /// Batch of message ids awaiting a forward target.
@@ -749,6 +776,11 @@ impl Store {
             // Scheduled messages of the open chat.
             scheduled: Binding::<Vec<MessageRow>>::default(),
             scheduled_open: Binding::bool(false),
+            // Right info panel: profile + shared media.
+            info_open: Binding::bool(false),
+            shared_media: Binding::<Vec<SharedMediaRow>>::default(),
+            // Attachment preview caption.
+            attach_caption: Binding::<Str>::default(),
             // Forward "without attribution" (forwardMessages send_copy).
             forward_noattr: Binding::bool(false),
             forward_ids: Binding::<Vec<i64>>::default(),
@@ -862,6 +894,7 @@ impl Store {
             failed: false,
             pending: false,
             highlighted: false,
+            unread_divider: false,
             my_reaction: Str::from(""),
             styled: StyledStr::empty(),
             webpage: Str::from(""),
@@ -880,6 +913,7 @@ impl Store {
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "", "", ""));
         msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
         msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
+        msgs[2].unread_divider = true;
         msgs.push(m(17, "Alice", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
         {
             let mut poll_msg = m(18, "Alice", "", "09:48", false, false, "", "", "", "");
@@ -1357,6 +1391,7 @@ impl Store {
             failed,
             pending,
             highlighted: false,
+            unread_divider: false,
             poll,
         }
     }
@@ -1580,7 +1615,13 @@ impl Store {
                 self.patch_positions(u.chat_id, vec![u.position]);
             }
             enums::Update::ChatReadInbox(u) => {
+                if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
+                    c.last_read_inbox_message_id = u.last_read_inbox_message_id;
+                }
                 self.update_chat_row(u.chat_id, |r| r.unread = u.unread_count);
+                if u.chat_id == self.open_chat.get() {
+                    self.apply_unread_divider(u.chat_id);
+                }
             }
             enums::Update::ChatReadOutbox(u) => {
                 if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
@@ -2154,6 +2195,9 @@ impl Store {
         }
         self.members_open.set(false);
         self.scheduled_open.set(false);
+        self.info_open.set(false);
+        self.shared_media.set(Vec::new());
+        self.attach_caption.set_from("");
         self.selected_msgs.set(Vec::new());
         self.viewer.set(None);
         if self.client_id.get() == 0 {
@@ -2169,8 +2213,129 @@ impl Store {
             let _ = functions::open_chat(chat_id, client).await;
             store.load_history(chat_id, 0, 0).await;
             store.refresh_pinned(chat_id).await;
+            store.apply_unread_divider(chat_id);
         })
         .detach();
+    }
+
+    /// Toggle the right-side info panel and (re)load shared media.
+    pub fn toggle_info(&self) {
+        let open = !self.info_open.get();
+        self.info_open.set(open);
+        if open {
+            self.load_shared_media();
+        }
+    }
+
+    /// Shared media grid for the info panel: `searchChatMessages` with
+    /// the PhotoAndVideo filter; photo small-file ids go through
+    /// `want_file_id` so thumbs download and show via `file_signal`.
+    fn load_shared_media(&self) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        if self.client_id.get() == 0 {
+            // Demo store: seed a grid so the panel is exercisable.
+            self.shared_media.set(
+                ["🖼️", "🎬", "🖼️", "📹", "🖼️", "🎞️", "🖼️", "📷", "🖼️"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| SharedMediaRow {
+                        file: -(i as i32) - 1,
+                        label: Str::from(*e),
+                    })
+                    .collect(),
+            );
+            return;
+        }
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::FoundChatMessages::FoundChatMessages(found)) =
+                functions::search_chat_messages(
+                    chat_id,
+                    None,
+                    String::new(),
+                    None,
+                    0,
+                    0,
+                    21,
+                    Some(enums::SearchMessagesFilter::PhotoAndVideo),
+                    client,
+                )
+                .await
+            {
+                let mut rows = Vec::new();
+                for m in found.messages.iter() {
+                    let (file, label) = match &m.content {
+                        enums::MessageContent::MessagePhoto(p) => {
+                            let fid = p
+                                .photo
+                                .sizes
+                                .first()
+                                .map(|s| s.photo.id)
+                                .unwrap_or(0);
+                            (fid, "🖼️".to_string())
+                        }
+                        enums::MessageContent::MessageVideo(v) => {
+                            (v.video.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0),
+                             "🎬".to_string())
+                        }
+                        enums::MessageContent::MessageAnimation(a) => {
+                            (a.animation.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0),
+                             "🎞️".to_string())
+                        }
+                        _ => (0, String::new()),
+                    };
+                    if file != 0 {
+                        store.want_file_id(file);
+                        rows.push(SharedMediaRow { file, label: label.into() });
+                    }
+                }
+                store.shared_media.set(rows);
+            }
+        })
+        .detach();
+    }
+
+    /// Flag the first incoming message past `last_read_inbox` so the row
+    /// renders the "Unread messages" divider (Desktop parity).
+    pub fn apply_unread_divider(&self, chat_id: i64) {
+        let lri = self
+            .chat_objs
+            .borrow()
+            .get(&chat_id)
+            .map(|c| c.last_read_inbox_message_id)
+            .unwrap_or(0);
+        let unread = self
+            .chats
+            .get()
+            .iter()
+            .find(|r| r.id == chat_id)
+            .map(|r| r.unread)
+            .unwrap_or(0);
+        let mut list = self.messages.get();
+        let target = if unread > 0 {
+            list.iter()
+                .filter(|r| !r.outgoing)
+                .filter(|r| r.id > lri)
+                .map(|r| r.id)
+                .min()
+        } else {
+            None
+        };
+        let mut changed = false;
+        for r in list.iter_mut() {
+            let want = Some(r.id) == target;
+            if r.unread_divider != want {
+                r.unread_divider = want;
+                changed = true;
+            }
+        }
+        if changed {
+            self.messages.set(list);
+        }
     }
 
     /// Fetch the chat's pinned message into `pinned_label`/`pinned_id`.
@@ -2884,8 +3049,14 @@ impl Store {
         if paths.is_empty() {
             return;
         }
-        let caption = self.composer.get().to_string();
+        let preview_caption = self.attach_caption.get().to_string();
+        let caption = if preview_caption.is_empty() {
+            self.composer.get().to_string()
+        } else {
+            preview_caption
+        };
         self.attach.set(Vec::new());
+        self.attach_caption.set_from("");
         self.composer.set_from("");
         let client = self.client_id.get();
         spawn_local(async move {

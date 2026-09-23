@@ -32,7 +32,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{AccountRow, ChatRow, FolderRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, Route, Screen, SessionRow, StickerItem, Store, ViewerRow};
+use crate::state::{AccountRow, ChatRow, FolderRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use mdi::account;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -52,6 +52,7 @@ use mdi::link_variant;
 use mdi::cog;
 use mdi::file;
 use mdi::image_outline;
+use mdi::information;
 use mdi::lock;
 use mdi::magnify;
 use mdi::paperclip;
@@ -708,6 +709,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let inner = store.clone();
     let viewer_open = store.viewer.is_some().distinct();
     let store_for_viewer = store.clone();
+    let store_for_info = store.clone();
     let sel_active = store
         .selected_msgs
         .map(|v: Vec<i64>| !v.is_empty())
@@ -723,6 +725,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let emoji_tab = store.panel_tab.is_zero().distinct();
 
     zstack((
+        hstack((
         vstack((
         when(has_pinned, move || {
             hstack((
@@ -977,19 +980,81 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         when(video_note_open, move || {
             video_note_sheet(store_for_sheet.clone())
         }),
-        when(has_attach, || {
-            hstack((
-                paperclip().tint(Accent).size(16.0, 16.0),
-                text("File attached — press send")
-                    .caption()
-                    .foreground(Accent),
-                spacer(),
-                icon_button(close(), "Remove", |store: Store| {
-                    store.attach.set(Vec::new())
-                }),
-            ))
-            .padding_with((6.0, 12.0))
-            .background(Surface)
+        when(has_attach, {
+            let first_url = store
+                .attach
+                .map(|v: Vec<Url>| {
+                    v.first()
+                        .map(|u| Url::from_file_path_str(Str::from(u.path().to_string())))
+                        .unwrap_or_else(|| Url::from_file_path_str(Str::from("")))
+                })
+;
+            let is_img = store
+                .attach
+                .map(|v: Vec<Url>| {
+                    v.first()
+                        .map(|u| {
+                            let p = u.path().to_string().to_lowercase();
+                            [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+                                .iter()
+                                .any(|e| p.ends_with(e))
+                        })
+                        .unwrap_or(false)
+                })
+;
+            let fname = store
+                .attach
+                .map(|v: Vec<Url>| {
+                    v.first()
+                        .map(|u| {
+                            u.path()
+                                .to_string()
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or("file")
+                                .to_string()
+                        })
+                        .unwrap_or_default()
+                })
+;
+            let cap_b = store.attach_caption.clone();
+            move || {
+                let is_img = is_img.clone();
+                let first_url = first_url.clone();
+                let fname = fname.clone();
+                let cap_b = cap_b.clone();
+                hstack((
+                    when(is_img, {
+                        let u = first_url.clone();
+                        move || {
+                            Photo::new(u.clone())
+                                .width(40.0)
+                                .height(40.0)
+                                .clip(RoundedRectangle::new(0.15))
+                        }
+                    })
+                    .otherwise(|| paperclip().tint(Accent).size(24.0, 24.0)),
+                    vstack((
+                        text!("{f}", f = fname.clone())
+                            .caption()
+                            .line_limit(ONE)
+                            .foreground(Accent),
+                        field("Caption", &cap_b)
+                            .prompt("Add a caption…")
+                            .hide_label(),
+                    ))
+                    .spacing(2.0)
+                    .leading(),
+                    spacer(),
+                    icon_button(close(), "Remove", |store: Store| {
+                        store.attach.set(Vec::new());
+                        store.attach_caption.set_from("")
+                    }),
+                ))
+                .spacing(8.0)
+                .padding_with((6.0, 12.0))
+                .background(Surface)
+            }
         }),
         when(stickers_open, move || {
             let cells = store_cells.clone();
@@ -1112,6 +1177,8 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         .padding_with((4.0, 6.0))
         .background(Surface),
         )),
+        when(store.info_open.clone(), move || info_panel(store_for_info.clone())),
+        )),
         when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
     ))
     .on_change(&search_debounced, |q: Str, store: Store| store.run_chat_search(q))
@@ -1142,6 +1209,12 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 NavigationToolbarPlacement::TopBarTrailing,
                 icon_button(clock_outline(), "Scheduled messages", |store: Store| {
                     store.toggle_scheduled()
+                }),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarTrailing,
+                icon_button(information(), "Chat info", |store: Store| {
+                    store.toggle_info()
                 }),
             )),
     )
@@ -1348,10 +1421,25 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         "Delete".action(move |store: Store| store.delete_message(r5)),
     ));
 
-    if row.outgoing {
+    let placed = if row.outgoing {
         hstack((spacer(), bubble)).anyview()
     } else {
         hstack((bubble, spacer())).anyview()
+    };
+    if row.unread_divider {
+        vstack((
+            hstack((
+                text("Unread messages").caption().bold().foreground(Accent),
+                Divider,
+            ))
+            .spacing(6.0)
+            .padding_with((2.0, 4.0)),
+            placed,
+        ))
+        .spacing(0.0)
+        .anyview()
+    } else {
+        placed
     }
 }
 
@@ -1489,13 +1577,10 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         )),
         vstack((
             text("Edit profile").caption().muted(),
-            // hydrolysis#107 landed: a text field answers the proposed width,
-            // so first/last name share one row like Telegram Desktop.
-            hstack((
-                field("First name", &store.edit_first),
-                field("Last name", &store.edit_last),
-            ))
-            .spacing(8.0),
+            // The M3 text field keeps Compose's 280 dp floor, so two fields
+            // cannot share a 340 dp sidebar row — stack them vertically.
+            field("First name", &store.edit_first),
+            field("Last name", &store.edit_last),
             field("Bio", &store.edit_bio).prompt("a few words about you"),
             field("Username", &store.edit_username).prompt("username (no @)"),
             hstack((
@@ -1533,9 +1618,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     let k4 = row.key.clone();
                     let k5 = row.key.clone();
                     hstack((
-                        text(row.setting.clone()).caption(),
+                        text(row.setting.clone()),
                         spacer(),
-                        text(row.audience.clone()).caption().muted(),
+                        text(row.audience.clone()).muted(),
                     ))
                     .context_menu((
                         "Everyone".action(move |store: Store| {
@@ -1562,7 +1647,8 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 toggle("Groups", &store.notif_groups),
                 toggle("Channels", &store.notif_channels),
             ))
-            .spacing(4.0),
+            .spacing(4.0)
+            .leading(),
             hstack((
                 text("Active sessions").caption().muted(),
                 spacer(),
@@ -1577,9 +1663,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     SignalCollection::new(store.blocked.clone()),
                     |row: MemberRow| {
                         hstack((
-                            text(row.name.clone()).caption(),
+                            text(row.name.clone()),
                             spacer(),
-                            text("Unblock").caption().foreground(Accent),
+                            text("Unblock").foreground(Accent),
                         ))
                         .padding_with((4.0, 0.0))
                         .on_tap(move |store: Store| store.unblock_sender(&row))
@@ -1594,13 +1680,13 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     let is_current = row.current;
                     hstack((
                         vstack((
-                            text(row.title.clone()).caption().bold(),
-                            text(row.subtitle.clone()).caption().muted(),
+                            text(row.title.clone()).bold(),
+                            text(row.subtitle.clone()).muted(),
                         ))
                         .spacing(2.0)
                         .leading(),
                         spacer(),
-                        when(is_current, || text("current").caption().foreground(Accent)),
+                        when(is_current, || text("current").foreground(Accent)),
                     ))
                     .padding_with((4.0, 0.0))
                     .context_menu(("Terminate".action(move |store: Store| {
@@ -1615,7 +1701,6 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             text("Storage").caption().muted(),
             hstack((
                 text!("{storage}", storage = store.storage_summary.clone())
-                    .caption()
                     .muted(),
                 spacer(),
                 button("Refresh").action(|store: Store| store.load_storage()),
@@ -1892,6 +1977,96 @@ fn video_note_sheet(store: Store) -> impl View {
     ))
     .padding_with((10.0, 12.0))
     .background(Surface)
+}
+
+
+/// Right-side info panel (Desktop's wide-layout details panel): chat
+/// profile header, members shortcut, shared-media grid.
+fn info_panel(store: Store) -> impl View {
+    let media_chunks = SignalCollection::new(
+        store
+            .shared_media
+            .map(|v: Vec<SharedMediaRow>| {
+                v.chunks(3)
+                    .enumerate()
+                    .map(|(ix, c)| MediaChunkRow {
+                        ix,
+                        cells: c.to_vec(),
+                    })
+                    .collect::<Vec<MediaChunkRow>>()
+            }),
+    );
+    let cells = store.clone();
+    let chat_id = store.selected.unwrap_or(0);
+    let title = store
+        .chats
+        .zip(&chat_id)
+        .map(|(rows, id)| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .map(|r| r.title.clone())
+                .unwrap_or_default()
+        })
+        .distinct();
+    vstack((
+        hstack((
+            text!("{t}", t = title.clone()).headline().line_limit(ONE),
+            spacer(),
+            icon_button(close(), "Close info", |store: Store| {
+                store.info_open.set(false)
+            }),
+        ))
+        .padding_with((8.0, 14.0)),
+        hstack((
+            text("Members").caption().muted(),
+            spacer(),
+            text!("{n}", n = store.members_count.clone())
+                .caption()
+                .muted(),
+        ))
+        .padding_with((4.0, 14.0))
+        .on_tap(|store: Store| {
+            store.members_open.set(true);
+            store.load_members();
+        }),
+        text("Shared media").caption().muted().padding_with((8.0, 14.0)),
+        scroll(VStack::for_each(media_chunks, move |chunk: MediaChunkRow| {
+            let mut cells_v: Vec<AnyView> = Vec::new();
+            for cell in chunk.cells.iter().take(3) {
+                cells_v.push(media_cell(cells.clone(), cell.clone()).anyview());
+            }
+            hstack(cells_v).spacing(4.0)
+        })),
+    ))
+    .spacing(0.0)
+    .leading()
+    .width(280.0)
+    .background(Surface)
+}
+
+/// One shared-media grid cell: the downloaded photo thumb, else the
+/// emoji/kind fallback while `want_file_id` fetches it.
+fn media_cell(store: Store, row: SharedMediaRow) -> impl View {
+    let path_a = store.file_signal(row.file);
+    let path_b = store.file_signal(row.file);
+    let has = path_a.map(|p: Str| !p.is_empty()).distinct();
+    let url = path_b.map(Url::from_file_path_str);
+    when(has, move || {
+        Photo::new(url.clone())
+            .width(80.0)
+            .height(80.0)
+            .clip(RoundedRectangle::new(0.08))
+    })
+    .otherwise({
+        let label = row.label.clone();
+        move || {
+            text(label.clone())
+                .title()
+                .width(80.0)
+                .height(80.0)
+                .background(SurfaceVariant)
+        }
+    })
 }
 
 /// Poll block inside a bubble: question, tappable options showing vote

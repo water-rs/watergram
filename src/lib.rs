@@ -16,7 +16,9 @@ mod views;
 use state::Store;
 use waterui::app::App;
 use waterui::prelude::*;
+use waterui::media::Url;
 use waterui::preview;
+use waterui::task::{sleep, spawn_local};
 use waterui::theme::Theme;
 
 /// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
@@ -28,6 +30,8 @@ fn demo_page() -> Option<&'static str> {
         "chat" => "chat",
         "settings" => "settings",
         "emoji" => "emoji",
+        "info" => "info",
+        "attach" => "attach",
         _ => "list",
     })
 }
@@ -93,6 +97,25 @@ pub fn app(mut env: Environment) -> App {
                             s.selected.set(Some(1));
                             s.stickers_open.set(true);
                         }
+                        Some("info") => {
+                            s.selected.set(Some(1));
+                            s.open_chat.set(1);
+                            s.toggle_info();
+                        }
+                        Some("attach") => {
+                            s.selected.set(Some(1));
+                            let s2 = s.clone();
+                            spawn_local(async move {
+                                sleep(std::time::Duration::from_millis(800))
+                                .await;
+                                s2.attach.set(vec![
+                                    Url::from_file_path_str(
+                                        Str::from("/tmp/design_doc.pdf"),
+                                    ),
+                                ]);
+                            })
+                            .detach();
+                        }
                         _ => {}
                     }
                     std::future::pending::<()>().await;
@@ -153,6 +176,7 @@ mod tests {
             failed: false,
             pending: false,
             highlighted: false,
+            unread_divider: false,
             read_out: false,
             my_reaction: "".into(),
             styled: waterui::text::styled::StyledStr::empty(),
@@ -1339,5 +1363,41 @@ mod tests {
         app.query().label("Blocked users").assert_exists();
         app.query().label("Spammer").assert_exists();
         app.query().label("Unblock").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn info_panel_shows_shared_media(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.toggle_info();
+        app.query().label("Chat info").assert_exists();
+        app.query().label("Shared media").assert_exists();
+        app.query().label("Members").assert_exists();
+        app.query().label("Close info").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn unread_divider_renders(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.query().label_contains("Unread messages").assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn attach_preview_shows_caption_field(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.attach.set(vec![Url::from_file_path_str(
+            Str::from("/tmp/photo.jpg"),
+        )]);
+        app.query().label("photo.jpg").assert_exists();
+        app.query().label("Caption").assert_exists();
+        app.query().label("Remove").assert_exists();
     }
 }

@@ -405,7 +405,7 @@ overflow stands until #115.
 `Button::new`, so its trigger inherits the ~72 dp box with no way to
 compose a compact one — measured `Attach file` at `(6,648,72,40)` in a
 660 dp pane. Combined with the `TextField` 280 dp floor
-(hydrolysis#107), the composer row's minimum width is ~500 dp: on any
+(water-rs/hydrolysis#107), the composer row's minimum width is ~500 dp: on any
 pane narrower than that the whole chat `vstack` adopts the composer's
 ideal width, gets centered in the offered space, and every sibling
 shifts left — in the 460 dp probe the pinned-bar icon lands at
@@ -419,6 +419,20 @@ and FilePicker accepts a custom trigger view. **Update: #107 has
 landed on hydrolysis dev (PR #112) — the TextField now answers the
 proposed width; first/last name are back on one row.** The remaining
 width floor is the icon-button box (#115).
+
+**Knock-on at r10 (info panel, #115-bound).** The detail root is
+`hstack((chat_vstack, info_panel.width(280)))` in a 660 dp offer at
+1000×700. `compress_to_fit` (layout `distribute.rs`) never pushes a
+child below its `measure(proposal 0)` minimum and overflows instead of
+collapsing — correct per spec. But the chat pane's floor is the
+toolbar/composer button rows: 4+ icon-only buttons × 72 dp ≈ 495 dp
+minimum, so the stretchy chat vstack keeps 495 dp, the 280 dp panel is
+placed at x=835 and runs to 1115 — **115 dp clipped past the 1000 dp
+window edge** (measured `scroll_view (835,172,280,528)`, cells clipped
+at x≈1000). Once #115 lands (~40-48 dp icon buttons) the pane floor
+drops ≈150 dp and the panel fits. Not routed around: the panel is the
+M3-correct `hstack`+fixed-width sibling composition; shrinking it
+below 280 would mis-size the shared-media grid.
 
 ### `EdgeInsets` tuple order is `(vertical, horizontal)` — ergonomics trap
 
@@ -470,7 +484,7 @@ Question for the framework: should an empty conditional child skip its
 spacing slot? (Not obviously a bug — spacing is between child slots —
 but a real footgun: the gap is invisible in code review.)
 
-### ScrollView reports `StretchAxis::Both` regardless of `axis`
+### ScrollView reports `StretchAxis::Both` regardless of `axis` → water-rs/waterui#1208
 
 `raw_view!(ScrollView, StretchAxis::Both)` — the scroll `axis`
 (Horizontal/Vertical/All) is not consulted. A `scroll_horizontal` in a
@@ -485,11 +499,12 @@ hand and breaks under font scaling. Suggestion: a single-axis
 ScrollView should stretch only on its scroll axis (or a
 `.fixed_size(axis)`-style modifier should exist).
 
-## Emoji font fallback (r9, fonts-noto-color-emoji installed)
+## Emoji font fallback → water-rs/hydrolysis#119 (r9, fonts-noto-color-emoji installed)
 
 `fc-match "sans:charset=<cp>"` per codepoint — DejaVu Sans (monochrome)
 wins for every default-emoji-presentation codepoint it covers; Noto
-Color Emoji only for codepoints DejaVu lacks. Rendered grid matches
+Color Emoji only for codepoints DejaVu lacks. **Filed upstream as
+water-rs/hydrolysis#119.** Rendered grid matches
 fc-match exactly. Monochrome faces: U+1F600–1F606, 1F609, 1F60A–1F61D,
 1F617–1F61A, 1F612–1F615, 1F618, 1F623, 1F625, 1F62A–1F62F, 1F632,
 1F634, 1F636, 1F60C, 1F60F, 1F643,
@@ -501,7 +516,7 @@ ordering bug you suspected: the text stack needs to prefer the emoji
 face for emoji-presentation codepoints (fc-match `emoji:charset=1F600`
 → Noto Color Emoji), not the generic sans chain.
 
-## waterui-cli / water mcp defects (r9)
+## waterui-cli / water mcp defects (r9) → water-rs/cli#177, water-rs/cli#176
 
 - **Dev-channel `prepare_build` seed-merge produces incoherent
   lockfiles.** With `channel = "dev"` the CLI seeds the generated
@@ -509,8 +524,8 @@ face for emoji-presentation codepoints (fc-match `emoji:charset=1F600`
   project_lock`; the merged seed left wasm-bindgen/js-sys
   (.105↔.128 lockstep), then cc/find-msvc-tools/log edges in conflict
   (`cargo update -p cc --precise 1.4.7` rejected by Water.lock
-  validation which pinned cc=1.4.5). Whack-a-mole; abandoned dev
-  channel — `[patch.crates-io]` on the app side reaches the same
+  validation which pinned cc=1.4.5). **water-rs/cli#177.** Whack-a-mole;
+  abandoned dev channel — `[patch.crates-io]` on the app side reaches the same
   hydrolysis dev rev and `Source::Stable` skips the whole
   validate/prepare path (waterui-cli-0.4.3
   `src/project_model/framework.rs` ~684).
@@ -519,6 +534,85 @@ face for emoji-presentation codepoints (fc-match `emoji:charset=1F600`
   requires `libwaterui_dylib-4624ee4d224e52f7.so`, but the staged
   runtime dir held an older-hash `libwaterui_dylib-492067d7….so` →
   child exits before `initialize` → "the app binary did not answer
-  initialize: Connection closed". Workaround: copy the built
+  initialize: Connection closed". **water-rs/cli#176.** Workaround: copy the built
   `deps/libwaterui_dylib-<newhash>.so` into the artifact dir. The
   staging step should refresh, not union-keep-oldest.
+
+## M3 text field: label/prompt sits high in the 56 dp container (r10)
+
+Measured on the empty, unfocused fields `Search chats` (bounds
+(4,68,332,56)) and `Message` (bounds (498,640,340,56)) at 1000×700,
+scale 1. Text ink rows inside the 56 dp container: **10–21** for
+"Search chats" (cap height ~12 px) and **11–24** for "Message" —
+vertical centre ≈ **15.5–17.5 px** from the container top. Per the M3
+filled-text-field spec an empty, unfocused field shows the
+label/prompt vertically centred in the 56 dp container: expected
+centre ≈ **28 px**, ink ≈ rows 20–34. hydrolysis-m3 places it ~11 px
+too high — as if the label slot were already in its "floating"
+position. Minimal repro:
+
+```rust
+field("Search", &binding).prompt("Search chats").hide_label()
+```
+
+in an empty, unfocused window → prompt ink at y+10..21 of the 56 dp
+container, expected centred at y≈20..34.
+
+## nami: nested `when`-gates on signals derived from one `Binding` panic in `WatcherManager::cancel` (r10)
+
+**Reproduced crash** (hydrolysis dev `47b1081`, nami-core 0.3.3): a
+`Binding<Vec<Url>>` (`attach`) feeds `has_attach`/`is_img`/`fname` —
+`Map`/`Distinct` signals — and the view has `when(has_attach, …)` whose
+child itself contains `when(is_img, …)`. Setting the binding at runtime
+(`attach.set(...)`, e.g. the FilePicker callback or the strip's Remove
+button) panics:
+
+```
+nami-core-0.3.3/src/watcher.rs:357:40: RefCell already borrowed
+  5: WatcherManagerGuard<Vec<Url>>::drop          (guard on attach's manager)
+ 27: WatchedDynamic<Option<usize>, Computed, When<Distinct<Map<Binding<Vec<Url>>,bool>>,..>>::drop_slow
+ 56: Rc<Fn(Context<bool>)>::drop_slow             (the when-gate's own watcher)
+ 59: WatcherManagerGuard<Vec<Url>>::drop          (nested — second guard, same manager)
+```
+
+Mechanism, from `nami-core watcher.rs:355-360`:
+
+```rust
+pub fn cancel(&self, id: WatcherId) {
+    let (origin, subscribers) = {
+        let mut inner = self.inner.borrow_mut();   // borrow_mut HELD
+        inner.cancel(id);                          // map.remove(&id) → drops Rc<Watcher>
+        (inner.origin, inner.len())
+    };                                             // released only here
+```
+
+`map.remove` drops the removed watcher's `Rc` while `borrow_mut` is still
+held. When that watcher closure transitively owns another
+`WatcherManagerGuard` on the *same* manager (the `when` gate's
+`WatchedDynamic` teardown does), its `Drop` re-enters `cancel` →
+`borrow_mut` → panic. Fix belongs in nami: take the `Rc` out of the map,
+release the borrow, then drop the `Rc`.
+
+Minimal-repro shape (any second-level `when` on a signal derived from
+the same binding whose teardown owns a guard on that binding's
+manager):
+
+```rust
+let b = binding(Vec::<i32>::new());
+let outer = b.clone().map(|v| !v.is_empty());
+let inner = b.clone().map(|v| v.len() > 1);
+vstack((when(outer, move || {
+    let i = inner.clone();
+    when(i, || text("many")).otherwise(|| text("one"))
+}),))
+// b.set(vec![1]) → outer rebuild → teardown → nested cancel → panic
+```
+
+Watergram repro: `WATERGRAM_DEMO=1 WATERGRAM_DEMO_PAGE=attach` mounts
+the chat page, then sets `store.attach` ~800 ms post-mount → panic.
+The production path hits the same code (`FilePicker` on-pick →
+`attach.set`), so attachment picking crashes until the nami fix; the
+`#[waterui::test]` semantic test (`attach_preview_shows_caption_field`)
+passes because the testing runtime drives the same views without the
+real renderer's watcher topology. Left as-is per dogfooding rules —
+not restructured around it.

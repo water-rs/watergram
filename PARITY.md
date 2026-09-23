@@ -65,8 +65,8 @@
 | 转发不带署名 | ✅ | `forwardMessages(send_copy)`（转发横幅「Without attribution」切换） | `forward_banner_has_noattr_chip` |
 | 转发带评论 | ❌ | forwardMessages 不支持附言（需转发后单独发文本） | — |
 | @提及/用户名补全 | ❌ | `getChatMember` 逐成员补全 UI 未做 | — |
-| 共享媒体浏览（聊天内图/视频网格） | ❌ | `searchChatMessages(filter PhotoAndVideo)` 界面未做 | — |
-| 未读消息分隔线 | ❌ | `unread_count`/`last_read_inbox` 分隔条未画 | — |
+| 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
+| 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
 
 ## 4. 媒体与附件
 
@@ -84,7 +84,7 @@
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
 | 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭（占满会话面板；非全屏） | `media_viewer_overlay` |
 | Emoji 选择面板 | ✅ | 本地 Emoji 网格（~300 项，VS16 整段）→ 插入输入框；与贴纸/GIF 同一面板三 tab | `emoji_tab_shows_grid` |
-| 发送前预览+说明编辑 | 🟡 | 附件指示条「File attached — press send」，无预览缩略图/说明输入框 | — |
+| 发送前预览+说明编辑 | ✅ | 附件条：图片缩略图+文件名+caption 输入框（发送时并入消息 caption） | `attach_preview_shows_caption_field` |
 
 ## 5. 频道与群组
 
@@ -95,7 +95,7 @@
 | 新建群组 | ✅ | `createNewSupergroupChat` | — |
 | 公开频道浏览/搜索加入 | ✅ | `searchChatsOnServer` + `joinChat`（行菜单） | — |
 | 加入/退出 | ✅ | `joinChat`/`leaveChat` | — |
-| 成员列表 | ✅ | `searchChatMembers`（名字+角色面板） | `members_panel_lists_members` |
+| 成员列表 | ✅ | `searchChatMembers`（名字+角色面板）；宽布局右侧信息面板（头像/成员数/共享媒体） | `members_panel_lists_members` `info_panel_shows_shared_media` |
 | 基础管理（改标题/描述/头像、删成员） | ✅ | `setChatTitle`/`setChatDescription`/`setChatPhoto`/`setChatMemberStatus(Banned)`/`setMessageSenderBlockList` | — |
 | 频道简介/邀请链接 | ✅ | `createChatInviteLink` → 成员面板显示链接（New link 按钮） | `members_invite_row` |
 
@@ -130,6 +130,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：78 项 ｜ 部分 🟡：1 项 ｜ 未实现 ❌：7 项（含语言包、投票创建、@提及补全、共享媒体、转发附言、未读分隔线）
+- 已实现 ✅：80 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：4 项（语言包、投票创建、@提及补全、转发附言）
 - 现有测试：18 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
-- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；缺失行按日常使用频率补录为 ❌（创建投票、@提及、共享媒体、转发附言、未读分隔线、发送前预览🟡）。
+- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。剩余 ❌：创建投票、@提及补全、转发附言、语言包。
