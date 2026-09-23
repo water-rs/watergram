@@ -20,6 +20,7 @@ use waterui::media::Url;
 use waterui::preview;
 use waterui::task::{sleep, spawn_local};
 use waterui::theme::Theme;
+use waterui::window::{Window, WindowState};
 
 /// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
 /// connection — for rendering checks on device-less VMs.
@@ -41,6 +42,16 @@ fn main() -> impl View {
     if std::env::var_os("WATERGRAM_DEMO").is_some() {
         let store = Store::new(0);
         store.seed_demo();
+        // `water mcp` runs through SemanticRuntime, which builds its own window
+        // and never drives this one's `frame` binding — the info-panel width
+        // threshold would otherwise see Rect::zero() forever (always overlay).
+        // WATERGRAM_WIN_SIZE=WxH simulates the delivered window size.
+        if let Ok(spec) = std::env::var("WATERGRAM_WIN_SIZE")
+            && let Some((w, h)) = spec.split_once('x')
+            && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
+        {
+            store.win_frame.set(Rect::new(Point::zero(), Size::new(w, h)));
+        }
         let page = demo_page();
         return views::root(store.clone()).task(async move {
             match page {
@@ -73,9 +84,15 @@ pub fn app(mut env: Environment) -> App {
     } else {
         td::spawn_client()
     };
-    let store = Store::new(client_id);
+    let mut store = Store::new(client_id);
     if demo {
         store.seed_demo();
+        // Synchronous seeds — evaluated before the view mounts.
+        if demo_page() == Some("info") {
+            store.selected.set(Some(1));
+            store.open_chat.set(1);
+            store.info_open.set(true);
+        }
     }
     env.install(
         Theme::new().color_scheme(
@@ -84,11 +101,12 @@ pub fn app(mut env: Environment) -> App {
                 .select(ColorScheme::Dark, ColorScheme::Light),
         ),
     );
-    App::new(
-        move || {
-            let s = store.clone();
+    let win_state = binding(WindowState::Normal);
+    let store_for_content = store.clone();
+    let win = Window::new("", win_state, move || {
+            let s = store_for_content.clone();
             let rx2 = rx.clone();
-            views::root(store.clone()).task(async move {
+            views::root(store_for_content.clone()).task(async move {
                 if demo {
                     match demo_page() {
                         Some("chat") => s.selected.set(Some(1)),
@@ -100,7 +118,7 @@ pub fn app(mut env: Environment) -> App {
                         Some("info") => {
                             s.selected.set(Some(1));
                             s.open_chat.set(1);
-                            s.toggle_info();
+                            s.info_open.set(true);
                         }
                         Some("attach") => {
                             s.selected.set(Some(1));
@@ -125,15 +143,27 @@ pub fn app(mut env: Environment) -> App {
                     s.update(update, cid);
                 }
             })
-        },
-        env,
-    )
+        });
+    store.win_frame = win.frame.clone();
+    // Spawn size; winit rewrites `win.frame` on Moved/Resized from here on.
+    // SemanticRuntime never drives it — see DOGFOOD 'window.frame bypassed'.
+    win.frame.set(Rect::new(Point::zero(), Size::new(1280.0, 800.0)));
+    // Test hook for `water mcp` screenshots: `WATERGRAM_WIN_SIZE=WxH` makes the
+    // width threshold see the viewport size the semantic runner never delivers.
+    if let Ok(spec) = std::env::var("WATERGRAM_WIN_SIZE")
+        && let Some((w, h)) = spec.split_once('x')
+        && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
+    {
+        win.frame.set(Rect::new(Point::zero(), Size::new(w, h)));
+    }
+    App::new_with_windows([win], env)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::state::{ChatRow, FolderRow, MessageRow, Screen, Store};
     use crate::views;
+    use waterui::layout::frame::Frame;
     use waterui::prelude::*;
     use waterui_testing::{Role, Styled, UiBuilder};
 
@@ -509,6 +539,7 @@ mod tests {
             sender: tdlib_rs::enums::MessageSender::User(tdlib_rs::types::MessageSenderUser {
                 user_id: 9,
             }),
+            username: "alice".into(),
         }]);
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("2 members").assert_exists();
@@ -557,6 +588,7 @@ mod tests {
             sender: tdlib_rs::enums::MessageSender::User(tdlib_rs::types::MessageSenderUser {
                 user_id: 9,
             }),
+            username: "alice".into(),
         }]);
         let mut app = ui.mount(move || views::new_chat_view(store.clone()).state(&store));
         app.query().label("Alice A").assert_exists();
@@ -1050,6 +1082,181 @@ mod tests {
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_info_docked_overflow(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Repro: docked info panel + message List — does the List exceed its
+        // slot and slide under the panel?
+        let mut store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.info_open.set(true);
+        store.win_frame = Binding::container(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        let inner = store.clone();
+        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
+            views::chat_detail(inner.clone(), 1).state(&store)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_info_dock.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_info_dock.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_info_toggle_late(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // win_frame flips 0 -> 1400 AFTER mount: does the hstack re-distribute
+        // the chat column when the docked `when` panel materializes?
+        let mut store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.info_open.set(true);
+        let frame = Binding::container(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(0.0, 0.0),
+        ));
+        store.win_frame = frame.clone();
+        let inner = store.clone();
+        let mut app = ui.viewport(1060, 900).mount_offscreen(move || {
+            views::chat_detail(inner.clone(), 1).state(&store)
+        });
+        app.semantic_mut().settle();
+        frame.set(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_info_late.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_info_late.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_info_open_late(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // win_frame already 1400; info_open flips false -> true after mount.
+        let mut store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.win_frame = Binding::container(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        let info = store.info_open.clone();
+        let inner = store.clone();
+        let mut app = ui.viewport(1060, 900).mount_offscreen(move || {
+            views::chat_detail(inner.clone(), 1).state(&store)
+        });
+        app.semantic_mut().settle();
+        info.set(true);
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_info_open.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_info_open.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_text_wrap_bubble(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::theme::color::SurfaceVariant;
+        let txt = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        let mut app = ui.viewport(700, 200).mount_offscreen(move || {
+            vstack((
+                Frame::new(
+                    zstack((
+                        vstack((
+                            text(txt).body().anyview(),
+                            text("short").caption().anyview(),
+                        ))
+                        .spacing(4.0)
+                        .leading()
+                        .padding_with([10.0, 30.0, 10.0, 10.0]),
+                        text("09:41").caption(),
+                    ))
+                    .alignment(BottomTrailing),
+                )
+                .max_width(120.0)
+                .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
+            ))
+            .width(700.0)
+        });
+        app.semantic_mut().settle();
+        let _ = app.snapshot().save_png("/tmp/probe_wrap3.png");
+        dump_bounds("/tmp/probe_wrap3.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_text_wrap_container(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let mut app = ui.viewport(400, 140).mount_offscreen(move || {
+            vstack((
+                Frame::new(text(
+                    "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+                ))
+                .max_width(120.0),
+                Frame::new(text(
+                    "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+                ))
+                .width(120.0),
+            ))
+            .width(400.0)
+        });
+        app.semantic_mut().settle();
+        let _ = app.snapshot().save_png("/tmp/probe_wrap2.png");
+        dump_bounds("/tmp/probe_wrap2.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_text_wrap_maxwidth(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let mut app = ui.viewport(400, 120).mount_offscreen(move || {
+            vstack((
+                text("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu")
+                    .max_width(120.0),
+                text("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"),
+            ))
+            .width(400.0)
+        });
+        app.semantic_mut().settle();
+        let _ = app.snapshot().save_png("/tmp/probe_wrap.png");
+        dump_bounds("/tmp/probe_wrap.txt", &mut app);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_divider_rules(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::graphics::color::BorderColor;
+        use waterui::theme::color::{Accent, Surface};
+        let mut app = ui.viewport(400, 60).mount_offscreen(move || {
+            zstack((
+                Color::from(BorderColor).height(1.0),
+                hstack((
+                    spacer(),
+                    text("Unread messages").caption().bold().foreground(Accent).padding_with((0.0, 6.0)).background(Color::from(Surface)),
+                    spacer(),
+                )),
+            ))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_rules.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_rules.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_root_info_docked(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Full views::root at 1400x900 with the info panel docked — does the
+        // chat List exceed its pane slot as it does under `water mcp`?
+        let mut store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.open_chat.set(1);
+        store.info_open.set(true);
+        store.win_frame = Binding::container(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        let inner = store.clone();
+        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
+            views::root(inner.clone()).state(&store)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_root_dock.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_root_dock.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_bubble_inset(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         // Same bubble as probe_bubble_incoming but WITHOUT outer padding —
         // isolates whether `.padding_with((12,2))` or `List` inflates the row.
@@ -1358,6 +1565,7 @@ mod tests {
             sender: tdlib_rs::enums::MessageSender::User(tdlib_rs::types::MessageSenderUser {
                 user_id: 42,
             }),
+            username: "spam".into(),
         }]);
         let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
         app.query().label("Blocked users").assert_exists();
@@ -1399,5 +1607,79 @@ mod tests {
         app.query().label("photo.jpg").assert_exists();
         app.query().label("Caption").assert_exists();
         app.query().label("Remove").assert_exists();
+    }
+
+    /// Minimal nami#23 topology: a `when` gated on signal A (derived from a
+    /// binding) whose body builds a second `when` on signal B derived from
+    /// the same binding. Toggling A false cancels A's watcher; dropping its
+    /// content drops B's `WatcherManagerGuard` on the same manager — the
+    /// re-entrant `cancel` panics in the hydrolysis renderer. This test
+    /// reports whether the semantic testing runtime reproduces it.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn nami_cancel_reentrancy_minimal(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let b = waterui::reactive::binding(Vec::<Str>::new());
+        let outer = b.map(|v: Vec<Str>| !v.is_empty()).distinct();
+        let inner_src = b.clone();
+        let mut app = ui.mount(move || {
+            let inner_src2 = inner_src.clone();
+            when(outer.clone(), move || {
+                let inner = inner_src2.map(|v: Vec<Str>| v.len() > 1).distinct();
+                when(inner, || text("many")).otherwise(|| text("one"))
+            })
+        });
+        // Build A's body → B's watcher subscribes on the same manager.
+        b.set(vec![Str::from("a")]);
+        // Toggle A false → cancel A's watcher → drops B's guard inside
+        // `WatcherManager::cancel`'s borrow_mut → nami#23 panic path.
+        b.set(Vec::new());
+        app.query().label("many").assert_not_exists();
+    }
+
+    fn member(id: i64, name: &str, uname: &str) -> crate::state::MemberRow {
+        crate::state::MemberRow {
+            key: id,
+            name: name.to_string().into(),
+            status: "member".into(),
+            sender: tdlib_rs::enums::MessageSender::User(tdlib_rs::types::MessageSenderUser {
+                user_id: id,
+            }),
+            username: uname.to_string().into(),
+        }
+    }
+
+    #[test]
+    fn mention_token_parses() {
+        assert_eq!(Store::mention_token("hi @al"), Some("al".to_string()));
+        assert_eq!(Store::mention_token("hi @"), Some("".to_string()));
+        assert_eq!(Store::mention_token("mail a@b"), None);
+        assert_eq!(Store::mention_token("plain text"), None);
+        assert_eq!(Store::mention_token(""), None);
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn mention_popup_filters_and_inserts(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store
+            .members
+            .set(vec![member(11, "Alice", "alice"), member(12, "Bob", "bob")]);
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.composer.set(Str::from("hi @al"));
+        app.query().label("@alice").assert_exists();
+        app.query().label("@bob").assert_not_exists();
+        store.apply_mention("alice");
+        assert!(store.composer.get().contains("@alice "));
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn forward_banner_shows_comment_field(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.forward_ids.set(vec![101, 102]);
+        let inner = store.clone();
+        let mut app = ui.mount(move || views::root(inner.clone()).state(&inner));
+        app.query().label_contains("forward").assert_exists();
+        app.query().label("Comment").assert_exists();
     }
 }

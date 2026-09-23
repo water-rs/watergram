@@ -63,8 +63,8 @@
 | 定时消息列表/立即发送 | ✅ | `getChatScheduledMessages` 面板 + `editMessageSchedulingState(None)`（工具栏时钟） | `scheduled_panel_lists_rows` |
 | 草稿跨端同步 | ✅ | `setChatDraftMessage`（切换会话时把本地草稿推到服务器，`updateChatDraftMessage` 端已收） | `drafts_saved_per_chat` |
 | 转发不带署名 | ✅ | `forwardMessages(send_copy)`（转发横幅「Without attribution」切换） | `forward_banner_has_noattr_chip` |
-| 转发带评论 | ❌ | forwardMessages 不支持附言（需转发后单独发文本） | — |
-| @提及/用户名补全 | ❌ | `getChatMember` 逐成员补全 UI 未做 | — |
+| 转发带评论 | ✅ | 转发横幅内评论字段 → `forwardMessages` 完成后同聊天 `sendMessage` 文本附言 | `forward_banner_shows_comment_field` |
+| @提及/用户名补全 | ✅ | 输入框尾部 @token → `searchChatMembers`+`getUser`(username) 过滤弹层，选中回填 `@username ` | `mention_popup_filters_and_inserts`, `mention_token_parses` |
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
 | 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
 
@@ -130,6 +130,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：80 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：4 项（语言包、投票创建、@提及补全、转发附言）
+- 已实现 ✅：82 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：2 项（语言包、投票创建）
 - 现有测试：18 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
-- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。剩余 ❌：创建投票、@提及补全、转发附言、语言包。
+- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。剩余 ❌：创建投票、语言包。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。

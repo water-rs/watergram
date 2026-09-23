@@ -8,6 +8,7 @@ use std::time::Duration;
 
 
 use waterui::component::list::{List, ListItem};
+use waterui::layout::frame::Frame;
 use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
 use waterui::media::Photo;
@@ -22,7 +23,7 @@ use waterui::reactive::collection::SignalCollection;
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
 use waterui::shape::{Circle, RoundedRectangle, ShapeExt};
-use waterui::graphics::color::WithOpacity;
+use waterui::graphics::color::{BorderColor, WithOpacity};
 use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Background, Error, Foreground,
     MutedForeground, Surface, SurfaceVariant,
@@ -352,11 +353,16 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         }),
         when(forward_mode, move || {
             let noattr = store.forward_noattr.clone();
+            let comment_b = store.forward_comment.clone();
             hstack((
                 share_variant().tint(Accent).size(16.0, 16.0),
                 text("Select a chat to forward to")
                     .caption()
                     .foreground(Accent),
+                field("Comment", &comment_b)
+                    .prompt("Add a comment…")
+                    .hide_label()
+                    .width(150.0),
                 spacer(),
                 text!(
                     "Without attribution{mark}",
@@ -374,6 +380,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 icon_button(close(), "Cancel", |store: Store| {
                     store.forward_message.set(None);
                     store.forward_ids.set(Vec::new());
+                    store.forward_comment.set_from("");
                 }),
             ))
             .padding_with((8.0, 12.0))
@@ -651,6 +658,545 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
 // Chat detail
 // ---------------------------------------------------------------------------
 
+pub(crate) fn chat_column(store: Store) -> impl View {
+    let composer_b = store.composer.clone();
+    let has_more = store.no_more_history.not();
+    let reply_open = store.reply_to.is_some();
+    let edit_open = store.editing.is_some();
+    let reply_label = store.reply_label.clone();
+    let messages = SignalCollection::new(store.messages.clone());
+    let has_attach = store.attach.map(|v| !v.is_empty()).distinct();
+    let voice_rec = store.recording_voice.clone();
+    let has_capture_error = store
+        .capture_error
+        .map(|s: Str| !s.is_empty())
+        .distinct();
+    let capture_error_text = store.capture_error.clone();
+    let composer_empty = store.composer.str_is_empty().distinct();
+    let video_note_open = store.video_note_open.clone();
+    let voice_elapsed = store.voice_elapsed.clone();
+    let store_for_sheet = store.clone();
+    let scroller = store.scroll.clone();
+    let has_pinned = store.pinned_label.map(|s: Str| !s.is_empty()).distinct();
+    let pinned_label = store.pinned_label.clone();
+    let search_open = store.chat_search_open.clone();
+    let search_b = store.chat_search.clone();
+    let search_results_b = store.chat_search_results.clone();
+    let stickers_open = store.stickers_open.clone();
+    let sticker_items = store.sticker_items.clone();
+    let store_cells = store.clone();
+    let inner = store.clone();
+    let sel_active = store
+        .selected_msgs
+        .map(|v: Vec<i64>| !v.is_empty())
+        .distinct();
+    let sel_active_rows = sel_active.clone();
+    let sel_msgs_rows = store.selected_msgs.clone();
+    let sel_count = store
+        .selected_msgs
+        .map(|v: Vec<i64>| v.len())
+        .distinct();
+    let scheduled_open = store.scheduled_open.clone();
+    let scheduled_b = store.scheduled.clone();
+    let emoji_tab = store.panel_tab.is_zero().distinct();
+    // @mention completion: trailing @token in the composer filters the
+    // loaded member list; the popup sits above the composer row.
+    let mention_sig = store
+        .composer
+        .zip(&store.members)
+        .map(|(q, ms)| {
+            let tok = Store::mention_token(&q);
+            match tok {
+                None => Vec::new(),
+                Some(t) => {
+                    let t = t.to_lowercase();
+                    ms.iter()
+                        .filter(|m| {
+                            !m.username.is_empty()
+                                && (m.username.to_lowercase().starts_with(&t)
+                                    || m.name.to_lowercase().starts_with(&t)
+                                    || t.is_empty())
+                        })
+                        .take(6)
+                        .cloned()
+                        .collect::<Vec<MemberRow>>()
+                }
+            }
+        });
+    let mention_rows = SignalCollection::new(mention_sig.clone());
+    let mention_show = mention_sig
+        .map(|v: Vec<MemberRow>| !v.is_empty())
+        .distinct();
+            vstack((
+    when(has_pinned, move || {
+        hstack((
+            pin().tint(Accent).size(14.0, 14.0),
+            text!("{pinned_label}")
+                .caption()
+                .line_limit(ONE)
+                .foreground(Accent),
+            spacer(),
+        ))
+        .padding_with((6.0, 12.0))
+        .background(Surface)
+        .on_tap(|store: Store| store.jump_to_message(store.pinned_id.get()))
+    }),
+    // Multi-select action bar (Desktop's "N selected" header state).
+    when(sel_active, move || {
+        hstack((
+            text!("{n} selected", n = sel_count.clone())
+                .caption()
+                .bold(),
+            spacer(),
+            icon_button(share_variant(), "Forward selected", |store: Store| {
+                store.forward_selected()
+            }),
+            icon_button(delete_sweep(), "Delete selected", |store: Store| {
+                store.delete_selected()
+            }),
+            icon_button(close(), "Clear selection", |store: Store| {
+                store.clear_selection()
+            }),
+        ))
+        .spacing(6.0)
+        .padding_with((6.0, 12.0))
+        .background(Surface)
+    }),
+    vstack((
+        when(has_more, || {
+            button("Load earlier messages…")
+                .label_style(LabelDisplayMode::TitleOnly)
+                .action(|store: Store| store.load_older())
+        }),
+        List::for_each(messages, move |row: MessageRow| {
+            let rid = row.id;
+            let check = sel_msgs_rows
+                .map(move |v: Vec<i64>| v.contains(&rid))
+                .distinct();
+            ListItem::new(
+                hstack((
+                    when(sel_active_rows.clone(), move || {
+                        let check = check.clone();
+                        when(check, || text("☑").body().foreground(Accent))
+                            .otherwise(|| text("☐").body().muted())
+                            .padding_with((0.0, 4.0))
+                    }),
+                    message_bubble(inner.clone(), row),
+                ))
+                .spacing(4.0)
+                .on_tap(move |store: Store| {
+                    // Only multi-select mode: context-menu "Select"
+                    // seeds the set; further taps toggle membership.
+                    if !store.selected_msgs.get().is_empty() {
+                        store.toggle_select(rid);
+                    }
+                })
+                .padding_with((2.0, 12.0)),
+            )
+        })
+        .scroll_controller(&scroller),
+    )),
+    when(store.members_open.clone(), move || {
+        vstack((
+            hstack((
+                text!("{members_count}", members_count = store.members_count.clone())
+                    .caption()
+                    .muted(),
+                spacer(),
+                icon_button(close(), "Close members", |store: Store| {
+                    store.members_open.set(false)
+                }),
+            ))
+            .padding_with((6.0, 10.0)),
+            hstack((
+                field("Group title", &store.admin_title).hide_label(),
+                button("Rename").action(|store: Store| store.rename_chat()),
+            ))
+            .spacing(6.0)
+            .padding_with((0.0, 10.0)),
+            hstack((
+                field("Group description", &store.admin_desc).hide_label(),
+                button("Set").action(|store: Store| store.set_chat_desc()),
+            ))
+            .spacing(6.0)
+            .padding_with((0.0, 10.0)),
+            hstack((
+                FilePicker::open(
+                    label("Photo").icon(image_outline()),
+                    &store.chat_avatar_pick,
+                ),
+                button("Set photo").action(|store: Store| store.set_chat_avatar()),
+            ))
+            .spacing(6.0)
+            .padding_with((0.0, 10.0)),
+            hstack((
+                link_variant().tint(MutedForeground).size(14.0, 14.0),
+                text!("{invite_link}", invite_link = store.invite_link.clone())
+                    .caption()
+                    .line_limit(ONE)
+                    .muted(),
+                spacer(),
+                button("New link").action(|store: Store| store.create_invite()),
+            ))
+            .spacing(6.0)
+            .padding_with((4.0, 10.0)),
+            scroll(VStack::for_each(
+                SignalCollection::new(store.members.clone()),
+                move |row: MemberRow| {
+                    let r_kick = row.clone();
+                    let is_user =
+                        matches!(row.sender, enums::MessageSender::User(_));
+                    let uid = match &row.sender {
+                        enums::MessageSender::User(u) => u.user_id,
+                        _ => 0,
+                    };
+                    hstack((
+                        text(row.name.clone()).caption(),
+                        spacer(),
+                        text(row.status.clone()).caption().muted(),
+                    ))
+                    .spacing(6.0)
+                    .padding_with((4.0, 10.0))
+                    .on_tap(move |store: Store| {
+                        if is_user {
+                            store.open_profile(uid)
+                        }
+                    })
+                    .context_menu((
+                        "Kick".action(move |store: Store| {
+                            store.kick_member(&r_kick)
+                        }),
+                        "Block".action(move |store: Store| {
+                            store.toggle_block(&row, true)
+                        }),
+                    ))
+                },
+            ))
+            .max_height(200.0),
+        ))
+        .background(Surface)
+    }),
+    // Scheduled messages panel (nav-toolbar clock icon).
+    when(scheduled_open, move || {
+        vstack((
+            hstack((
+                text("Scheduled messages").caption().muted(),
+                spacer(),
+                icon_button(close(), "Close scheduled", |store: Store| {
+                    store.scheduled_open.set(false)
+                }),
+            ))
+            .padding_with((4.0, 10.0)),
+            scroll(VStack::for_each(
+                SignalCollection::new(scheduled_b.clone()),
+                |row: MessageRow| {
+                    let mid = row.id;
+                    let mut label = row.text.clone();
+                    if label.is_empty() {
+                        label = row.media_label.clone();
+                    }
+                    hstack((
+                        clock_outline()
+                            .tint(MutedForeground)
+                            .size(12.0, 12.0),
+                        text(label).caption().line_limit(ONE),
+                        spacer(),
+                        text(row.time.clone()).caption().muted(),
+                    ))
+                    .spacing(6.0)
+                    .padding_with((4.0, 10.0))
+                    .context_menu(("Send now".action(move |store: Store| {
+                        store.scheduled_send_now(mid)
+                    }),))
+                },
+            ))
+            .max_height(150.0),
+        ))
+        .background(Surface)
+    }),
+    when(search_open, move || {
+        vstack((
+            hstack((
+                field("Search in chat", &search_b)
+                    .prompt("Search in this chat")
+                    .hide_label(),
+                icon_button(close(), "Close search", |store: Store| {
+                    store.chat_search_open.set(false);
+                    store.chat_search.set_from("");
+                    store.chat_search_results.set(Vec::new());
+                }),
+            ))
+            .spacing(6.0)
+            .padding_with((6.0, 10.0)),
+            scroll(VStack::for_each(
+                SignalCollection::new(search_results_b.clone()),
+                move |row: MessageRow| {
+                    hstack((
+                        text(row.time.clone()).caption().muted(),
+                        text(row.text.clone()).caption().line_limit(ONE),
+                        spacer(),
+                    ))
+                    .spacing(6.0)
+                    .padding_with((4.0, 10.0))
+                    .on_tap(move |store: Store| store.jump_to_message(row.id))
+                },
+            ))
+            .max_height(160.0),
+        ))
+        .background(Surface)
+    }),
+    when(reply_open, move || {
+        banner("Reply to", reply_label.clone(), |store: Store| {
+            store.reply_to.set(None)
+        })
+    }),
+    when(edit_open, || {
+        banner("Editing message", "", |store: Store| {
+            store.editing.set(None);
+            store.composer.set_from("");
+        })
+    }),
+    when(voice_rec, move || {
+        hstack((
+            text!("Recording… {voice_elapsed}")
+                .caption()
+                .foreground(Accent),
+            spacer(),
+            icon_button(close(), "Cancel recording", |store: Store| {
+                store.cancel_voice_record()
+            }),
+            icon_button(send(), "Send voice note", |store: Store| {
+                store.toggle_voice_record()
+            }),
+        ))
+        .padding_with((6.0, 12.0))
+        .background(Surface)
+    }),
+    when(has_capture_error, move || {
+        banner("Capture", text!("{capture_error_text}"), |store: Store| {
+            store.capture_error.set_from("")
+        })
+    }),
+    when(video_note_open, move || {
+        video_note_sheet(store_for_sheet.clone())
+    }),
+    when(has_attach, {
+        let first_url = store
+            .attach
+            .map(|v: Vec<Url>| {
+                v.first()
+                    .map(|u| Url::from_file_path_str(Str::from(u.path().to_string())))
+                    .unwrap_or_else(|| Url::from_file_path_str(Str::from("")))
+            })
+;
+        let is_img = store
+            .attach
+            .map(|v: Vec<Url>| {
+                v.first()
+                    .map(|u| {
+                        let p = u.path().to_string().to_lowercase();
+                        [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+                            .iter()
+                            .any(|e| p.ends_with(e))
+                    })
+                    .unwrap_or(false)
+            })
+;
+        let fname = store
+            .attach
+            .map(|v: Vec<Url>| {
+                v.first()
+                    .map(|u| {
+                        u.path()
+                            .to_string()
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("file")
+                            .to_string()
+                    })
+                    .unwrap_or_default()
+            })
+;
+        let cap_b = store.attach_caption.clone();
+        move || {
+            let is_img = is_img.clone();
+            let first_url = first_url.clone();
+            let fname = fname.clone();
+            let cap_b = cap_b.clone();
+            hstack((
+                when(is_img, {
+                    let u = first_url.clone();
+                    move || {
+                        Photo::new(u.clone())
+                            .width(40.0)
+                            .height(40.0)
+                            .clip(RoundedRectangle::new(0.15))
+                    }
+                })
+                .otherwise(|| paperclip().tint(Accent).size(24.0, 24.0)),
+                vstack((
+                    text!("{f}", f = fname.clone())
+                        .caption()
+                        .line_limit(ONE)
+                        .foreground(Accent),
+                    field("Caption", &cap_b)
+                        .prompt("Add a caption…")
+                        .hide_label(),
+                ))
+                .spacing(2.0)
+                .leading(),
+                spacer(),
+                icon_button(close(), "Remove", |store: Store| {
+                    store.attach.set(Vec::new());
+                    store.attach_caption.set_from("")
+                }),
+            ))
+            .spacing(8.0)
+            .padding_with((6.0, 12.0))
+            .background(Surface)
+        }
+    }),
+    when(stickers_open, move || {
+        let cells = store_cells.clone();
+        let emoji_tab2 = emoji_tab.clone();
+        let sticker_q = store.sticker_query.clone();
+        let packs_b = store.sticker_packs.clone();
+        let items_b = sticker_items.clone();
+        vstack((
+            // Picker tabs: Emoji grid is local; Stickers/GIFs query TDLib.
+            hstack((
+                panel_tab_chip("Emoji", 0),
+                panel_tab_chip("Stickers", 1),
+                panel_tab_chip("GIFs", 2),
+                spacer(),
+            ))
+            .spacing(4.0)
+            .padding_with((2.0, 8.0)),
+            when(emoji_tab2, emoji_grid).otherwise(move || {
+                let cells = cells.clone();
+                vstack((
+                    hstack((
+                        field("Emoji search", &sticker_q)
+                            .prompt("😀 emoji")
+                            .hide_label(),
+                        icon_button(magnify(), "Search stickers", |store: Store| {
+                            store.search_stickers_by()
+                        }),
+                        {
+                            let q = sticker_q.clone();
+                            icon_button(file_gif_box(), "Search GIFs", move |store: Store| {
+                                store.search_gifs_by(q.get().to_string())
+                            })
+                        },
+                    ))
+                    .spacing(6.0)
+                    .padding_with((2.0, 8.0)),
+                    scroll_horizontal(HStack::for_each(
+                        SignalCollection::new(packs_b.clone()),
+                        move |pack: PackRow| {
+                            let id = pack.id;
+                            text(pack.title.clone())
+                                .caption()
+                                .padding_with((2.0, 8.0))
+                                .background(
+                                    RoundedRectangle::new(0.5).fill(SurfaceVariant),
+                                )
+                                .on_tap(move |store: Store| {
+                                    store.open_sticker_pack(id)
+                                })
+                        },
+                    ))
+                    .max_height(28.0),
+                    scroll_horizontal(HStack::for_each(
+                        SignalCollection::new(items_b.clone()),
+                        move |item: StickerItem| {
+                            let cell_store = cells.clone();
+                            let thumb = item.thumb;
+                            let mut fallback: Str = item.emoji.clone();
+                            if item.gif {
+                                fallback = "GIF".into();
+                            }
+                            let it = item.clone();
+                            let has = cell_store
+                                .file_signal(thumb)
+                                .map(|p: Str| !p.is_empty())
+                                .distinct();
+                            let no_file = cell_store
+                                .file_signal(thumb)
+                                .str_is_empty()
+                                .distinct();
+                            let url = cell_store.file_signal(thumb).map(Url::from_file_path_str);
+                            let cell = zstack((
+                                when(has, move || {
+                                    Photo::new(url.clone()).max_width(72.0).max_height(72.0)
+                                }),
+                                when(no_file, move || text(fallback.clone()).headline()),
+                            ))
+                            .anyview();
+                            cell.padding_with((6.0, 6.0))
+                                .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
+                                .on_tap(move |store: Store| store.send_sticker(it.clone()))
+                        },
+                    ))
+                    .max_height(96.0),
+                ))
+                .spacing(4.0)
+            }),
+        ))
+    }),
+    when(mention_show, move || {
+        VStack::for_each(mention_rows.clone(), move |m: MemberRow| {
+            let uname = m.username.clone();
+            hstack((
+                text!("@{u}", u = uname.clone()).caption().bold().foreground(Accent),
+                text(m.name.clone()).caption().muted(),
+                spacer(),
+            ))
+            .spacing(8.0)
+            .padding_with((6.0, 12.0))
+            .on_tap(move |store: Store| store.apply_mention(&uname))
+        })
+        .spacing(0.0)
+        .padding_with((4.0, 0.0))
+        .background(Surface)
+        .clip(RoundedRectangle::new(0.12))
+    }),
+    hstack((
+        FilePicker::open(
+            label("Attach file").icon(paperclip()).icon_only(),
+            &store.attach,
+        ),
+        icon_button(emoticon(), "Stickers & GIFs", |store: Store| {
+            store.toggle_stickers()
+        }),
+        field("Message", &composer_b)
+            .prompt("Message")
+            .hide_label(),
+        // Search/members/scheduled live in the navigation toolbar
+        // (Telegram Desktop parity). A `Spacer` before the mic/send slot
+        // keeps it trailing-aligned.
+        spacer(),
+        when(composer_empty, || {
+            icon_button(microphone(), "Record voice note", |store: Store| {
+                store.toggle_voice_record()
+            })
+        })
+        .otherwise(|| {
+            icon_button(send(), "Send", |store: Store| store.send()).context_menu((
+                "Send silently".action(|store: Store| store.send_silent()),
+                "Send in 1 hour".action(|store: Store| store.send_later(3600)),
+            ))
+        }),
+        icon_button(camera(), "Video note", |store: Store| {
+            store.open_video_note()
+        }),
+    ))
+    .spacing(4.0)
+    .padding_with((4.0, 6.0))
+    .background(Surface),
+    ))
+}
+
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
 pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let title = store
@@ -678,511 +1224,83 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         })
         .distinct();
 
-    let has_more = store.no_more_history.not();
-    let reply_open = store.reply_to.is_some();
-    let edit_open = store.editing.is_some();
-    let reply_label = store.reply_label.clone();
-    let messages = SignalCollection::new(store.messages.clone());
-    let has_attach = store.attach.map(|v| !v.is_empty()).distinct();
-    let voice_rec = store.recording_voice.clone();
-    let has_capture_error = store
-        .capture_error
-        .map(|s: Str| !s.is_empty())
-        .distinct();
-    let capture_error_text = store.capture_error.clone();
-    let composer_empty = store.composer.str_is_empty().distinct();
-    let video_note_open = store.video_note_open.clone();
-    let voice_elapsed = store.voice_elapsed.clone();
-    let store_for_sheet = store.clone();
-    let scroller = store.scroll.clone();
     let composer_b = store.composer.clone();
-    let has_pinned = store.pinned_label.map(|s: Str| !s.is_empty()).distinct();
-    let pinned_label = store.pinned_label.clone();
-    let search_open = store.chat_search_open.clone();
     let search_open2 = store.chat_search_open.clone();
-    let search_b = store.chat_search.clone();
     let search_debounced = store.chat_search.debounce(Duration::from_millis(400));
-    let search_results_b = store.chat_search_results.clone();
-    let stickers_open = store.stickers_open.clone();
-    let sticker_items = store.sticker_items.clone();
-    let store_cells = store.clone();
-    let inner = store.clone();
     let viewer_open = store.viewer.is_some().distinct();
     let store_for_viewer = store.clone();
     let store_for_info = store.clone();
-    let sel_active = store
-        .selected_msgs
-        .map(|v: Vec<i64>| !v.is_empty())
+    let info_docked = store
+        .info_open
+        .zip(&store.win_frame)
+        .map(|(open, f)| open && f.width() >= 1120.0)
         .distinct();
-    let sel_active_rows = sel_active.clone();
-    let sel_msgs_rows = store.selected_msgs.clone();
-    let sel_count = store
-        .selected_msgs
-        .map(|v: Vec<i64>| v.len())
+    let info_overlay = store
+        .info_open
+        .zip(&store.win_frame)
+        .map(|(open, f)| open && f.width() < 1120.0)
         .distinct();
-    let scheduled_open = store.scheduled_open.clone();
-    let scheduled_b = store.scheduled.clone();
-    let emoji_tab = store.panel_tab.is_zero().distinct();
+    let store_for_info_overlay = store.clone();
+    // Column width follows Telegram Desktop's math: pane minus the docked
+    // panel (280 + 1 divider) when it is docked, full pane otherwise. Kept as
+    // a signal so the `when`-materialized panel and the column resize in the
+    // same flush.
+    let col_w = store
+        .info_open
+        .zip(&store.win_frame)
+        .map(|(open, f)| {
+            let pane = (f.width() - 340.0).max(0.0);
+            if open && f.width() >= 1120.0 {
+                (pane - 281.0).max(0.0)
+            } else {
+                pane
+            }
+        });
 
+    // NOTE: `when(a).otherwise(b)` (WhenComplete) is intentionally not used
+    // here: its drop cascades a watcher cancel inside an in-flight cancel
+    // (nami#23) and panics the real renderer at mount. Two exclusive `when`s
+    // give the same tree without WhenComplete.
     zstack((
-        hstack((
-        vstack((
-        when(has_pinned, move || {
-            hstack((
-                pin().tint(Accent).size(14.0, 14.0),
-                text!("{pinned_label}")
-                    .caption()
-                    .line_limit(ONE)
-                    .foreground(Accent),
-                spacer(),
-            ))
-            .padding_with((6.0, 12.0))
-            .background(Surface)
-            .on_tap(|store: Store| store.jump_to_message(store.pinned_id.get()))
-        }),
-        // Multi-select action bar (Desktop's "N selected" header state).
-        when(sel_active, move || {
-            hstack((
-                text!("{n} selected", n = sel_count.clone())
-                    .caption()
-                    .bold(),
-                spacer(),
-                icon_button(share_variant(), "Forward selected", |store: Store| {
-                    store.forward_selected()
-                }),
-                icon_button(delete_sweep(), "Delete selected", |store: Store| {
-                    store.delete_selected()
-                }),
-                icon_button(close(), "Clear selection", |store: Store| {
-                    store.clear_selection()
-                }),
-            ))
-            .spacing(6.0)
-            .padding_with((6.0, 12.0))
-            .background(Surface)
-        }),
-        vstack((
-            when(has_more, || {
-                button("Load earlier messages…")
-                    .label_style(LabelDisplayMode::TitleOnly)
-                    .action(|store: Store| store.load_older())
-            }),
-            List::for_each(messages, move |row: MessageRow| {
-                let rid = row.id;
-                let check = sel_msgs_rows
-                    .map(move |v: Vec<i64>| v.contains(&rid))
-                    .distinct();
-                ListItem::new(
-                    hstack((
-                        when(sel_active_rows.clone(), move || {
-                            let check = check.clone();
-                            when(check, || text("☑").body().foreground(Accent))
-                                .otherwise(|| text("☐").body().muted())
-                                .padding_with((0.0, 4.0))
-                        }),
-                        message_bubble(inner.clone(), row),
-                    ))
-                    .spacing(4.0)
-                    .on_tap(move |store: Store| {
-                        // Only multi-select mode: context-menu "Select"
-                        // seeds the set; further taps toggle membership.
-                        if !store.selected_msgs.get().is_empty() {
-                            store.toggle_select(rid);
-                        }
-                    })
-                    .padding_with((2.0, 12.0)),
-                )
-            })
-            .scroll_controller(&scroller),
-        )),
-        when(store.members_open.clone(), move || {
-            vstack((
-                hstack((
-                    text!("{members_count}", members_count = store.members_count.clone())
-                        .caption()
-                        .muted(),
-                    spacer(),
-                    icon_button(close(), "Close members", |store: Store| {
-                        store.members_open.set(false)
-                    }),
-                ))
-                .padding_with((6.0, 10.0)),
-                hstack((
-                    field("Group title", &store.admin_title).hide_label(),
-                    button("Rename").action(|store: Store| store.rename_chat()),
-                ))
-                .spacing(6.0)
-                .padding_with((0.0, 10.0)),
-                hstack((
-                    field("Group description", &store.admin_desc).hide_label(),
-                    button("Set").action(|store: Store| store.set_chat_desc()),
-                ))
-                .spacing(6.0)
-                .padding_with((0.0, 10.0)),
-                hstack((
-                    FilePicker::open(
-                        label("Photo").icon(image_outline()),
-                        &store.chat_avatar_pick,
-                    ),
-                    button("Set photo").action(|store: Store| store.set_chat_avatar()),
-                ))
-                .spacing(6.0)
-                .padding_with((0.0, 10.0)),
-                hstack((
-                    link_variant().tint(MutedForeground).size(14.0, 14.0),
-                    text!("{invite_link}", invite_link = store.invite_link.clone())
-                        .caption()
-                        .line_limit(ONE)
-                        .muted(),
-                    spacer(),
-                    button("New link").action(|store: Store| store.create_invite()),
-                ))
-                .spacing(6.0)
-                .padding_with((4.0, 10.0)),
-                scroll(VStack::for_each(
-                    SignalCollection::new(store.members.clone()),
-                    move |row: MemberRow| {
-                        let r_kick = row.clone();
-                        let is_user =
-                            matches!(row.sender, enums::MessageSender::User(_));
-                        let uid = match &row.sender {
-                            enums::MessageSender::User(u) => u.user_id,
-                            _ => 0,
-                        };
-                        hstack((
-                            text(row.name.clone()).caption(),
-                            spacer(),
-                            text(row.status.clone()).caption().muted(),
-                        ))
-                        .spacing(6.0)
-                        .padding_with((4.0, 10.0))
-                        .on_tap(move |store: Store| {
-                            if is_user {
-                                store.open_profile(uid)
-                            }
-                        })
-                        .context_menu((
-                            "Kick".action(move |store: Store| {
-                                store.kick_member(&r_kick)
-                            }),
-                            "Block".action(move |store: Store| {
-                                store.toggle_block(&row, true)
-                            }),
-                        ))
-                    },
-                ))
-                .max_height(200.0),
-            ))
-            .background(Surface)
-        }),
-        // Scheduled messages panel (nav-toolbar clock icon).
-        when(scheduled_open, move || {
-            vstack((
-                hstack((
-                    text("Scheduled messages").caption().muted(),
-                    spacer(),
-                    icon_button(close(), "Close scheduled", |store: Store| {
-                        store.scheduled_open.set(false)
-                    }),
-                ))
-                .padding_with((4.0, 10.0)),
-                scroll(VStack::for_each(
-                    SignalCollection::new(scheduled_b.clone()),
-                    |row: MessageRow| {
-                        let mid = row.id;
-                        let label = if row.text.is_empty() {
-                            row.media_label.clone()
-                        } else {
-                            row.text.clone()
-                        };
-                        hstack((
-                            clock_outline()
-                                .tint(MutedForeground)
-                                .size(12.0, 12.0),
-                            text(label).caption().line_limit(ONE),
-                            spacer(),
-                            text(row.time.clone()).caption().muted(),
-                        ))
-                        .spacing(6.0)
-                        .padding_with((4.0, 10.0))
-                        .context_menu(("Send now".action(move |store: Store| {
-                            store.scheduled_send_now(mid)
-                        }),))
-                    },
-                ))
-                .max_height(150.0),
-            ))
-            .background(Surface)
-        }),
-        when(search_open, move || {
-            vstack((
-                hstack((
-                    field("Search in chat", &search_b)
-                        .prompt("Search in this chat")
-                        .hide_label(),
-                    icon_button(close(), "Close search", |store: Store| {
-                        store.chat_search_open.set(false);
-                        store.chat_search.set_from("");
-                        store.chat_search_results.set(Vec::new());
-                    }),
-                ))
-                .spacing(6.0)
-                .padding_with((6.0, 10.0)),
-                scroll(VStack::for_each(
-                    SignalCollection::new(search_results_b.clone()),
-                    move |row: MessageRow| {
-                        hstack((
-                            text(row.time.clone()).caption().muted(),
-                            text(row.text.clone()).caption().line_limit(ONE),
-                            spacer(),
-                        ))
-                        .spacing(6.0)
-                        .padding_with((4.0, 10.0))
-                        .on_tap(move |store: Store| store.jump_to_message(row.id))
-                    },
-                ))
-                .max_height(160.0),
-            ))
-            .background(Surface)
-        }),
-        when(reply_open, move || {
-            banner("Reply to", reply_label.clone(), |store: Store| {
-                store.reply_to.set(None)
-            })
-        }),
-        when(edit_open, || {
-            banner("Editing message", "", |store: Store| {
-                store.editing.set(None);
-                store.composer.set_from("");
-            })
-        }),
-        when(voice_rec, move || {
-            hstack((
-                text!("Recording… {voice_elapsed}")
-                    .caption()
-                    .foreground(Accent),
-                spacer(),
-                icon_button(close(), "Cancel recording", |store: Store| {
-                    store.cancel_voice_record()
-                }),
-                icon_button(send(), "Send voice note", |store: Store| {
-                    store.toggle_voice_record()
-                }),
-            ))
-            .padding_with((6.0, 12.0))
-            .background(Surface)
-        }),
-        when(has_capture_error, move || {
-            banner("Capture", text!("{capture_error_text}"), |store: Store| {
-                store.capture_error.set_from("")
-            })
-        }),
-        when(video_note_open, move || {
-            video_note_sheet(store_for_sheet.clone())
-        }),
-        when(has_attach, {
-            let first_url = store
-                .attach
-                .map(|v: Vec<Url>| {
-                    v.first()
-                        .map(|u| Url::from_file_path_str(Str::from(u.path().to_string())))
-                        .unwrap_or_else(|| Url::from_file_path_str(Str::from("")))
-                })
-;
-            let is_img = store
-                .attach
-                .map(|v: Vec<Url>| {
-                    v.first()
-                        .map(|u| {
-                            let p = u.path().to_string().to_lowercase();
-                            [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
-                                .iter()
-                                .any(|e| p.ends_with(e))
-                        })
-                        .unwrap_or(false)
-                })
-;
-            let fname = store
-                .attach
-                .map(|v: Vec<Url>| {
-                    v.first()
-                        .map(|u| {
-                            u.path()
-                                .to_string()
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or("file")
-                                .to_string()
-                        })
-                        .unwrap_or_default()
-                })
-;
-            let cap_b = store.attach_caption.clone();
+        when(info_docked, {
+            let st = store.clone();
+            let s2 = store_for_info.clone();
+            let cw = col_w.clone();
             move || {
-                let is_img = is_img.clone();
-                let first_url = first_url.clone();
-                let fname = fname.clone();
-                let cap_b = cap_b.clone();
                 hstack((
-                    when(is_img, {
-                        let u = first_url.clone();
-                        move || {
-                            Photo::new(u.clone())
-                                .width(40.0)
-                                .height(40.0)
-                                .clip(RoundedRectangle::new(0.15))
-                        }
-                    })
-                    .otherwise(|| paperclip().tint(Accent).size(24.0, 24.0)),
-                    vstack((
-                        text!("{f}", f = fname.clone())
-                            .caption()
-                            .line_limit(ONE)
-                            .foreground(Accent),
-                        field("Caption", &cap_b)
-                            .prompt("Add a caption…")
-                            .hide_label(),
-                    ))
-                    .spacing(2.0)
-                    .leading(),
-                    spacer(),
-                    icon_button(close(), "Remove", |store: Store| {
-                        store.attach.set(Vec::new());
-                        store.attach_caption.set_from("")
-                    }),
+                    Frame::new(chat_column(st.clone())).width(cw.clone()),
+                    Color::from(BorderColor).width(1.0),
+                    info_panel(s2.clone()),
                 ))
-                .spacing(8.0)
-                .padding_with((6.0, 12.0))
-                .background(Surface)
             }
         }),
-        when(stickers_open, move || {
-            let cells = store_cells.clone();
-            let emoji_tab2 = emoji_tab.clone();
-            let sticker_q = store.sticker_query.clone();
-            let packs_b = store.sticker_packs.clone();
-            let items_b = sticker_items.clone();
-            vstack((
-                // Picker tabs: Emoji grid is local; Stickers/GIFs query TDLib.
-                hstack((
-                    panel_tab_chip("Emoji", 0),
-                    panel_tab_chip("Stickers", 1),
-                    panel_tab_chip("GIFs", 2),
-                    spacer(),
+        when(info_overlay, {
+            let st = store.clone();
+            let s2 = store_for_info_overlay.clone();
+            let cw = col_w.clone();
+            move || {
+                zstack((
+                    Frame::new(chat_column(st.clone())).width(cw.clone()),
+                    hstack((
+                        spacer(),
+                        Color::from(BorderColor).width(1.0),
+                        info_panel(s2.clone()),
+                    )),
                 ))
-                .spacing(4.0)
-                .padding_with((2.0, 8.0)),
-                when(emoji_tab2, emoji_grid).otherwise(move || {
-                    let cells = cells.clone();
-                    vstack((
-                        hstack((
-                            field("Emoji search", &sticker_q)
-                                .prompt("😀 emoji")
-                                .hide_label(),
-                            icon_button(magnify(), "Search stickers", |store: Store| {
-                                store.search_stickers_by()
-                            }),
-                            {
-                                let q = sticker_q.clone();
-                                icon_button(file_gif_box(), "Search GIFs", move |store: Store| {
-                                    store.search_gifs_by(q.get().to_string())
-                                })
-                            },
-                        ))
-                        .spacing(6.0)
-                        .padding_with((2.0, 8.0)),
-                        scroll_horizontal(HStack::for_each(
-                            SignalCollection::new(packs_b.clone()),
-                            move |pack: PackRow| {
-                                let id = pack.id;
-                                text(pack.title.clone())
-                                    .caption()
-                                    .padding_with((2.0, 8.0))
-                                    .background(
-                                        RoundedRectangle::new(0.5).fill(SurfaceVariant),
-                                    )
-                                    .on_tap(move |store: Store| {
-                                        store.open_sticker_pack(id)
-                                    })
-                            },
-                        ))
-                        .max_height(28.0),
-                        scroll_horizontal(HStack::for_each(
-                            SignalCollection::new(items_b.clone()),
-                            move |item: StickerItem| {
-                                let cell_store = cells.clone();
-                                let thumb = item.thumb;
-                                let fallback: Str = if item.gif {
-                                    "GIF".into()
-                                } else {
-                                    item.emoji.clone()
-                                };
-                                let it = item.clone();
-                                let cell = if thumb != 0 {
-                                    let has = cell_store
-                                        .file_signal(thumb)
-                                        .map(|p: Str| !p.is_empty())
-                                        .distinct();
-                                    let url = cell_store.file_signal(thumb).map(Url::from_file_path_str);
-                                    when(has, move || {
-                                        Photo::new(url.clone()).max_width(72.0).max_height(72.0)
-                                    })
-                                    .otherwise(move || text(fallback.clone()).headline())
-                                    .anyview()
-                                } else {
-                                    text(fallback).headline().anyview()
-                                };
-                                cell.padding_with((6.0, 6.0))
-                                    .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
-                                    .on_tap(move |store: Store| store.send_sticker(it.clone()))
-                            },
-                        ))
-                        .max_height(96.0),
-                    ))
-                    .spacing(4.0)
-                }),
-            ))
+            }
         }),
-        hstack((
-            FilePicker::open(
-                label("Attach file").icon(paperclip()).icon_only(),
-                &store.attach,
-            ),
-            icon_button(emoticon(), "Stickers & GIFs", |store: Store| {
-                store.toggle_stickers()
-            }),
-            field("Message", &composer_b)
-                .prompt("Message")
-                .hide_label(),
-            // Search/members/scheduled live in the navigation toolbar
-            // (Telegram Desktop parity). A `Spacer` before the mic/send slot
-            // keeps it trailing-aligned.
-            spacer(),
-            when(composer_empty, || {
-                icon_button(microphone(), "Record voice note", |store: Store| {
-                    store.toggle_voice_record()
-                })
-            })
-            .otherwise(|| {
-                icon_button(send(), "Send", |store: Store| store.send()).context_menu((
-                    "Send silently".action(|store: Store| store.send_silent()),
-                    "Send in 1 hour".action(|store: Store| store.send_later(3600)),
-                ))
-            }),
-            icon_button(camera(), "Video note", |store: Store| {
-                store.open_video_note()
-            }),
-        ))
-        .spacing(4.0)
-        .padding_with((4.0, 6.0))
-        .background(Surface),
-        )),
-        when(store.info_open.clone(), move || info_panel(store_for_info.clone())),
-        )),
+        when(store.info_open.not(), {
+            let st = store.clone();
+            let cw = col_w.clone();
+            move || Frame::new(chat_column(st.clone())).width(cw.clone())
+        }),
         when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
     ))
     .on_change(&search_debounced, |q: Str, store: Store| store.run_chat_search(q))
-    .on_change(&composer_b, |_: Str, store: Store| store.typing_ping())
+    .on_change(&composer_b, |_: Str, store: Store| {
+        store.typing_ping();
+        store.maybe_load_members();
+    })
     .title(text!("{title}"))
     .navigation_subtitle(text!("{subtitle}"))
     .navigation_toolbar(
@@ -1364,19 +1482,24 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     // a non-stretching child to `min(ideal, available)`, so long text wraps
     // at the row's available width and short text stays tight. Media parts
     // carry their own fixed frames (320), which pins media bubbles.
-    let bubble = zstack((
-        zstack((content, reactions_overlay)).alignment(BottomLeading),
-        meta_overlay,
-    ))
-    .alignment(BottomTrailing)
-        .background(if row.highlighted {
+    // Static 480dp cap (Telegram Desktop's absolute bubble ceiling):
+    // `Frame::max_width` with a signal is only sampled at mount — see
+    // DOGFOOD "signal props on Frame don't re-propagate".
+    let bubble = Frame::new(
+        zstack((
+            zstack((content, reactions_overlay)).alignment(BottomLeading),
+            meta_overlay,
+        ))
+        .alignment(BottomTrailing),
+    )
+    .max_width(480.0)
+    .background(if row.highlighted {
             RoundedRectangle::new(0.18).fill(AccentContainer)
         } else if row.outgoing {
             RoundedRectangle::new(0.18).fill(Accent)
         } else {
             RoundedRectangle::new(0.18).fill(SurfaceVariant)
         });
-
     let bubble = bubble.foreground(if row.outgoing {
         Color::from(AccentForeground)
     } else {
@@ -1428,11 +1551,19 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     };
     if row.unread_divider {
         vstack((
-            hstack((
-                text("Unread messages").caption().bold().foreground(Accent),
-                Divider,
+            zstack((
+                Color::from(BorderColor).height(1.0),
+                hstack((
+                    spacer(),
+                    text("Unread messages")
+                        .caption()
+                        .bold()
+                        .foreground(Accent)
+                        .padding_with((0.0, 6.0))
+                        .background(Surface),
+                    spacer(),
+                )),
             ))
-            .spacing(6.0)
             .padding_with((2.0, 4.0)),
             placed,
         ))

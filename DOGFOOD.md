@@ -616,3 +616,124 @@ The production path hits the same code (`FilePicker` on-pick →
 passes because the testing runtime drives the same views without the
 real renderer's watcher topology. Left as-is per dogfooding rules —
 not restructured around it.
+
+---
+
+## r11-3: `#[waterui::test]` cannot reproduce nami#23 — testing-runtime gap
+
+**Versions:** waterui-testing 0.5.1 (patched to waterui dev `b838d73`),
+nami-core 0.3.3, hydrolysis dev `47b1081`.
+
+The minimal crash topology — a `when` gated on signal A (derived from
+one binding) whose body builds a second `when` on signal B (same
+binding), toggled false post-mount — **passes** in the semantic
+testing runtime while the identical shape panics the hydrolysis
+renderer:
+
+```rust
+// tests::nami_cancel_reentrancy_minimal — passes (green, no panic)
+let b = waterui::reactive::binding(Vec::<Str>::new());
+let outer = b.map(|v: Vec<Str>| !v.is_empty()).distinct();
+let inner_src = b.clone();
+ui.mount(move || {
+    let s2 = inner_src.clone();
+    when(outer.clone(), move || {
+        let inner = s2.map(|v: Vec<Str>| v.len() > 1).distinct();
+        when(inner, || text("many")).otherwise(|| text("one"))
+    })
+});
+b.set(vec![Str::from("a")]);  // mounts B's watcher under A's watcher
+b.set(Vec::new());            // A toggle → cancel → nested guard drop
+```
+
+**What differs:** in `hydrolysis` the `when` node's teardown cancels its
+`WatcherManager` subscription while `cancel` still holds
+`inner.borrow_mut()`, and the removed watcher's `Rc` transitively drops
+the inner `WatcherManagerGuard` → re-entrant `borrow_mut` panic. The
+SemanticApp in waterui-testing drives the same views and the same nami
+signals but does not retain the child subscription's guard inside the
+outer cancel scope — teardown ordering differs — so the re-entrant
+cancel is invisible to `#[waterui::test]`. Symptom: the attach-preview
+test and this minimal test both go green while the real renderer panics
+(`RefCell already borrowed` at `nami-core-0.3.3/src/watcher.rs:357`).
+Result: nami#23 needs a runtime-level repro or a renderer-level harness;
+`#[waterui::test]` alone cannot guard against this class of watcher
+re-entrancy.
+
+---
+
+## r11-2b: `Frame` signal props sampled at mount — no re-propagation
+
+**Version:** waterui dev `b838d73` (facade), hydrolysis `47b1081`.
+
+`Frame::new(view).max_width(sig)` where `sig` is a
+`Computed<f32>` derived from `Window.frame` (`win_frame.map(...)`) is
+applied with the signal's **initial** value only. `Window.frame` reads
+`Rect::from_size(0,0)` until the runner writes real geometry during
+mount — so the Frame's max latched at the 0-width-derived value
+(`(0-340).max(240)*0.65 ≈ 140px`) for the rest of the session, while a
+`when` gate driven by the same `win_frame` correctly re-rendered on the
+same signal change (panel docked at 1400px). Symptom: every bubble
+wrapped at ~135px under a 1400px window; expected cap ≈ 480px once the
+frame signal emitted the real width. If signal props on Frame are meant
+to be live, the Frame realization must subscribe and re-measure on
+change; today it samples once. Workaround used: static 480dp cap
+(Telegram's absolute bubble ceiling makes the precision unnecessary).
+
+---
+
+## r11-4a: `when(a).otherwise(b)` (WhenComplete) panics the real renderer at mount — nami#23 again
+
+**Version:** waterui dev `b838d73`, hydrolysis `47b1081`, nami-core 0.3.3.
+
+```rust
+let docked = open.zip(&win_frame).map(|(o, f)| o && f.width() >= 1120.0).distinct();
+when(docked, || hstack((chat_column(), info_panel())))
+    .otherwise(|| zstack((chat_column(), overlay_panel())))
+```
+
+**Observed:** both the winit renderer (`water run` under Xvfb) and `water mcp`
+(SemanticRuntime) panic **at mount** on every page containing this node —
+`RefCell already borrowed` at `nami-core-0.3.3/src/watcher.rs:357`.
+Backtrace: the `NavigationView` destination closure drops a `WhenComplete`
+whose `WatchedDynamic` teardown cascades `Option<AnyView> → FixedContainer →
+Computed<StyledStr> → (Box<WatcherGuard>, Binding<Screen>) →
+WatcherManagerGuard<Rect>::drop` — a second `cancel` entering while the first
+still holds `borrow_mut`. Two mutually-exclusive plain `when`s on the same
+signals mount and run fine on both renderers — the crash is specific to
+`WhenComplete`'s shape, not to watching the zip'd `Binding<Rect>`.
+`#[waterui::test]` mounting the same tree passes (same testing-runtime gap as
+r11-3). App now uses two exclusive `when` branches.
+
+---
+
+## r11-4b: SemanticRuntime layout diverges from the winit renderer and from SemanticApp
+
+**Version:** waterui dev `b838d73`, hydrolysis `47b1081`.
+
+Three divergences on the identical view tree, all reproducible via
+`WATERGRAM_DEMO=1 WATERGRAM_DEMO_PAGE=info water mcp`:
+
+1. **`Window.frame` is never driven.** The SemanticRuntime runner builds its
+   own `Window` and never writes the app-facing frame binding, so
+   `win.frame` stays at whatever `app()` seeded (here 1280×800 or the
+   `WATERGRAM_WIN_SIZE` demo hook) regardless of `--viewport`. Signals
+   derived from it (`info_docked` at ≥1120) can never turn true under mcp
+   without the seed. Expected: the runner seeds/drives `Window.frame` from
+   the viewport like the winit runner does on `Moved`/`Resized`.
+2. **`when`-materialized sibling does not shrink the flex sibling.** With
+   `hstack((chat_column, when(docked, panel)))` and `docked=true` at mount,
+   the winit renderer and SemanticApp place the column at 780 and the panel
+   at 1120 (bounds: list `(340,160,780,556)`); SemanticRuntime gives the
+   column `(340,160,1060,556)` — its measured-before-materialize width —
+   and overlays the panel on top of it. App-side mitigation in place: the
+   column is a `Frame` whose `width` is a `Computed` (`pane − 281 · docked`),
+   so all three renderers agree; the divergence itself stands.
+3. **Text does not wrap inside a container `max_width` under SemanticRuntime.**
+   `Frame::new(bubble).max_width(480)` wrapping `text()` that exceeds the
+   cap: winit renderer and SemanticApp wrap the text (bounds e.g.
+   `118.8×93.75` ≈ 5 lines at cap 120); SemanticRuntime renders one line
+   clipped at the cap edge (visible in r11 mcp screenshots at
+   `WATERGRAM_WIN_SIZE=1400x900`).
+
+---

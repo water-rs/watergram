@@ -17,7 +17,7 @@ use tdlib_rs::{enums, functions, types};
 use waterui::color::Srgb;
 use waterui::form::secure::Secure;
 use waterui::text::styled::{Style, StyledStr};
-use waterui::layout::ScrollController;
+use waterui::layout::{Rect, ScrollController, Size};
 use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::task::spawn_local;
@@ -374,10 +374,15 @@ pub struct Store {
     pub shared_media: Binding<Vec<SharedMediaRow>>,
     /// Caption typed in the attachment preview strip.
     pub attach_caption: Binding<Str>,
+    /// Live window frame (cloned from the `Window`), used to switch the
+    /// info panel between docked and overlay below a width threshold.
+    pub win_frame: Binding<Rect>,
     /// Forward without author attribution (`forwardMessages send_copy`).
     pub forward_noattr: Binding<bool>,
     /// Batch of message ids awaiting a forward target.
     pub forward_ids: Binding<Vec<i64>>,
+    /// Optional comment sent as a follow-up text message after a forward.
+    pub forward_comment: Binding<Str>,
     /// Message multi-selection (batch forward/delete).
     pub selected_msgs: Binding<Vec<i64>>,
     /// Folder editor sheet state.
@@ -644,6 +649,8 @@ pub struct MemberRow {
     pub status: Str,
     /// TDLib sender id for admin actions (kick).
     pub sender: enums::MessageSender,
+    /// Active @username for @mention completion (empty for chat senders).
+    pub username: Str,
 }
 
 /// Collapse a TDLib privacy rule list into one audience label. The rule
@@ -781,9 +788,11 @@ impl Store {
             shared_media: Binding::<Vec<SharedMediaRow>>::default(),
             // Attachment preview caption.
             attach_caption: Binding::<Str>::default(),
+            win_frame: Binding::container(Rect::from_size(Size::zero())),
             // Forward "without attribution" (forwardMessages send_copy).
             forward_noattr: Binding::bool(false),
             forward_ids: Binding::<Vec<i64>>::default(),
+            forward_comment: Binding::container(Str::from("")),
             // Message multi-selection (Select → batch forward/delete).
             selected_msgs: Binding::<Vec<i64>>::default(),
             folder_open: Binding::bool(false),
@@ -940,8 +949,8 @@ impl Store {
             PrivacyRow { setting: "Profile photos".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowProfilePhoto },
         ]);
         self.contacts.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }) },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }) },
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into() },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into() },
         ]);
         self.twofa.set_from("enabled");
         self.sticker_packs.set(vec![
@@ -2149,15 +2158,37 @@ impl Store {
                 (from, vec![msg_id])
             };
             let send_copy = self.forward_noattr.get();
+            let comment = self.forward_comment.get();
             self.forward_message.set(None);
             self.forward_ids.set(Vec::new());
             self.forward_noattr.set(false);
+            self.forward_comment.set_from("");
             let client = self.client_id.get();
             spawn_local(async move {
                 let _ = functions::forward_messages(
                     chat_id, None, from, msg_ids, None, send_copy, false, client,
                 )
                 .await;
+                if !comment.is_empty() {
+                    let _ = functions::send_message(
+                        chat_id,
+                        None,
+                        None,
+                        None,
+                        enums::InputMessageContent::InputMessageText(
+                            types::InputMessageText {
+                                text: types::FormattedText {
+                                    text: comment.into(),
+                                    entities: Vec::new(),
+                                },
+                                link_preview_options: None,
+                                clear_draft: false,
+                            },
+                        ),
+                        client,
+                    )
+                    .await;
+                }
             })
             .detach();
             return;
@@ -2179,6 +2210,7 @@ impl Store {
         self.chat_search_open.set(false);
         self.chat_search.set_from("");
         self.chat_search_results.set(Vec::new());
+        self.members.set(Vec::new());
         if prev != 0 {
             let cur = self.composer.get();
             if cur.is_empty() {
@@ -2435,6 +2467,7 @@ impl Store {
         }
         if query.is_empty() {
             self.chat_search_results.set(Vec::new());
+        self.members.set(Vec::new());
             return;
         }
         let client = self.client_id.get();
@@ -2641,6 +2674,7 @@ impl Store {
                         name: if name.is_empty() { "Blocked".into() } else { name.into() },
                         status: "".into(),
                         sender: sender.clone(),
+                        username: "".into(),
                     });
                 }
                 store.blocked.set(rows);
@@ -3562,6 +3596,52 @@ impl Store {
         }
     }
 
+    /// Extract the active @mention token: the run of word chars after the
+    /// last '@' when that '@' starts a word (at text start or after
+    /// whitespace). Bare "@" yields an empty token (show all members).
+    pub fn mention_token(s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        let mut i = b.len();
+        while i > 0 {
+            let c = b[i - 1];
+            if c == b'@' {
+                return if i == 1 || b[i - 2].is_ascii_whitespace() {
+                    Some(s[i..].to_string())
+                } else {
+                    None
+                };
+            }
+            if !(c.is_ascii_alphanumeric() || c == b'_') {
+                return None;
+            }
+            i -= 1;
+        }
+        None
+    }
+
+    /// Replace the trailing @token in the composer with `@username `.
+    pub fn apply_mention(&self, username: &str) {
+        let cur = self.composer.get().to_string();
+        if let Some(tok) = Self::mention_token(&cur) {
+            let at = cur.len() - tok.len() - 1;
+            let mut s = String::with_capacity(at + username.len() + 2);
+            s.push_str(&cur[..at]);
+            s.push('@');
+            s.push_str(username.trim_start_matches('@'));
+            s.push(' ');
+            self.composer.set_from(s);
+        }
+    }
+
+    /// Lazily populate `members` when the composer enters @mention context.
+    pub fn maybe_load_members(&self) {
+        if Self::mention_token(&self.composer.get()).is_some()
+            && self.members.get().is_empty()
+        {
+            self.load_members();
+        }
+    }
+
     /// Move a chat between Main and Archive.
     pub fn toggle_archive(&self, chat_id: i64) {
         let archived = self
@@ -3604,20 +3684,35 @@ impl Store {
                     .set_from(format!("{} members", m.total_count));
                 let mut rows = Vec::new();
                 for member in m.members {
-                    let (key, name, sender) = match &member.member_id {
+                    let (key, name, sender, username) = match &member.member_id {
                         enums::MessageSender::User(u) => {
                             let uid = u.user_id;
-                            let name = store
-                                .users
-                                .borrow()
-                                .get(&uid)
+                            let cached = store.users.borrow().get(&uid).cloned();
+                            let user = match cached {
+                                Some(u) => Some(u),
+                                None => match functions::get_user(uid, client).await {
+                                    Ok(enums::User::User(u)) => {
+                                        store.users.borrow_mut().insert(uid, u.clone());
+                                        Some(u)
+                                    }
+                                    _ => None,
+                                },
+                            };
+                            let name = user
+                                .as_ref()
                                 .map(|u| {
                                     format!("{} {}", u.first_name, u.last_name)
                                         .trim()
                                         .to_string()
                                 })
+                                .filter(|n| !n.is_empty())
                                 .unwrap_or_else(|| format!("User {uid}"));
-                            (uid, name, member.member_id.clone())
+                            let uname = user
+                                .as_ref()
+                                .and_then(|u| u.usernames.as_ref())
+                                .and_then(|us| us.active_usernames.first().cloned())
+                                .unwrap_or_default();
+                            (uid, name, member.member_id.clone(), uname)
                         }
                         enums::MessageSender::Chat(c) => {
                             let title = store
@@ -3626,7 +3721,7 @@ impl Store {
                                 .get(&c.chat_id)
                                 .map(|ch| ch.title.clone())
                                 .unwrap_or_else(|| format!("Chat {}", c.chat_id));
-                            (c.chat_id, title, member.member_id.clone())
+                            (c.chat_id, title, member.member_id.clone(), String::new())
                         }
                     };
                     let status = match &member.status {
@@ -3642,6 +3737,7 @@ impl Store {
                         name: name.into(),
                         status: status.into(),
                         sender,
+                        username: username.into(),
                     });
                 }
                 store.members.set(rows);
@@ -3676,10 +3772,11 @@ impl Store {
                         rows.push(MemberRow {
                             key: uid,
                             name: if name.is_empty() { uname.clone().into() } else { name.into() },
-                            status: uname.into(),
+                            status: uname.clone().into(),
                             sender: enums::MessageSender::User(types::MessageSenderUser {
                                 user_id: uid,
                             }),
+                            username: uname.trim_start_matches('@').to_string().into(),
                         });
                     }
                 }
