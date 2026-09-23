@@ -22,11 +22,12 @@ use waterui::theme::Theme;
 /// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
 /// connection — for rendering checks on device-less VMs.
 /// `WATERGRAM_DEMO_PAGE` picks the page: `list` (default), `chat`,
-/// `settings`.
+/// `settings`, `emoji`.
 fn demo_page() -> Option<&'static str> {
     std::env::var("WATERGRAM_DEMO_PAGE").ok().map(|p| match p.as_str() {
         "chat" => "chat",
         "settings" => "settings",
+        "emoji" => "emoji",
         _ => "list",
     })
 }
@@ -41,6 +42,10 @@ fn main() -> impl View {
             match page {
                 Some("chat") => store.selected.set(Some(1)),
                 Some("settings") => store.nav.push(state::Route::Settings),
+                Some("emoji") => {
+                    store.selected.set(Some(1));
+                    store.stickers_open.set(true);
+                }
                 _ => {}
             }
             std::future::pending::<()>().await;
@@ -84,6 +89,10 @@ pub fn app(mut env: Environment) -> App {
                     match demo_page() {
                         Some("chat") => s.selected.set(Some(1)),
                         Some("settings") => s.nav.push(state::Route::Settings),
+                        Some("emoji") => {
+                            s.selected.set(Some(1));
+                            s.stickers_open.set(true);
+                        }
                         _ => {}
                     }
                     std::future::pending::<()>().await;
@@ -203,8 +212,10 @@ mod tests {
             chat(2, "Bob", "hi there", 50),
         ]);
         let mut app = ui.mount(move || views::main_screen(store.clone()).state(&store));
-        app.query().label("Alice").assert_exists();
-        app.query().label("Bob").assert_exists();
+        // Chat rows are List items: the row's a11y label folds its
+        // children ("Alice hello 14:32") — match via contains.
+        app.query().label_contains("Alice").assert_exists();
+        app.query().label_contains("Bob").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -216,8 +227,8 @@ mod tests {
         ]);
         store.search.set("ali".into());
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
-        app.query().label("Alice").assert_exists();
-        app.query().label("Bob").assert_not_exists();
+        app.query().label_contains("Alice").assert_exists();
+        app.query().label_contains("Bob").assert_not_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -425,7 +436,8 @@ mod tests {
         c.marked_unread = true;
         store.chats.set(vec![c]);
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
-        app.query().label("●").assert_exists();
+        // The unread dot folds into the list item's a11y label.
+        app.query().label_contains("●").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]

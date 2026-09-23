@@ -6,7 +6,7 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use waterui::component::lazy::Lazy;
+
 use waterui::component::list::{List, ListItem};
 use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
@@ -27,7 +27,6 @@ use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Background, Error, Foreground,
     MutedForeground, Surface, SurfaceVariant,
 };
-use waterui::views::ForEach;
 use waterui::widget::condition::when;
 use waterui_barcode::Barcode;
 use tdlib_rs::enums;
@@ -324,10 +323,14 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             }),
         ))
         .padding_with((6.0, 12.0)),
+        // Collapsed `when` children would each still eat a vstack spacing
+        // slot; keep the optional sections in one zero-spacing stack so a
+        // hidden panel costs no gap.
+        vstack((
         when(store.accounts_open.clone(), move || {
             let rows = store.accounts.clone();
             vstack((
-                Lazy::vstack(ForEach::new(
+                VStack::for_each(
                     SignalCollection::new(rows.clone()),
                     move |acc: AccountRow| {
                         let id = acc.id;
@@ -335,7 +338,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                             .padding_with((4.0, 12.0))
                             .on_tap(move |store: Store| store.switch_account(id))
                     },
-                )),
+                ),
                 hstack((
                     plus().tint(Accent).size(14.0, 14.0),
                     text("Add account").caption().foreground(Accent),
@@ -378,15 +381,16 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         when(has_folders, move || {
             let folder_edit = store.folder_open.clone();
             // Chip metrics: caption line ~17dp + 2×3dp vertical chip padding.
-            // The row frame takes exactly the chip height; ScrollView is
-            // `StretchAxis::Both` per layout-spec §3, so without this fixed
-            // content height the horizontal scroller would share the sidebar
-            // surplus with the chat List.
+            // ScrollView reports StretchAxis::Both unconditionally
+            // (raw_view!, axis not consulted — see DOGFOOD), and View has no
+            // propose-None/fixed-size-axis modifier, so a literal content
+            // height is the only way to stop the horizontal scroller taking
+            // the sidebar surplus. Breaks under font scaling — filed as a gap.
             let chip_pad_v = 3.0_f32;
             let chip_row_h = 17.0 + 2.0 * chip_pad_v;
             vstack((
                 hstack((
-                    scroll_horizontal(Lazy::hstack(ForEach::new(
+                    scroll_horizontal(HStack::for_each(
                         SignalCollection::new(folder_tabs.clone()),
                         move |tab: FolderRow| {
                             let label = tab.title.clone();
@@ -424,7 +428,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 chip.anyview()
                             }
                         },
-                    ))),
+                    )),
                     // Same chip metrics as the tab chips so the row stays at
                     // chip height (the 40dp icon chip would stretch the row).
                     folder_plus()
@@ -462,66 +466,63 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 }
             ))
         }),
-        scroll(
-            vstack((
-                Lazy::vstack(ForEach::new(filtered, move |row: ChatRow| {
-                    chat_row(rows_store.clone(), row)
-                })),
-                when(show_results, || {
-                    vstack((
-                        Divider,
-                        text("Global search results")
-                            .caption()
-                            .muted()
-                            .padding_with((4.0, 12.0)),
-                    ))
-                    .leading()
-                }),
-                Lazy::vstack(ForEach::new(server_results, move |row: ChatRow| {
-                    chat_row(res_store.clone(), row)
-                })),
-            ))
-            .leading(),
-        ),
+        ))
+        .spacing(0.0),
+        // `List` reports StretchAxis::Both and fills the leftover region;
+        // a `Lazy` stack inside `scroll(vstack)` reports None and is sized to
+        // its realized rows, which clipped the list mid-pane (see DOGFOOD).
+        {
+            let filtered_else = filtered.clone();
+            let rows_else = rows_store.clone();
+            when(show_results, move || {
+                let local_store = rows_store.clone();
+                let remote_store = res_store.clone();
+                vstack((
+                    List::for_each(filtered.clone(), move |row: ChatRow| {
+                        ListItem::new(chat_row(local_store.clone(), row))
+                    }),
+                    Divider,
+                    text("Global search results")
+                        .caption()
+                        .muted()
+                        .padding_with((4.0, 12.0)),
+                    List::for_each(server_results.clone(), move |row: ChatRow| {
+                        ListItem::new(chat_row(remote_store.clone(), row))
+                    }),
+                ))
+                .leading()
+            })
+            .otherwise(move || {
+                let rows_l = rows_else.clone();
+                List::for_each(filtered_else.clone(), move |row: ChatRow| {
+                    ListItem::new(chat_row(rows_l.clone(), row))
+                })
+            })
+        },
     ))
     .on_change(&debounced, |q: Str, store: Store| store.run_search(q))
 }
 
-// A `button()` carries a ~58-72dp minimum box and measured 72dp wide in the
-// semantic tree; five of them plus a label overflow the 340dp sidebar and the
-// 460dp composer. Compose a 40dp icon chip from primitives instead (M3 icon
-// button: 40dp state layer in a 48dp target).
-fn icon_chip(icon: impl View + Clone + 'static) -> impl View {
-    icon.foreground(Accent)
-        .size(20.0, 20.0)
-        .padding_with((10.0_f32, 10.0_f32))
-        .size(40.0, 40.0)
-}
-
-fn a11y_icon_button(view: impl View + 'static, name: &'static str) -> impl View {
-    view.a11y_label(name)
-        .a11y_role(AccessibilityRole::Button)
-        .a11y_children(AccessibilityChildren::ExcludeDescendants)
-}
-
+// M3 icon button: an icon-only `Label` keeps `name` as the semantic identity
+// (a11y) while rendering only the icon. Until water-rs/hydrolysis#115 gives
+// icon-only buttons the 40dp icon-button box they keep the generic ~58-72dp
+// minimum; measured widths are in DOGFOOD.
 pub(crate) fn icon_button<F>(icon: impl View + Clone + 'static, name: &'static str, on_tap: F) -> impl View
 where
     F: Fn(Store) + 'static,
 {
-    a11y_icon_button(
-        icon_chip(icon).on_tap(move |store: Store| on_tap(store)),
-        name,
-    )
+    button(label(name).icon(icon).icon_only())
+        .style(ButtonStyle::Plain)
+        .action(move |store: Store| on_tap(store))
 }
 
 pub(crate) fn icon_button_nav<F>(icon: impl View + Clone + 'static, name: &'static str, on_tap: F) -> impl View
 where
     F: Fn(Navigator<Route>) + 'static,
 {
-    a11y_icon_button(
-        icon_chip(icon).on_tap(move |nav: Navigator<Route>| on_tap(nav)),
-        name,
-    )
+    button(label(name).icon(icon).icon_only())
+        .style(ButtonStyle::Plain)
+        .action(move |nav: Navigator<Route>| on_tap(nav))
 }
 
 pub(crate) fn kind_icon(kind: &str) -> impl View {
@@ -835,7 +836,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 ))
                 .spacing(6.0)
                 .padding_with((4.0, 10.0)),
-                scroll(Lazy::vstack(ForEach::new(
+                scroll(VStack::for_each(
                     SignalCollection::new(store.members.clone()),
                     move |row: MemberRow| {
                         let r_kick = row.clone();
@@ -866,7 +867,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                             }),
                         ))
                     },
-                )))
+                ))
                 .max_height(200.0),
             ))
             .background(Surface)
@@ -882,7 +883,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     }),
                 ))
                 .padding_with((4.0, 10.0)),
-                scroll(Lazy::vstack(ForEach::new(
+                scroll(VStack::for_each(
                     SignalCollection::new(scheduled_b.clone()),
                     |row: MessageRow| {
                         let mid = row.id;
@@ -905,7 +906,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                             store.scheduled_send_now(mid)
                         }),))
                     },
-                )))
+                ))
                 .max_height(150.0),
             ))
             .background(Surface)
@@ -924,7 +925,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 ))
                 .spacing(6.0)
                 .padding_with((6.0, 10.0)),
-                scroll(Lazy::vstack(ForEach::new(
+                scroll(VStack::for_each(
                     SignalCollection::new(search_results_b.clone()),
                     move |row: MessageRow| {
                         hstack((
@@ -936,7 +937,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         .padding_with((4.0, 10.0))
                         .on_tap(move |store: Store| store.jump_to_message(row.id))
                     },
-                )))
+                ))
                 .max_height(160.0),
             ))
             .background(Surface)
@@ -1025,7 +1026,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         ))
                         .spacing(6.0)
                         .padding_with((2.0, 8.0)),
-                        scroll_horizontal(Lazy::hstack(ForEach::new(
+                        scroll_horizontal(HStack::for_each(
                             SignalCollection::new(packs_b.clone()),
                             move |pack: PackRow| {
                                 let id = pack.id;
@@ -1039,9 +1040,9 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                                         store.open_sticker_pack(id)
                                     })
                             },
-                        )))
+                        ))
                         .max_height(28.0),
-                        scroll_horizontal(Lazy::hstack(ForEach::new(
+                        scroll_horizontal(HStack::for_each(
                             SignalCollection::new(items_b.clone()),
                             move |item: StickerItem| {
                                 let cell_store = cells.clone();
@@ -1070,7 +1071,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                                     .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
                                     .on_tap(move |store: Store| store.send_sticker(it.clone()))
                             },
-                        )))
+                        ))
                         .max_height(96.0),
                     ))
                     .spacing(4.0)
@@ -1078,8 +1079,10 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             ))
         }),
         hstack((
-            FilePicker::open(label("Attach file").icon(paperclip()), &store.attach)
-                .label_style(LabelDisplayMode::IconOnly),
+            FilePicker::open(
+                label("Attach file").icon(paperclip()).icon_only(),
+                &store.attach,
+            ),
             icon_button(emoticon(), "Stickers & GIFs", |store: Store| {
                 store.toggle_stickers()
             }),
@@ -1486,9 +1489,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         )),
         vstack((
             text("Edit profile").caption().muted(),
-            // Narrow pane: the M3 field's fixed 280 dp minimum cannot share
-            // an hstack below ~560 dp (see DOGFOOD), so names stack vertically.
-            vstack((
+            // hydrolysis#107 landed: a text field answers the proposed width,
+            // so first/last name share one row like Telegram Desktop.
+            hstack((
                 field("First name", &store.edit_first),
                 field("Last name", &store.edit_last),
             ))
@@ -1503,7 +1506,10 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 button("Save").action(|store: Store| store.save_profile()),
             )),
             hstack((
-                FilePicker::open(label("Choose photo").icon(image_outline()), &store.avatar_pick),
+                FilePicker::open(
+                    label("Choose photo").icon(image_outline()).icon_only(),
+                    &store.avatar_pick,
+                ),
                 button("Set avatar").action(|store: Store| store.set_avatar()),
             ))
             .spacing(8.0),
@@ -1518,7 +1524,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 text!("{twofa}", twofa = store.twofa.clone()).muted(),
             ))
             .on_tap(|store: Store| store.open_twofa()),
-            Lazy::vstack(ForEach::new(
+            VStack::for_each(
                 SignalCollection::new(store.privacy_rows.clone()),
                 move |row: PrivacyRow| {
                     let k = row.key.clone();
@@ -1549,7 +1555,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                         }),
                     ))
                 },
-            )),
+            ),
             vstack((
                 text("Notifications").caption().muted(),
                 toggle("Private chats", &store.notif_private),
@@ -1567,7 +1573,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             )),
             vstack((
                 text("Blocked users").caption().muted(),
-                Lazy::vstack(ForEach::new(
+                VStack::for_each(
                     SignalCollection::new(store.blocked.clone()),
                     |row: MemberRow| {
                         hstack((
@@ -1578,11 +1584,11 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                         .padding_with((4.0, 0.0))
                         .on_tap(move |store: Store| store.unblock_sender(&row))
                     },
-                )),
+                ),
             ))
             .spacing(4.0)
             .leading(),
-            Lazy::vstack(ForEach::new(
+            VStack::for_each(
                 SignalCollection::new(store.sessions.clone()),
                 move |row: SessionRow| {
                     let is_current = row.current;
@@ -1601,7 +1607,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                         store.terminate_session_by_id(row.id)
                     }),))
                 },
-            )),
+            ),
         ))
         .spacing(10.0)
         .leading(),
@@ -1631,6 +1637,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         button("Log out").action(|store: Store| store.logout()),
     ))
     .spacing(10.0)
+    .leading()
     .padding_with((12.0, 16.0)))
     .task({
         let store = store.clone();
@@ -1699,7 +1706,7 @@ fn privacy_picker_view(store: Store) -> impl View {
                 store.privacy_picker_open.set(false)
             }),
         )),
-        Lazy::vstack(ForEach::new(
+        scroll(VStack::for_each(
             SignalCollection::new(store.contacts.clone()),
             |row: MemberRow| {
                 let uid = row.key;
@@ -1812,7 +1819,7 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
             .spacing(8.0)
             .leading()
         }),
-        Lazy::vstack(ForEach::new(
+        VStack::for_each(
             SignalCollection::new(store.contacts.clone()),
             move |row: MemberRow| {
                 hstack((
@@ -1832,7 +1839,7 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
                     }),
                 ))
             },
-        )),
+        ),
     ))
     .spacing(10.0)
     .padding_with((12.0, 16.0)))

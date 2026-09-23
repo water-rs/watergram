@@ -379,18 +379,27 @@ outgoing `(308.3, 311.6, 479.7, 76.8)` — timestamps/reactions are zstack
 overlays at the bubble's trailing/leading bottom so they cannot make the
 bubble greedy.
 
-### API gap: no compact icon-button semantic
+### API gap: no compact icon-button semantic → water-rs/hydrolysis#115
 
 `button()` carries `BUTTON_MIN_WIDTH = 58` (hydrolysis-m3
-`theme/dimensions.rs`) and an icon-only `button` measured ~72 wide in
-practice. There is no waterui-level semantic for the ~40-48 dp icon
-button every chat/composer toolbar needs; hydrolysis-m3 ships an
-`icon_button` helper but it lives in the backend crate, so a
-backend-agnostic app cannot use it. Watergram composes a 40 dp icon chip
-from primitives (`icon.size(20).padding(10).size(40).on_tap` + a11y
-label/role/children) — without it, both the sidebar toolbar (measured
-~354 > 340 → last button's icon rendered clipped inside the detail pane)
-and the composer (measured ~784 > 460) overflow.
+`theme/dimensions.rs`); an icon-only `button(label(t).icon(i).icon_only())`
+measures **72 dp wide** (live MCP bounds `(12,134,72,40)` per button).
+There is no waterui-level semantic for the ~40-48 dp icon button every
+chat/composer toolbar needs — filed as water-rs/hydrolysis#115 (an
+icon-only Button should get M3 icon-button size).
+
+Measured widths until #115 lands (1000×700 window): sidebar toolbar —
+`New chat (12,134,72,40)`, `Archive (94,134,72,40)`,
+`Accounts (176,134,72,40)`, `Settings (321.7,134,72,40)` → toolbar
+content ends at **x=393.7 > 340 sidebar width** (clipped); the "Online"
+label lands inside at 268. Chat toolbar — `Search in chat (780,12,72,40)`,
+`Members (852,12,72,40)`, `Scheduled messages (924,12,72,40)` → ends at
+996 ≈ 1000-pane edge. Composer — `Attach file (346,648,72,40)`,
+`Stickers & GIFs` same box. Watergram uses the semantic
+`label(title).icon(icon).icon_only()` form everywhere (incl. the
+`FilePicker` trigger, which wraps `Button::new` and inherits the same
+box — measured `(346,648,72,40)`); nothing is hand-rolled any more, the
+overflow stands until #115.
 
 **FilePicker has the same box.** `FilePicker::open(label, …)` wraps
 `Button::new`, so its trigger inherits the ~72 dp box with no way to
@@ -402,10 +411,14 @@ ideal width, gets centered in the offered space, and every sibling
 shifts left — in the 460 dp probe the pinned-bar icon lands at
 `x = -10` and `Attach` at `x = -16`, clipped at the pane edge (the
 "stray clipped icon" from r7 was this exact mechanism, at ~640 dp
-composer width with the old 72 dp buttons). After the icon-chip change
-the row fits at pane ≥ ~500 dp — verified `(12, 70)` for the pin icon
-at 660 dp — but the floor cannot shrink below ~500 until #107 lands
-and FilePicker accepts a custom trigger view.
+composer width with the old 72 dp buttons). Post-#107 the composer fits
+its 660 dp pane — pin icon `(352, 70)`, `Attach file (346,648,72,40)`,
+all composer children inside `(340..1000)` — but panes narrower than the
+button-row's intrinsic width still shift left until #115 lands
+and FilePicker accepts a custom trigger view. **Update: #107 has
+landed on hydrolysis dev (PR #112) — the TextField now answers the
+proposed width; first/last name are back on one row.** The remaining
+width floor is the icon-button box (#115).
 
 ### `EdgeInsets` tuple order is `(vertical, horizontal)` — ergonomics trap
 
@@ -426,3 +439,86 @@ Installing `fonts-noto-color-emoji` on the VM fixed all tofu — emoji
 now rasterize correctly in bubbles/icons. The earlier entry stands as
 an environment note only (headless VMs need the font installed).
 
+
+## Layout findings (r9)
+
+### `Lazy` inside `scroll(vstack)` clips to realized rows — app misuse, spec-consistent
+
+Sidebar `scroll(vstack((Lazy::vstack(chat_rows), Lazy::vstack(results))))`
+measured: outer `scroll_view (0,261,340,439)`, inner scroll_view
+`(0,261,340,209.5)` holding 4 chat rows (avatars y267/333/399/465, fourth
+clipped), second inner `(0,490.5,340,209.5)`; pointer `scroll` was a
+no-op (identical tree). Per layout-spec §3 a lazy container reports
+`None` on its axis → measured to its realized rows (~209.5); a second
+same-axis scroller inside `scroll()` is app misuse, not a framework
+clip bug. Fix: `List` (StretchAxis::Both) for fill regions,
+`VStack::for_each` / `HStack::for_each` for eager rows inside scroll
+content. Post-fix: single `list (0,241,340,459)`, 7 rows to window
+bottom; chat `list (340,160,660,365.9)` to the composer. Worth a
+note in the Lazy/List docs: the failure mode (silent mid-pane clip,
+dead scroll input) is not obvious.
+
+### Collapsed `when()` children still consume vstack spacing
+
+A `when(cond)` child that renders nothing still occupies a child slot —
+with default 10px spacing each hidden optional section adds ~10px.
+Three hidden `when` panels in the sidebar pushed the chips row ~30px +
+paddings: toolbar bottom y174 → chips y225 (~70px gap incl. section
+padding). Numbers post-fix (wrap the optional sections in
+`vstack(…).spacing(0)`): chips `scroll_view (8,194,284,23)`.
+Question for the framework: should an empty conditional child skip its
+spacing slot? (Not obviously a bug — spacing is between child slots —
+but a real footgun: the gap is invisible in code review.)
+
+### ScrollView reports `StretchAxis::Both` regardless of `axis`
+
+`raw_view!(ScrollView, StretchAxis::Both)` — the scroll `axis`
+(Horizontal/Vertical/All) is not consulted. A `scroll_horizontal` in a
+vstack therefore stretches vertically and would eat the sidebar
+surplus; the only constraint mechanism is a literal `.height(23)`
+(chip caption ~17 + 2×3 padding, measured). There is no View modifier
+that proposes `None` on one axis / fixes a view to its content size on
+one axis only (`Frame::ideal_height` fills an unspecified proposal
+with a fixed f32 — not "propose None"), and the M3 chip/caption
+metrics are not reachable from view code, so the literal is derived by
+hand and breaks under font scaling. Suggestion: a single-axis
+ScrollView should stretch only on its scroll axis (or a
+`.fixed_size(axis)`-style modifier should exist).
+
+## Emoji font fallback (r9, fonts-noto-color-emoji installed)
+
+`fc-match "sans:charset=<cp>"` per codepoint — DejaVu Sans (monochrome)
+wins for every default-emoji-presentation codepoint it covers; Noto
+Color Emoji only for codepoints DejaVu lacks. Rendered grid matches
+fc-match exactly. Monochrome faces: U+1F600–1F606, 1F609, 1F60A–1F61D,
+1F617–1F61A, 1F612–1F615, 1F618, 1F623, 1F625, 1F62A–1F62F, 1F632,
+1F634, 1F636, 1F60C, 1F60F, 1F643,
+U+2764 ❤, U+26A0 ⚠, U+270F ✏, U+2615 ☕, U+2600 ☀, U+26A1 ⚡,
+U+1F431 🐱 — all have Emoji_Presentation=Yes yet get a monochrome
+face. Colour (Noto) only: 1F923, 1F970, 1F910, 1F911, 1F924, 1F928,
+1F642, 1F914, 1F917, 1F971, 1F641, 1F644. This is the font-fallback
+ordering bug you suspected: the text stack needs to prefer the emoji
+face for emoji-presentation codepoints (fc-match `emoji:charset=1F600`
+→ Noto Color Emoji), not the generic sans chain.
+
+## waterui-cli / water mcp defects (r9)
+
+- **Dev-channel `prepare_build` seed-merge produces incoherent
+  lockfiles.** With `channel = "dev"` the CLI seeds the generated
+  crate's Cargo.lock from `previous ∪ canonical(Water.lock) ∪
+  project_lock`; the merged seed left wasm-bindgen/js-sys
+  (.105↔.128 lockstep), then cc/find-msvc-tools/log edges in conflict
+  (`cargo update -p cc --precise 1.4.7` rejected by Water.lock
+  validation which pinned cc=1.4.5). Whack-a-mole; abandoned dev
+  channel — `[patch.crates-io]` on the app side reaches the same
+  hydrolysis dev rev and `Source::Stable` skips the whole
+  validate/prepare path (waterui-cli-0.4.3
+  `src/project_model/framework.rs` ~684).
+- **Staged hydrolysis runtime holds stale dylib hashes.** `water mcp`
+  spawned `…/shared/x86_64-unknown-linux-gnu/debug/watergram-*` which
+  requires `libwaterui_dylib-4624ee4d224e52f7.so`, but the staged
+  runtime dir held an older-hash `libwaterui_dylib-492067d7….so` →
+  child exits before `initialize` → "the app binary did not answer
+  initialize: Connection closed". Workaround: copy the built
+  `deps/libwaterui_dylib-<newhash>.so` into the artifact dir. The
+  staging step should refresh, not union-keep-oldest.
