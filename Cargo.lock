@@ -8452,8 +8452,10 @@ dependencies = [
  "arboard",
  "async-channel",
  "base64 0.22.1",
+ "bytemuck",
  "chrono",
  "dirs 6.0.0",
+ "futures",
  "futures-lite",
  "hydrolysis-m3",
  "image",
@@ -8469,7 +8471,6 @@ dependencies = [
  "waterui",
  "waterui-barcode",
  "waterui-icons-material-icon",
- "waterui-image",
  "waterui-testing",
  "wgpu",
 ]

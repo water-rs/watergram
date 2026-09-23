@@ -57,12 +57,19 @@ Findings collected while building a real Telegram client (Watergram) on
 
 ## Semantic testing (waterui-testing)
 
-- **`List::content` children do not appear in the semantic a11y tree.**
-  `List::content((row("Name", value), row("Username", value)))` renders fine
-  natively, but `#[waterui::test]` queries find **zero** nodes for the row
-  labels — the entire settings/new-chat screens had to be rewritten as
-  `scroll(vstack(..))` just to be testable. Rows inside `List::content`
-  (or `ListItem`s in a `List`) need semantic nodes.
+- **`List` folds every row's contents into a single `ListItem` a11y node —
+  inner controls and labels are unreachable.** Correcting the earlier note
+  ("children do not appear at all"): `List::for_each`/`ListItem` rows DO
+  show up in `#[waterui::test]` mounts — but each row is emitted as exactly
+  one `ListItem` node whose label is the concatenation of its inner texts
+  (a bubble becomes `"Alice first message 12:00"`), with `children: []`
+  and only a `Focus` action. Nothing inside the row is addressable: no
+  text labels (tests must switch to `label_contains` on the row), and —
+  worse — no buttons: the ✗ resend control inside a failed bubble is
+  invisible to a11y automation and, by extension, to real screen readers.
+  Settings screens were rewritten as `scroll(vstack(..))` to stay testable;
+  for chat rows the fold is acceptable, but any interactive element inside a
+  `ListItem` silently loses a11y actions.
 - **The semantic runtime has no theme tokens installed.** Mounting a view
   that calls `.foreground(Error)` (or any theme color) under
   `#[waterui::test]` panics: `color token `Error` is not installed in the
@@ -186,9 +193,10 @@ Findings collected while building a real Telegram client (Watergram) on
   Fix belongs in framework: serialize `deterministic_test_fonts` /
   `fontique::System` construction (OnceLock/mutex) and gate
   `waterkit_screen::max_refresh_rate` X-probing behind OnceLock on the
-  headless/test path. Until then `cargo test --lib -- --test-threads=1` is
-  the stable workaround (not set in CI per maintainer request — the race
-  stays visible).
+  headless/test path. Filed upstream: libXau/xcap race →
+  **water-rs/waterui#1201**, fontconfig concurrent init →
+  **water-rs/hydrolysis#92** (needs an independent repro to confirm —
+  libfontconfig is not TSan-instrumented).
 
 ## Media capture: no audio/video recording components
 
@@ -201,41 +209,38 @@ inline via `video_player` (unverified at runtime until real-login e2e;
 the semantic-test path only exercises the not-downloaded fallback).
 
 **Capture APIs exist in waterkit; only the waterui view layer is
-missing.** Correcting the earlier note: `waterkit-audio 0.1.4` provides
-`AudioRecorderBuilder`/`AudioRecorder`/`InputDevice`/`AudioBuffer`
-(`multimedia/audio/src/recorder.rs`, desktop = cpal,
-`sys/desktop_record.rs`); `waterkit-camera 0.1.4` provides `Camera::list`/
-`Camera::open`, `CameraConfig`, `Frame::view()` (frame→wgpu texture),
-`Photo`, `Recording`. Watergram implements voice notes as
-cpal capture → `opus-pure` (pure-Rust RFC 6716 Opus + RFC 7845 Ogg) →
-`sendMessage` `InputMessageVoiceNote`, and video notes as
-nokhwa capture → wgpu texture → CPU readback → square crop →
-`waterkit-codec` H.264 (VA-API) → `waterkit-video-container` `VideoWriter`
-mp4 → `InputMessageVideoNote`.
+missing.** `waterkit-audio 0.1.4` provides `AudioRecorderBuilder`/
+`AudioRecorder`/`InputDevice`/`AudioBuffer` (desktop = cpal);
+`waterkit-camera 0.1.4` provides `Camera::list`/`Camera::open`,
+`CameraConfig`, `Frame::into_texture()`, `Photo`, `Recording`. Watergram
+implements voice notes as cpal capture → `opus-pure` (Opus + Ogg) →
+`InputMessageVoiceNote`, and video notes as: `GpuSurface`/`GpuView`
+that clones the surface's `wgpu::Device`/`Queue` into `Arc`s
+(both are `Clone` — the pattern in `examples/waterkit_camera_filters`),
+`Camera::open_default` on that shared device, frames drawn straight from
+`Frame::into_texture()` in `render()` — no CPU round-trip for the preview
+(src/capture.rs).
 
-**Missing: a ready-made waterui capture view + a desktop recorder.** Two
-gaps had to be hand-assembled (src/capture.rs):
+**Still missing upstream (hand-assembled in src/capture.rs):**
 
-1. No camera-preview widget. `Frame::view()` gives a wgpu texture, but
-   hydrolysis owns a bare `wgpu::Device` while `Camera::open` requires
-   `Arc<Device>` + `Arc<Queue>`, so the app's surface device can't be
-   shared with the camera. Hand-wired instead: a private
-   `wgpu::Instance`/`Device` on a dedicated capture thread, CPU readback
-   via `copy_texture_to_buffer` + `map_async`, frames pushed to the UI
-   through `waterui_image::reactive_image` (`Image` RGBA8). A facade
-   `CameraPreview`/`GpuSurface` view that hands `Arc<Device>` (or accepts
-   an external `Frame` stream) would remove ~200 lines of plumbing. Note
-   `Camera::frames()` returns a stream that *borrows* the camera, forcing
-   camera + stream to live on one thread behind an mpsc command channel —
-   an owned/`'static` frames API would compose better with
-   `spawn_local`.
+1. No ready-made camera-preview *view*. The GpuView pattern works, but
+   the app still had to hand-write ~300 lines: WGSL shaders (fullscreen
+   triangle + square-crop sampler), pipelines, bind groups, the
+   per-render `Box::pin(camera.frames())` + `poll_next` with a noop waker
+   (needed because `frames()` borrows `&Camera` — an owned/`'static`
+   frames stream would compose with `spawn_local` instead). A facade
+   `CameraPreview` view would eliminate all of it.
 2. `Camera::recording()` is `CameraError::ControlUnsupported("recording
-   not supported on desktop")` — mobile-only. The mp4 encode path
-   (RGBA→NV12→`Encoder::new(H264)`→`VideoWriter`) was hand-rolled;
-   `encode_nv12` returns a one-shot *iterator* yielding a single
-   `Result<Vec<u8>>` rather than a per-frame stream, so each frame re-encodes
-   through a fresh iterator call — works, but a pull-based frame encoder
-   API would be more honest.
+   not supported on desktop")` — **water-rs/waterkit#86**. Until fixed,
+   the mp4 path is hand-rolled: a compute pass converts the camera
+   texture to 360×360 NV12 (center-crop + downscale + BT.601) inside a
+   storage buffer, and that one buffer is mapped back because
+   `Encoder::encode_nv12` is a CPU API feeding VA-API — the preview never
+   leaves the GPU, only the encoder's input crosses back. Then
+   `Encoder::new(H264)` → `VideoWriter` mp4 on a worker thread fed by an
+   mpsc channel. `encode_nv12` also returns a one-shot iterator yielding
+   a single `Result<Vec<u8>>` rather than a per-frame stream; a
+   pull-based frame encoder API would be more honest.
 
 **Observed on a device-less Linux VM (Ubuntu 22.04, no /dev/video*,
 /dev/snd, /dev/dri):**
@@ -254,12 +259,35 @@ gaps had to be hand-assembled (src/capture.rs):
   only behind a non-Linux cfg, so desktop Linux without GPU cannot make
   video notes — worth flagging upstream.
 
-## ScrollController is Point-only — no per-item scrolling
+- **`Lazy::vstack` inside a `scroll()` collapses the window to ~1 row on
+  hydrolysis.** With `WATERGRAM_DEMO=1` (10 chats seeded) the sidebar-only
+  main page sizes its winit window to ~400×370 — `min=max` WM hints forbid
+  resizing, and the lazy list materializes only what the tiny viewport shows
+  (~1 chat row), so users see a single chat until they select one (the
+  split view grows the window only after selection). The same sidebar in a
+  taller window renders 4+ rows, so the data/collection is fine — the
+  locked-size + lazy-viewport interaction is the defect. Same class of
+  issue as the "windows locked to layout size" note: the layout's intrinsic
+  size of a lazy list should account for its content estimate, or the
+  window should allow resize so lazy content can grow into it.
+  Related: the nav-stack push target (Settings page) is constrained to the
+  sidebar's ~230px width, so settings fields and buttons overflow the
+  locked window's right edge — visible clipping, no way to widen.
+- **Emoji render as tofu (□) in hydrolysis on this VM** — "🚀"/"👍2 ❤️1"
+  in bubbles and icon labels draw as empty boxes; system has no emoji font
+  installed for fontique to fall back to. Not a framework bug per se, but
+  worth a bundled fallback note (any real user distro has Noto Color
+  Emoji; headless CI does not).
 
-`waterui-layout 0.5.1` `ScrollController<T>` drives a scroll view through
-`scroll_to(Point)` pixel offsets and exposes only `target()`/`generation()`.
-There is no `scroll_to_item(key)`/`scroll_to_index` on `Lazy` collections,
-so Telegram's "jump to message" can only estimate the offset
-(avg row height × rows-from-bottom) and highlight the target bubble —
-good enough for nearby jumps, visibly off for tall media rows. A keyed
-scroll API (`Lazy::vstack(...).scroll_key(row.key)`) would make this exact.
+## Scroll: index scrolling exists (correction)
+
+Retracting the earlier claim that `ScrollController` is Point-only —
+`waterui-internal 0.5.1` `component::list` provides
+`List::for_each(data, |item| ListItem::new(view)).scroll_controller(
+&ScrollController<usize>)`, which drives `scroll_to(index)`; hydrolysis
+implements it (`ScrollController<usize>` lives on `ListConfig`) and the
+docs note jumps do not materialize preceding rows. Watergram's message
+list now uses it for exact jump-to-message + highlight. The remaining
+gap is only key/id-based scrolling (`scroll_to(id: i64)`): the app keeps
+the message→index lookup itself — fine for Telegram, where the target id
+is known and the index is resolved before scrolling.

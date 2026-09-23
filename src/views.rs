@@ -7,6 +7,9 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use waterui::component::lazy::Lazy;
+use waterui::component::list::{List, ListItem};
+use waterui::graphics::GpuSurface;
+use crate::capture::VideoNoteGpu;
 use waterui::media::Photo;
 use waterui::video::video_player;
 use waterui::navigation::{ColumnWidth, NavigationSplitView, NavigationView, Navigator};
@@ -51,7 +54,7 @@ use mdi::pin;
 use mdi::plus;
 use mdi::send;
 use mdi::share_variant;
-use waterui_image::reactive_image;
+
 
 const ONE: NonZeroUsize = NonZeroUsize::new(1).unwrap();
 const TWO: NonZeroUsize = NonZeroUsize::new(2).unwrap();
@@ -647,21 +650,19 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .background(Surface)
             .on_tap(|store: Store| store.jump_to_message(store.pinned_id.get()))
         }),
-        scroll(
-            vstack((
-                when(has_more, || {
-                    button("Load earlier messages…")
-                        .label_style(LabelDisplayMode::TitleOnly)
-                        .action(|store: Store| store.load_older())
-                }),
-                Lazy::vstack(ForEach::new(messages, move |row: MessageRow| {
-                    message_bubble(inner.clone(), row)
-                })),
-            ))
-            .leading()
-            .padding_with((12.0, 8.0)),
-        )
-        .scroll_controller(&scroller),
+        vstack((
+            when(has_more, || {
+                button("Load earlier messages…")
+                    .label_style(LabelDisplayMode::TitleOnly)
+                    .action(|store: Store| store.load_older())
+            }),
+            List::for_each(messages, move |row: MessageRow| {
+                ListItem::new(
+                    message_bubble(inner.clone(), row).padding_with((12.0, 2.0)),
+                )
+            })
+            .scroll_controller(&scroller),
+        )),
         when(store.members_open.clone(), move || {
             vstack((
                 hstack((
@@ -1546,10 +1547,14 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
     NavigationView::new("New chat", content)
 }
 
-/// Video-note sheet: camera preview + record/stop/send controls.
+/// Video-note sheet: GPU camera preview + record/stop/send controls.
 fn video_note_sheet(store: Store) -> impl View {
-    let (handle, preview) = reactive_image();
-    let status = store.video_status.clone();
+    let shared = store
+        .video_shared
+        .borrow()
+        .clone()
+        .unwrap_or_else(crate::capture::new_video_note_shared);
+    let status = shared.borrow().status.clone();
     let rec_flag = store.video_recording.clone();
     let rec_label = store.video_elapsed.clone();
     vstack((
@@ -1560,7 +1565,7 @@ fn video_note_sheet(store: Store) -> impl View {
                 store.close_video_note()
             }),
         )),
-        preview
+        GpuSurface::new(VideoNoteGpu::new(shared))
             .size(240.0, 240.0)
             .background(RoundedRectangle::new(0.5).fill(SurfaceVariant)),
         when(
@@ -1582,7 +1587,4 @@ fn video_note_sheet(store: Store) -> impl View {
     ))
     .padding_with((12.0, 10.0))
     .background(Surface)
-    .on_appear(move |store: Store| {
-        *store.video_preview.borrow_mut() = Some(handle.clone());
-    })
 }

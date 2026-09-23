@@ -19,8 +19,33 @@ use waterui::prelude::*;
 use waterui::preview;
 use waterui::theme::Theme;
 
+/// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
+/// connection — for rendering checks on device-less VMs.
+/// `WATERGRAM_DEMO_PAGE` picks the page: `list` (default), `chat`,
+/// `settings`.
+fn demo_page() -> Option<&'static str> {
+    std::env::var("WATERGRAM_DEMO_PAGE").ok().map(|p| match p.as_str() {
+        "chat" => "chat",
+        "settings" => "settings",
+        _ => "list",
+    })
+}
+
 #[preview]
 fn main() -> impl View {
+    if std::env::var_os("WATERGRAM_DEMO").is_some() {
+        let store = Store::new(0);
+        store.seed_demo();
+        let page = demo_page();
+        return views::root(store.clone()).task(async move {
+            match page {
+                Some("chat") => store.selected.set(Some(1)),
+                Some("settings") => store.nav.push(state::Route::Settings),
+                _ => {}
+            }
+            std::future::pending::<()>().await;
+        });
+    }
     let (client_id, rx) = td::spawn_client();
     let store = Store::new(client_id);
     let s = store.clone();
@@ -33,8 +58,16 @@ fn main() -> impl View {
 }
 
 pub fn app(mut env: Environment) -> App {
-    let (client_id, rx) = td::spawn_client();
+    let demo = std::env::var_os("WATERGRAM_DEMO").is_some();
+    let (client_id, rx) = if demo {
+        (0, async_channel::unbounded().1)
+    } else {
+        td::spawn_client()
+    };
     let store = Store::new(client_id);
+    if demo {
+        store.seed_demo();
+    }
     env.install(
         Theme::new().color_scheme(
             store
@@ -47,6 +80,14 @@ pub fn app(mut env: Environment) -> App {
             let s = store.clone();
             let rx2 = rx.clone();
             views::root(store.clone()).task(async move {
+                if demo {
+                    match demo_page() {
+                        Some("chat") => s.selected.set(Some(1)),
+                        Some("settings") => s.nav.push(state::Route::Settings),
+                        _ => {}
+                    }
+                    std::future::pending::<()>().await;
+                }
                 s.start();
                 while let Ok((update, cid)) = rx2.recv().await {
                     s.update(update, cid);
@@ -186,10 +227,14 @@ mod tests {
             msg(1, "first message", false),
             msg(2, "my reply", true),
         ]);
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
-        app.query().label("first message").assert_exists();
-        app.query().label("my reply").assert_exists();
-        app.query().label("Alice").assert_exists();
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        // List rows fold their contents into the row's own a11y label
+        // ("Alice first message 12:00"), so contents match via contains.
+        app.query()
+            .label_contains("first message")
+            .assert_exists();
+        app.query().label_contains("my reply").assert_exists();
+        app.query().label_contains("Alice").assert_exists();
         app.query().label("Message").assert_exists();
     }
 
@@ -198,7 +243,7 @@ mod tests {
         let store = store();
         store.open_chat.set(7);
         let composer = store.composer.clone();
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("Message").single().set_text(&mut app, "hello world");
         app.query().role(Role::BUTTON).label("Send").tap();
         assert_eq!(composer.get().to_string(), "");
@@ -239,7 +284,6 @@ mod tests {
         let store = store();
         store.open_chat.set(7);
         let open = store.video_note_open.clone();
-        let status_b = store.video_status.clone();
         let caller = store.clone();
         let mut app =
             ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
@@ -248,16 +292,21 @@ mod tests {
             .label("Video note")
             .tap();
         assert!(open.get());
+        // The sheet's GpuSurface owns the camera; on a machine without one its
+        // shared status must surface the failure (or be mid-open).
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let shared = caller.video_shared.borrow().clone();
+        let status = shared
+            .map(|s| s.borrow().status.get().to_string())
+            .unwrap_or_default();
         if crate::capture::camera_count() == 0 {
-            // Pump runs async; give the open thread a moment then read status.
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            let status = status_b.get().to_string();
             assert!(
-                status.contains("camera") || status.contains("starting"),
+                status.contains("camera") || status.contains("opening"),
                 "unexpected status: {status}"
             );
         }
         caller.close_video_note();
+        assert!(caller.video_shared.borrow().is_none());
     }
 
     /// Failed sends flip back to pending when the user taps the ✗ icon.
@@ -272,7 +321,9 @@ mod tests {
         let caller = store.clone();
         let mut app =
             ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
-        app.query().label("was not delivered").assert_exists();
+        app.query()
+            .label_contains("was not delivered")
+            .assert_exists();
         caller.resend_failed(9);
         let row = msgs.get().into_iter().next().unwrap();
         assert!(row.pending && !row.failed);
@@ -339,7 +390,7 @@ mod tests {
         store.open_chat.set(7);
         store.reply_to.set(Some(5));
         store.reply_label.set("Replying to Alice".into());
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("Replying to Alice").assert_exists();
     }
 
@@ -349,7 +400,7 @@ mod tests {
         store.open_chat.set(7);
         store.pinned_label.set("Pinned message".into());
         store.pinned_id.set(99);
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("Pinned message").assert_exists();
     }
 
@@ -361,7 +412,7 @@ mod tests {
         store
             .chat_search_results
             .set(vec![msg(1, "needle hit", false)]);
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("Search in chat").assert_exists();
         app.query().label("needle hit").assert_exists();
     }
@@ -383,8 +434,8 @@ mod tests {
         let mut m = msg(1, "seen", true);
         m.read_out = true;
         store.messages.set(vec![m]);
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
-        app.query().label("✓✓").assert_exists();
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        app.query().label_contains("✓✓").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -394,8 +445,8 @@ mod tests {
         let mut m = msg(1, "liked", false);
         m.reactions = "👍 3".into();
         store.messages.set(vec![m]);
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
-        app.query().label("👍 3").assert_exists();
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        app.query().label_contains("👍 3").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -422,7 +473,7 @@ mod tests {
                 user_id: 9,
             }),
         }]);
-        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("2 members").assert_exists();
         app.query().label("Alice").assert_exists();
         app.query().label("owner").assert_exists();
@@ -532,6 +583,28 @@ mod tests {
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn styled_bubble_renders_plain_text(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        let mut m = msg(1, "check https://waterui.dev for the docs", true);
+        m.styled = crate::state::styled_from_formatted(&tdlib_rs::types::FormattedText {
+            text: "check https://waterui.dev for the docs".into(),
+            entities: vec![tdlib_rs::types::TextEntity {
+                offset: 0,
+                length: 5,
+                r#type: tdlib_rs::enums::TextEntityType::Bold,
+            }],
+        });
+        store.messages.set(vec![m]);
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query()
+            .label_contains("https://waterui.dev")
+            .assert_exists();
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn link_preview_line_shows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.chats.set(vec![chat(1, "Chat", "", 0)]);
@@ -540,8 +613,10 @@ mod tests {
         store.messages.set(vec![m]);
         store.selected.set(Some(1));
         let inner = store.clone();
-        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
-        app.query().label("Example — Title · desc").assert_exists();
+        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query()
+            .label_contains("Example — Title · desc")
+            .assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -551,7 +626,7 @@ mod tests {
         store.selected.set(Some(1));
         let inner = store.clone();
         let flag = store.stickers_open.clone();
-        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query().role(Role::BUTTON).label("Stickers & GIFs").tap();
         assert!(flag.get());
     }
@@ -582,7 +657,7 @@ mod tests {
         store.selected.set(Some(1));
         store.members_open.set(true);
         let inner = store.clone();
-        let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query().role(Role::BUTTON).label("New link").assert_exists();
     }
 

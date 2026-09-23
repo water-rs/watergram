@@ -3,23 +3,29 @@
 //! `opus-pure`.
 //!
 //! WaterUI ships no ready-made capture *view* (no `CameraPreview` widget), so
-//! the camera preview here is hand-wired: frames are read back over a private
-//! wgpu device into RGBA and pushed into a `reactive_image` view. Desktop
-//! `Camera::recording` is `ControlUnsupported`, so video-note files are
-//! assembled by hand: RGBA -> NV12 -> waterkit-codec H.264 -> VideoWriter mp4.
-//!
-//! `Camera::frames()` borrows the camera, so the camera lives on a dedicated
-//! thread that owns both it and the frame stream; the UI talks to it through
-//! channels.
+//! the camera preview mounts a `GpuSurface`: the `GpuView` clones the
+//! surface's wgpu `Device`/`Queue` into `Arc`s and opens the camera on them —
+//! frames stay on the GPU and draw straight through `Frame::view()`.
+//! Desktop `Camera::recording` is `ControlUnsupported`
+//! (water-rs/waterkit#86), so the encode tail is hand-wired: a compute pass
+//! converts the camera texture to 360x360 NV12 and only that buffer is mapped
+//! back for `waterkit-codec`'s CPU-side `encode_nv12` -> `VideoWriter` mp4.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::Instant;
 
 use waterkit_audio::AudioRecorder;
-use waterkit_camera::{Camera, CameraConfig, PixelFormat};
+use waterui::Str;
+use waterui::binding::Binding;
+use waterui::graphics::{GpuContext, GpuFrame, GpuView};
+use waterui::prelude::Environment;
+use waterkit_camera::Camera;
 use waterkit_codec::{CodecType, Encoder};
-use waterkit_video_container::VideoWriter;
+use waterkit_video_container::{MuxerCodecType, VideoWriter};
 use futures_lite::StreamExt;
 
 /// Voice notes record at 48 kHz mono and encode Opus frames of 20 ms.
@@ -164,340 +170,693 @@ fn encode_waveform(samples: &[f32], _rate: u32) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+
 // ---------------------------------------------------------------------------
-// Video notes
+// Video notes — GPU-resident pipeline
 // ---------------------------------------------------------------------------
 
-enum CamCmd {
-    StartRecording,
-    /// Finish encoding and reply with the mp4 path + duration + jpeg thumb.
-    StopAndEncode {
-        path: std::path::PathBuf,
-        reply: mpsc::Sender<Result<(i32, Vec<u8>), String>>,
-    },
-    Close,
-}
-
-/// Frames travel from the camera thread to the UI as square-cropped RGBA.
-pub struct VideoNoteCapture {
-    cmd_tx: mpsc::Sender<CamCmd>,
-    preview_rx: mpsc::Receiver<Vec<u8>>,
-    #[allow(dead_code)] // exposed for tests asserting the square size
-    pub size: u32,
+/// Shared state between the video-note sheet's buttons and its `GpuView`.
+pub struct VideoNoteShared {
+    /// Surface status line ("opening camera…", error text).
+    pub status: Binding<Str>,
+    /// True while frames are converted + encoded.
+    pub recording: bool,
+    /// NV12 frames -> encoder thread.
+    rec_tx: Option<mpsc::Sender<RecMsg>>,
+    /// One-shot result from the encoder thread.
+    done_rx: Option<mpsc::Receiver<Result<VideoNoteDone, String>>>,
+    /// At most one outstanding buffer map.
+    map_in_flight: Arc<AtomicBool>,
+    /// Staging buffer mapped and ready to read.
+    mapped_ready: Arc<AtomicBool>,
+    /// Capture start for the elapsed label.
     started: Instant,
-    recording: bool,
 }
 
-/// Open the default camera; spawn its frame pump thread.
-///
-/// Returns `Err` with the exact reason (`CameraError::NotFound` on machines
-/// with no webcam) so callers can surface it verbatim.
-pub fn open_camera() -> Result<VideoNoteCapture, String> {
-    if Camera::list().map_err(|e| e.to_string())?.is_empty() {
-        return Err("no camera found".into());
-    }
-    let (cmd_tx, cmd_rx) = mpsc::channel::<CamCmd>();
-    let (prev_tx, prev_rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || camera_thread(cmd_rx, prev_tx));
-    Ok(VideoNoteCapture {
-        cmd_tx,
-        preview_rx: prev_rx,
-        size: VIDEO_NOTE_SIZE,
-        started: Instant::now(),
-        recording: false,
-    })
+/// Result of a finished video-note encode.
+pub struct VideoNoteDone {
+    pub duration: i32,
+    pub thumb: Vec<u8>,
 }
 
-impl VideoNoteCapture {
-    /// Begin collecting frames for the recording.
-    pub fn start_recording(&mut self) {
-        self.started = Instant::now();
-        self.recording = true;
-        let _ = self.cmd_tx.send(CamCmd::StartRecording);
-    }
+enum RecMsg {
+    Frame(Vec<u8>),
+    Finish,
+}
 
-    /// Seconds elapsed in the current recording.
-    pub fn elapsed(&self) -> u64 {
-        self.started.elapsed().as_secs()
-    }
-
-    /// Latest square-cropped preview frame (RGBA `size`×`size`), if queued.
-    pub fn next_preview(&self) -> Option<Vec<u8>> {
-        let mut last = None;
-        while let Ok(f) = self.preview_rx.try_recv() {
-            last = Some(f);
+impl VideoNoteShared {
+    fn new() -> Self {
+        Self {
+            status: Binding::container(Str::from("opening camera…")),
+            recording: false,
+            rec_tx: None,
+            done_rx: None,
+            map_in_flight: Arc::new(AtomicBool::new(false)),
+            mapped_ready: Arc::new(AtomicBool::new(false)),
+            started: Instant::now(),
         }
-        last
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Video notes — GPU-resident pipeline
+// ---------------------------------------------------------------------------
+// waterui has no ready-made camera-preview view, so the sheet mounts a
+// `GpuSurface` whose `GpuView` clones the surface's wgpu Device/Queue into
+// `Arc`s (both are `Clone` — the same approach as
+// `examples/waterkit_camera_filters`) and hands them to
+// `Camera::open_default`. Camera frames stay on the GPU the whole way and are
+// drawn straight onto the surface through `Frame::view()`.
+//
+// Recording is the one place a readback happens: `waterkit-codec`'s
+// `Encoder::encode_nv12` takes CPU memory (VA-API import), so a compute pass
+// center-crops + downscales the camera texture to 360x360 NV12 inside a
+// storage buffer and only that plane pair (194 KB/frame vs 1.9 MB RGBA) is
+// mapped back and fed to the encoder. Desktop `Camera::recording()` is
+// `ControlUnsupported` — water-rs/waterkit#86 — so the mux/encode tail is
+// hand-wired until it lands.
+
+/// Shared state between the video-note sheet's buttons and its `GpuView`.
+/// `GpuView` rendering camera frames and feeding an H.264 encoder.
+pub struct VideoNoteGpu {
+    shared: Rc<RefCell<VideoNoteShared>>,
+    camera: Option<Camera>,
+    latest: Option<wgpu::Texture>,
+    pipeline: Option<wgpu::RenderPipeline>,
+    compute: Option<wgpu::ComputePipeline>,
+    render_bgl: Option<wgpu::BindGroupLayout>,
+    compute_bgl: Option<wgpu::BindGroupLayout>,
+    sampler: Option<wgpu::Sampler>,
+    crop_buf: Option<wgpu::Buffer>,
+    params_buf: Option<wgpu::Buffer>,
+    nv12_buf: Option<wgpu::Buffer>,
+    staging: Option<wgpu::Buffer>,
+}
+
+/// Shader: fullscreen triangle sampling the centered square crop.
+const PREVIEW_WGSL: &str = r#"
+struct Crop { src_w: f32, src_h: f32, _p0: f32, _p1: f32 };
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+@group(0) @binding(2) var<uniform> crop: Crop;
+
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1., -1.), vec2<f32>(3., -1.), vec2<f32>(-1., 3.));
+    var o: VOut;
+    let xy = p[i];
+    o.pos = vec4<f32>(xy, 0., 1.);
+    o.uv = vec2<f32>((xy.x + 1.) * 0.5, (1. - xy.y) * 0.5);
+    return o;
+}
+
+@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
+    let m = min(crop.src_w, crop.src_h);
+    let lo = vec2<f32>((crop.src_w - m) * 0.5 / crop.src_w,
+                      (crop.src_h - m) * 0.5 / crop.src_h);
+    let hi = vec2<f32>(m / crop.src_w, m / crop.src_h);
+    return textureSample(tex, smp, lo + in.uv * hi);
+}
+"#;
+
+/// Compute shader: center-crop + downscale to a square, RGBA -> NV12
+/// (BT.601 limited). Each invocation writes a 4x2 block: two 4-pixel Y words
+/// plus one interleaved UV word (U0 V0 U1 V1).
+const NV12_WGSL: &str = r#"
+struct Params { src_w: u32, src_h: u32, out: u32, _p: u32 };
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(2) var<uniform> p: Params;
+
+fn y8(c: vec3<f32>) -> u32 {
+    return u32(clamp(16.5 + 65.481 * c.r + 128.553 * c.g + 24.966 * c.b,
+                     0.0, 255.0));
+}
+fn u8c(c: vec3<f32>) -> u32 {
+    return u32(clamp(128.5 - 37.797 * c.r - 74.203 * c.g + 112.0 * c.b,
+                     0.0, 255.0));
+}
+fn v8(c: vec3<f32>) -> u32 {
+    return u32(clamp(128.5 + 112.0 * c.r - 93.786 * c.g - 18.214 * c.b,
+                     0.0, 255.0));
+}
+
+fn sample_at(px: u32, py: u32) -> vec3<f32> {
+    let side = min(p.src_w, p.src_h);
+    let ox = (p.src_w - side) / 2u;
+    let oy = (p.src_h - side) / 2u;
+    let sx = min(ox + (px * side + p.out / 2u) / p.out, p.src_w - 1u);
+    let sy = min(oy + (py * side + p.out / 2u) / p.out, p.src_h - 1u);
+    return textureLoad(src_tex, vec2<u32>(sx, sy), 0).rgb;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let bx = gid.x * 4u;
+    let by = gid.y * 2u;
+    if (bx >= p.out || by >= p.out) { return; }
+
+    var w0 = y8(sample_at(bx,      by));
+    w0 |= y8(sample_at(bx + 1u, by)) << 8;
+    w0 |= y8(sample_at(bx + 2u, by)) << 16;
+    w0 |= y8(sample_at(bx + 3u, by)) << 24;
+    dst[(by * p.out + bx) / 4u] = w0;
+
+    var w1 = y8(sample_at(bx,      by + 1u));
+    w1 |= y8(sample_at(bx + 1u, by + 1u)) << 8;
+    w1 |= y8(sample_at(bx + 2u, by + 1u)) << 16;
+    w1 |= y8(sample_at(bx + 3u, by + 1u)) << 24;
+    dst[((by + 1u) * p.out + bx) / 4u] = w1;
+
+    let c0 = (sample_at(bx, by) + sample_at(bx + 1u, by)
+            + sample_at(bx, by + 1u) + sample_at(bx + 1u, by + 1u)) * 0.25;
+    let c1 = (sample_at(bx + 2u, by) + sample_at(bx + 3u, by)
+            + sample_at(bx + 2u, by + 1u) + sample_at(bx + 3u, by + 1u)) * 0.25;
+    let uv = u8c(c0) | (v8(c0) << 8) | (u8c(c1) << 16) | (v8(c1) << 24);
+    dst[(p.out * p.out + (by / 2u) * p.out + bx) / 4u] = uv;
+}
+"#;
+
+impl VideoNoteGpu {
+    /// Wrap the shared sheet state into a `GpuView`.
+    pub fn new(shared: Rc<RefCell<VideoNoteShared>>) -> Self {
+        Self {
+            shared,
+            camera: None,
+            latest: None,
+            pipeline: None,
+            compute: None,
+            render_bgl: None,
+            compute_bgl: None,
+            sampler: None,
+            crop_buf: None,
+            params_buf: None,
+            nv12_buf: None,
+            staging: None,
+        }
     }
 
-    /// Stop recording, encode, and return `(duration_secs, thumbnail_jpeg)`.
-    /// The mp4 file is written at `path`.
-    pub fn finish(&self, path: &std::path::Path) -> Result<(i32, Vec<u8>), String> {
-        let (tx, rx) = mpsc::channel();
-        let _ = self.cmd_tx.send(CamCmd::StopAndEncode {
-            path: path.to_path_buf(),
-            reply: tx,
+    fn build(&mut self, ctx: &GpuContext<'_>) {
+        let device = ctx.device;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("watergram-preview"),
+            source: wgpu::ShaderSource::Wgsl(PREVIEW_WGSL.into()),
         });
-        rx.recv()
-            .unwrap_or_else(|_| Err("camera thread exited".into()))
-    }
-}
-
-impl Drop for VideoNoteCapture {
-    fn drop(&mut self) {
-        let _ = self.cmd_tx.send(CamCmd::Close);
-    }
-}
-
-/// Create a wgpu device used solely for camera frames + CPU readback.
-fn request_gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            ..Default::default()
-        },
-    ))
-    .map_err(|e| format!("no GPU adapter: {e}"))?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("watergram-camera"),
-        required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::downlevel_defaults(),
-        ..Default::default()
-    }))
-    .map_err(|e| format!("device request failed: {e}"))
-}
-
-fn camera_thread(cmd_rx: mpsc::Receiver<CamCmd>, prev_tx: mpsc::Sender<Vec<u8>>) {
-    let (device, queue) = match request_gpu() {
-        Ok(dq) => dq,
-        Err(_) => return,
-    };
-    let device = std::sync::Arc::new(device);
-    let queue = std::sync::Arc::new(queue);
-    let config = CameraConfig {
-        format: PixelFormat::Rgba8,
-        ..CameraConfig::default()
-    };
-    let camera = match pollster::block_on(Camera::open(
-        &Camera::list().ok().and_then(|c| c.first().map(|i| i.id.clone()))
-            .unwrap_or_default(),
-        config,
-        device.clone(),
-        queue.clone(),
-    )) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let (w, h) = (camera.resolution().width, camera.resolution().height);
-    let mut stream = std::pin::pin!(camera.frames());
-    let recording = AtomicBool::new(false);
-    let mut recorded: Vec<(Vec<u8>, Duration)> = Vec::new();
-    let mut last_frame: Option<(Vec<u8>, Duration)> = None;
-    loop {
-        // Drain pending commands first (non-blocking).
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                CamCmd::StartRecording => {
-                    recorded.clear();
-                    recording.store(true, Ordering::Relaxed);
-                }
-                CamCmd::StopAndEncode { path, reply } => {
-                    recording.store(false, Ordering::Relaxed);
-                    let res = finish_video_note(&recorded, &path);
-                    let thumb = match last_frame.as_ref() {
-                        Some((f, _)) => rgba_to_jpeg(f, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE),
-                        None => Err("no preview frame for thumbnail".into()),
-                    };
-                    let _ = reply.send(res.and_then(|d| thumb.map(|t| (d, t))));
-                    return; // session over; camera drops here
-                }
-                CamCmd::Close => return,
-            }
-        }
-        // Wait for the next frame; map commands while blocked would need a
-        // select, so rely on camera frame rate to wake us (~30fps).
-        let frame = match futures_lite::future::block_on(stream.next()) {
-            Some(f) => f,
-            None => return,
-        };
-        if let Some(rgba) = readback_rgba(&device, &queue, &frame) {
-            let sq = crop_square_rgba(&rgba, frame.width(), frame.height(), VIDEO_NOTE_SIZE);
-            if recording.load(Ordering::Relaxed) {
-                recorded.push((sq.clone(), frame.timestamp()));
-            }
-            last_frame = Some((sq.clone(), frame.timestamp()));
-            let _ = prev_tx.send(sq);
-        }
-        let _ = (w, h);
-    }
-}
-
-fn finish_video_note(
-    frames: &[(Vec<u8>, Duration)],
-    path: &std::path::Path,
-) -> Result<i32, String> {
-    if frames.is_empty() {
-        return Err("no frames captured".into());
-    }
-    let duration = (frames.len() as u64 / u64::from(VIDEO_FPS)).max(1) as i32;
-    encode_video_note(frames, path)?;
-    Ok(duration)
-}
-
-/// Read a camera frame texture back to RGBA bytes on the CPU.
-fn readback_rgba(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    frame: &waterkit_camera::Frame,
-) -> Option<Vec<u8>> {
-    let (w, h) = (frame.width(), frame.height());
-    let bpp = 4u32;
-    let unpadded = w * bpp;
-    let padded = unpadded.div_ceil(256) * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("cam-readback"),
-        size: u64::from(padded) * u64::from(h),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    enc.copy_texture_to_buffer(
-        frame.texture().as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(h),
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("watergram-preview-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: true,
+                        },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("watergram-preview-pl"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        self.pipeline = Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("watergram-preview-pipe"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
             },
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit([enc.finish()]);
-    let slice = buf.slice(..);
-    let (tx, rx) = mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(Duration::from_secs(2)),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: ctx.surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        }));
+        self.render_bgl = Some(bgl);
+        self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("watergram-preview-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
+        self.crop_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("watergram-crop-uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        // NV12 compute path.
+        let cshader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("watergram-nv12"),
+            source: wgpu::ShaderSource::Wgsl(NV12_WGSL.into()),
+        });
+        let cbgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("watergram-nv12-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: false,
+                        },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let cpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("watergram-nv12-pl"),
+            bind_group_layouts: &[Some(&cbgl)],
+            immediate_size: 0,
+        });
+        self.compute = Some(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("watergram-nv12-pipe"),
+            layout: Some(&cpl),
+            module: &cshader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+        self.compute_bgl = Some(cbgl);
+        self.params_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("watergram-nv12-params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        let nv12_size = (VIDEO_NOTE_SIZE * VIDEO_NOTE_SIZE * 3 / 2) as u64;
+        self.nv12_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("watergram-nv12"),
+            size: nv12_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        self.staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("watergram-nv12-staging"),
+            size: nv12_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+
+    /// Poll one camera frame if available (transient borrow, like the
+    /// waterkit_camera_filters example: `frames()` borrows `&self`, so the
+    /// stream is created and dropped per render).
+    fn pull_frame(&mut self) {
+        let Some(camera) = self.camera.as_ref() else {
+            return;
+        };
+        let mut stream = Box::pin(camera.frames());
+        let waker = futures::task::noop_waker_ref();
+        let mut cx = std::task::Context::from_waker(waker);
+        let next = stream.as_mut().poll_next(&mut cx);
+        drop(stream);
+        match next {
+            std::task::Poll::Ready(Some(f)) => {
+                self.latest = Some(f.into_texture());
+            }
+            std::task::Poll::Ready(None) => {
+                self.camera = None;
+                self.latest = None;
+                self.shared.borrow().status.set_from("camera stream ended");
+            }
+            std::task::Poll::Pending => {}
+        }
+    }
+
+    /// Convert the latest texture to NV12 on the GPU and map it back once.
+    /// The single readback exists only because `Encoder::encode_nv12` wants
+    /// CPU bytes — everything before it stays in VRAM.
+    fn pump_recording(&mut self, frame: &GpuFrame) {
+        let (Some(texture), Some(compute), Some(cbgl), Some(nv12), Some(staging)) = (
+            self.latest.as_ref(),
+            self.compute.as_ref(),
+            self.compute_bgl.as_ref(),
+            self.nv12_buf.as_ref(),
+            self.staging.as_ref(),
+        ) else {
+            return;
+        };
+        {
+            let sh = self.shared.borrow();
+            if !sh.recording || sh.map_in_flight.load(Ordering::Acquire) {
+                return;
+            }
+            sh.map_in_flight.store(true, Ordering::Release);
+        }
+        let params: [u32; 4] = [
+            texture.width(),
+            texture.height(),
+            VIDEO_NOTE_SIZE,
+            0,
+        ];
+        frame
+            .queue
+            .write_buffer(self.params_buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&params));
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("watergram-nv12-bind"),
+            layout: cbgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: nv12.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buf.as_ref().unwrap().as_entire_binding(),
+                },
+            ],
+        });
+        let mut enc = frame
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("watergram-nv12-enc"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("watergram-nv12-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(compute);
+            pass.set_bind_group(0, &bind, &[]);
+            // Each invocation covers a 4x2 block: ceil blocks per axis.
+            pass.dispatch_workgroups(
+                (VIDEO_NOTE_SIZE / 4).div_ceil(8),
+                (VIDEO_NOTE_SIZE / 2).div_ceil(8),
+                1,
+            );
+        }
+        enc.copy_buffer_to_buffer(nv12, 0, staging, 0, nv12.size());
+        frame.queue.submit([enc.finish()]);
+
+        let in_flight = self.shared.borrow().map_in_flight.clone();
+        let ready = self.shared.borrow().mapped_ready.clone();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+            in_flight.store(false, Ordering::Release);
+            if res.is_ok() {
+                ready.store(true, Ordering::Release);
+            }
+        });
+    }
+
+    /// Drain a mapped staging buffer into the encoder channel.
+    fn drain_mapped(&mut self) {
+        let Some(staging) = self.staging.as_ref() else {
+            return;
+        };
+        let tx = {
+            let sh = self.shared.borrow();
+            if !sh.mapped_ready.load(Ordering::Acquire) {
+                return;
+            }
+            sh.mapped_ready.store(false, Ordering::Release);
+            sh.rec_tx.clone()
+        };
+        let data = staging.slice(..).get_mapped_range().to_vec();
+        staging.unmap();
+        if let Some(tx) = tx {
+            let _ = tx.send(RecMsg::Frame(data));
+        }
+    }
+
+    /// Render the latest camera texture into the surface.
+    fn draw(&mut self, frame: &mut GpuFrame) {
+        let (Some(texture), Some(pipeline), Some(bgl), Some(sampler), Some(crop)) = (
+            self.latest.as_ref(),
+            self.pipeline.as_ref(),
+            self.render_bgl.as_ref(),
+            self.sampler.as_ref(),
+            self.crop_buf.as_ref(),
+        ) else {
+            return;
+        };
+        let dims: [f32; 4] = [texture.width() as f32, texture.height() as f32, 0.0, 0.0];
+        frame
+            .queue
+            .write_buffer(crop, 0, bytemuck::cast_slice(&dims));
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("watergram-preview-bind"),
+            layout: bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: crop.as_entire_binding(),
+                },
+            ],
+        });
+        let mut enc = frame
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("watergram-preview-enc"),
+            });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("watergram-preview-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        frame.queue.submit([enc.finish()]);
+    }
+}
+impl GpuView for VideoNoteGpu {
+    async fn setup(&mut self, ctx: &GpuContext<'_>, _env: &mut Environment) {
+        self.build(ctx);
+        // Clone the surface's device/queue into Arcs — same pattern as
+        // `examples/waterkit_camera_filters`; the camera then produces
+        // textures on the very device that draws them.
+        let device = Arc::new(ctx.device.clone());
+        let queue = Arc::new(ctx.queue.clone());
+        match Camera::open_default(device, queue).await {
+            Ok(cam) => {
+                self.camera = Some(cam);
+                self.shared.borrow().status.set_from("");
+            }
+            Err(e) => {
+                self.shared.borrow().status.set_from(Str::from(format!("camera: {e}")));
+            }
+        }
+    }
+
+    fn render(&mut self, frame: &mut GpuFrame) {
+        self.pull_frame();
+        self.drain_mapped();
+        self.pump_recording(frame);
+        self.draw(frame);
+        // Service map callbacks + keep the preview live.
+        let _ = frame.device.poll(wgpu::PollType::Poll);
+        frame.request_redraw();
+    }
+}
+
+/// New shared state for a freshly opened video-note sheet.
+pub(crate) fn new_video_note_shared() -> Rc<RefCell<VideoNoteShared>> {
+    Rc::new(RefCell::new(VideoNoteShared::new()))
+}
+
+/// Start recording: spawn the encoder thread and mark shared state live.
+pub(crate) fn video_note_start_recording(
+    shared: &Rc<RefCell<VideoNoteShared>>,
+    path: PathBuf,
+) {
+    let (tx, rx) = mpsc::channel::<RecMsg>();
+    let (dtx, drx) = mpsc::channel::<Result<VideoNoteDone, String>>();
+    std::thread::spawn(move || recorder_thread(rx, dtx, path));
+    let mut sh = shared.borrow_mut();
+    sh.rec_tx = Some(tx);
+    sh.done_rx = Some(drx);
+    sh.recording = true;
+    sh.started = Instant::now();
+}
+
+/// Stop recording: enqueue `Finish` after the queued frames and return the
+/// encoder's result receiver (callers poll it, never block the UI).
+pub(crate) fn video_note_stop_recording(
+    shared: &Rc<RefCell<VideoNoteShared>>,
+) -> Option<mpsc::Receiver<Result<VideoNoteDone, String>>> {
+    let mut sh = shared.borrow_mut();
+    sh.recording = false;
+    let rx = sh.done_rx.take();
+    if let Some(tx) = sh.rec_tx.take() {
+        let _ = tx.send(RecMsg::Finish);
+    }
+    rx
+}
+
+/// Seconds elapsed since recording started.
+pub(crate) fn video_note_elapsed(shared: &Rc<RefCell<VideoNoteShared>>) -> i32 {
+    shared.borrow().started.elapsed().as_secs() as i32
+}
+
+/// Encoder thread: NV12 frames in, mp4 + thumbnail out.
+fn recorder_thread(
+    rx: mpsc::Receiver<RecMsg>,
+    done: mpsc::Sender<Result<VideoNoteDone, String>>,
+    path: PathBuf,
+) {
+    let run = || -> Result<VideoNoteDone, String> {
+        let mut enc = Encoder::new(CodecType::H264, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE)
+            .map_err(|e| e.to_string())?;
+        let mut writer = VideoWriter::new(
+            &path,
+            VIDEO_NOTE_SIZE,
+            VIDEO_NOTE_SIZE,
+            VIDEO_FPS,
+            MuxerCodecType::H264,
+        )
+        .map_err(|e| e.to_string())?;
+        if let Some(cfg) = enc.codec_config() {
+            writer.set_codec_config(cfg);
+        }
+        let mut frames = 0u32;
+        let mut last: Option<Vec<u8>> = None;
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                RecMsg::Frame(nv12) => {
+                    frames += 1;
+                    let mut stream = enc.encode_nv12(&nv12);
+                    for part in stream.by_ref() {
+                        let chunk = part.map_err(|e| e.to_string())?;
+                        writer
+                            .write_sample(&chunk, frames == 1)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    last = Some(nv12);
+                }
+                RecMsg::Finish => break,
+            }
+        }
+        writer.finish().map_err(|e| e.to_string())?;
+        let thumb = last
+            .as_deref()
+            .map(|nv| {
+                let rgba = nv12_to_rgba(nv, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE);
+                rgba_to_jpeg(&rgba, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        Ok(VideoNoteDone {
+            duration: (frames / VIDEO_FPS) as i32,
+            thumb,
         })
-        .ok()?;
-    rx.recv().ok()?.ok()?;
-    let data = slice.get_mapped_range();
-    let mut out = Vec::with_capacity((unpadded * h) as usize);
-    for row in 0..h {
-        let s = (row * padded) as usize;
-        out.extend_from_slice(&data[s..s + unpadded as usize]);
-    }
-    drop(data);
-    buf.unmap();
-    Some(out)
+    };
+    let _ = done.send(run());
 }
 
-/// Center-crop to square and nearest-neighbor downscale to `out` px.
-fn crop_square_rgba(rgba: &[u8], w: u32, h: u32, out: u32) -> Vec<u8> {
-    let side = w.min(h);
-    let x0 = (w - side) / 2;
-    let y0 = (h - side) / 2;
-    let mut dst = Vec::with_capacity((out * out * 4) as usize);
-    for y in 0..out {
-        let sy = y0 + y * side / out;
-        for x in 0..out {
-            let sx = x0 + x * side / out;
-            let i = ((sy * w + sx) * 4) as usize;
-            dst.extend_from_slice(&rgba[i..i + 4]);
-        }
-    }
-    dst
-}
+// ---------------------------------------------------------------------------
+// Helpers shared by capture paths
+// ---------------------------------------------------------------------------
 
-/// RGBA -> NV12 (BT.601 limited range), for `Encoder::encode_nv12`.
-fn rgba_to_nv12(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let wu = w as usize;
-    let hu = h as usize;
-    let mut y = Vec::with_capacity(wu * hu);
-    let mut uv = Vec::with_capacity(wu * hu / 2);
-    for j in 0..hu {
-        for i in 0..wu {
-            let p = (j * wu + i) * 4;
-            let (r, g, b) = (
-                rgba[p] as f32,
-                rgba[p + 1] as f32,
-                rgba[p + 2] as f32,
-            );
-            let yy = 0.257f32.mul_add(r, 0.504f32.mul_add(g, 0.098f32.mul_add(b, 16.0)));
-            y.push(yy.clamp(16.0, 235.0) as u8);
+/// Convert an NV12 buffer back to RGBA (BT.601 limited) for thumbnails.
+fn nv12_to_rgba(nv12: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let w = w as usize;
+    let h = h as usize;
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let yv = nv12[y * w + x] as f32;
+            let uv = w * h + (y / 2) * w + (x / 2) * 2;
+            let u = nv12[uv] as f32 - 128.0;
+            let v = nv12[uv + 1] as f32 - 128.0;
+            let c = (yv - 16.0).max(0.0) * 1.164;
+            let i = (y * w + x) * 4;
+            out[i] = (c + 1.596 * v).clamp(0.0, 255.0) as u8;
+            out[i + 1] = (c - 0.392 * u - 0.813 * v).clamp(0.0, 255.0) as u8;
+            out[i + 2] = (c + 2.017 * u).clamp(0.0, 255.0) as u8;
+            out[i + 3] = 255;
         }
     }
-    for j in (0..hu).step_by(2) {
-        for i in (0..wu).step_by(2) {
-            let p = (j * wu + i) * 4;
-            let (r, g, b) = (
-                rgba[p] as f32,
-                rgba[p + 1] as f32,
-                rgba[p + 2] as f32,
-            );
-            let u =
-                (-0.148f32).mul_add(r, (-0.291f32).mul_add(g, 0.439f32.mul_add(b, 128.0)));
-            let v = 0.439f32.mul_add(
-                r,
-                (-0.368f32).mul_add(g, (-0.071f32).mul_add(b, 128.0)),
-            );
-            uv.push(u.clamp(16.0, 240.0) as u8);
-            uv.push(v.clamp(16.0, 240.0) as u8);
-        }
-    }
-    let mut out = y;
-    out.extend_from_slice(&uv);
     out
 }
-
-/// Encode square RGBA frames (VIDEO_NOTE_SIZE) to an H.264 mp4 at `path`.
-fn encode_video_note(
-    frames: &[(Vec<u8>, Duration)],
-    path: &std::path::Path,
-) -> Result<(), String> {
-    let d = VIDEO_NOTE_SIZE;
-    let mut encoder = Encoder::new(CodecType::H264, d, d).map_err(|e| e.to_string())?;
-    let mut writer = VideoWriter::new(
-        path,
-        d,
-        d,
-        VIDEO_FPS,
-        waterkit_video_container::MuxerCodecType::H264,
-    )
-    .map_err(|e| e.to_string())?;
-    if let Some(cfg) = encoder.codec_config() {
-        writer.set_codec_config(cfg);
-    }
-    for (i, (rgba, _ts)) in frames.iter().enumerate() {
-        let nv12 = rgba_to_nv12(rgba, d, d);
-        let mut stream = encoder.encode_nv12(&nv12);
-        let chunk: Vec<u8> = {
-            let mut v = Vec::new();
-            for b in stream.by_ref().flatten() {
-                v.extend_from_slice(&b);
-            }
-            v
-        };
-        if !chunk.is_empty() {
-            writer
-                .write_sample(&chunk, i == 0)
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    writer.finish().map_err(|e| e.to_string())
-}
-
 fn rgba_to_jpeg(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
         .ok_or_else(|| "thumbnail buffer size mismatch".to_string())?;
@@ -526,24 +885,18 @@ mod tests {
     use super::*;
     use base64::Engine;
 
-    /// NV12 planes: luma w*h then a quarter-sized interleaved UV plane.
+    /// NV12 -> RGBA thumbnail path produces a full-size opaque frame.
     #[test]
-    fn nv12_layout() {
-        let rgba = vec![128u8; 16 * 16 * 4];
-        let nv12 = rgba_to_nv12(&rgba, 16, 16);
-        assert_eq!(nv12.len(), 16 * 16 + (16 * 16) / 2);
-        // 0.5 grey → Y should sit near the midpoint of BT.601 limited range.
-        let y = nv12[0];
-        assert!((90..=170).contains(&y), "Y={y}");
-    }
-
-    /// Center-crop produces a square, nearest-neighbour downscale keeps size.
-    #[test]
-    fn crop_square() {
-        let rgba = vec![7u8; 8 * 4 * 4];
-        let sq = crop_square_rgba(&rgba, 8, 4, 2);
-        assert_eq!(sq.len(), 2 * 2 * 4);
-        assert_eq!(sq[0], 7);
+    fn nv12_to_rgba_roundtrip_shape() {
+        let w = 8;
+        let h = 8;
+        let mut nv12 = vec![126u8; w * h];
+        nv12.extend_from_slice(&vec![128u8; w * h / 2]);
+        let rgba = nv12_to_rgba(&nv12, w as u32, h as u32);
+        assert_eq!(rgba.len(), w * h * 4);
+        assert_eq!(rgba[3], 255);
+        let (r, g, b) = (rgba[0] as i32, rgba[1] as i32, rgba[2] as i32);
+        assert!((r - g).abs() < 8 && (g - b).abs() < 8, "rgb={r},{g},{b}");
     }
 
     /// Waveform is base64 of 100 5-bit bars packed into bytes.

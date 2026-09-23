@@ -17,11 +17,11 @@ use tdlib_rs::{enums, functions, types};
 use waterui::color::Srgb;
 use waterui::form::secure::Secure;
 use waterui::text::styled::{Style, StyledStr};
-use waterui::layout::{Point, ScrollController};
+use waterui::layout::ScrollController;
 use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::task::spawn_local;
-use waterui_image::{ReactiveImageHandle, image};
+
 use waterui::Identifiable;
 use waterui::log::error;
 use waterui::task::sleep;
@@ -222,7 +222,7 @@ pub struct Store {
     pub search: Binding<Str>,
     pub selected: Binding<Option<i64>>,
     pub messages: Binding<Vec<MessageRow>>,
-    pub scroll: ScrollController<Point>,
+    pub scroll: ScrollController<usize>,
     pub composer: Binding<Str>,
     pub reply_to: Binding<Option<i64>>,
     pub editing: Binding<Option<i64>>,
@@ -329,16 +329,17 @@ pub struct Store {
     pub capture_error: Binding<Str>,
     /// Video-note sheet state.
     pub video_note_open: Binding<bool>,
-    pub video_status: Binding<Str>,
     pub video_recording: Binding<bool>,
     pub video_elapsed: Binding<Str>,
-    /// Camera session owned by the video-note sheet.
-    pub video_session: Rc<RefCell<Option<crate::capture::VideoNoteCapture>>>,
-    /// Camera-open result pending pickup by the UI-thread pump.
+    /// Shared state with the sheet's GpuView (None while the sheet is closed).
+    pub video_shared:
+        Rc<RefCell<Option<Rc<RefCell<crate::capture::VideoNoteShared>>>>>,
+    /// Encoder-thread result channel while a finish is in flight.
     #[allow(clippy::type_complexity)]
-    pub video_open_rx: Rc<RefCell<Option<mpsc::Receiver<Result<crate::capture::VideoNoteCapture, String>>>>>,
-    /// Preview handle installed by the sheet's reactive_image.
-    pub video_preview: Rc<RefCell<Option<ReactiveImageHandle>>>,
+    pub video_done_rx:
+        Rc<RefCell<Option<mpsc::Receiver<Result<crate::capture::VideoNoteDone, String>>>>>,
+    /// Path of the mp4 currently being written.
+    pub video_path: Rc<RefCell<String>>,
     /// Message id flash-highlighted after jump-to-message.
     pub highlight_msg: Binding<i64>,
     /// 2FA management sheet.
@@ -634,7 +635,7 @@ impl Store {
             search: Binding::container(Str::from("")),
             selected: Binding::default(),
             messages: Binding::<Vec<MessageRow>>::default(),
-            scroll: ScrollController::<Point>::new(Point::new(0.0, 0.0)),
+            scroll: ScrollController::<usize>::new(0),
             composer: Binding::container(Str::from("")),
             reply_to: Binding::default(),
             editing: Binding::default(),
@@ -706,12 +707,11 @@ impl Store {
             voice_elapsed: Binding::container(Str::from("")),
             capture_error: Binding::container(Str::from("")),
             video_note_open: Binding::bool(false),
-            video_status: Binding::container(Str::from("")),
             video_recording: Binding::bool(false),
             video_elapsed: Binding::container(Str::from("")),
-            video_session: Rc::new(RefCell::new(None)),
-            video_open_rx: Rc::new(RefCell::new(None)),
-            video_preview: Rc::new(RefCell::new(None)),
+            video_shared: Rc::new(RefCell::new(None)),
+            video_done_rx: Rc::new(RefCell::new(None)),
+            video_path: Rc::new(RefCell::new(String::new())),
             highlight_msg: Binding::i64(0),
             twofa_open: Binding::bool(false),
             twofa_old: Binding::<Secure>::default(),
@@ -727,6 +727,117 @@ impl Store {
             notif_groups: Binding::bool(true),
             notif_channels: Binding::bool(true),
         }
+    }
+
+    /// Populate the store with fake data for screenshots/demos on
+    /// device-less VMs (`WATERGRAM_DEMO=1`). Never runs on the real path.
+    pub fn seed_demo(&self) {
+        self.me.set(MeInfo {
+            id: 1,
+            name: "Lexo".into(),
+            phone: "8613800000000".into(),
+            username: "lexoliu".into(),
+        });
+        self.connection.set_from("Online");
+        self.dark.set(true);
+        self.screen.set(Screen::Main);
+        let mk = |id: i64, title: &str, preview: &str, order: i64, unread: i32, pinned: bool, muted: bool, typing: bool, online: bool, icon: &str| {
+            ChatRow {
+                id,
+                title: Str::from(title.to_string()),
+                preview: Str::from(preview.to_string()),
+                order,
+                unread,
+                pinned,
+                muted,
+                marked_unread: false,
+                in_archive: false,
+                photo_file: 0,
+                time: Str::from("14:32"),
+                typing,
+                online,
+                kind_icon: Str::from(icon.to_string()),
+            }
+        };
+        self.chats.set(vec![
+            mk(1, "WaterUI devs", "Lexo: preview lands on GpuSurface now", 100, 3, true, false, false, false, "👥"),
+            mk(2, "Alice", "typing…", 90, 0, false, false, true, true, ""),
+            mk(3, "Saved Messages", "git bundle sha256 a6d3c8…", 80, 0, false, false, false, false, "🔖"),
+            mk(4, "Telegram News", "Stories are now available for…", 70, 0, false, true, false, false, "📢"),
+            mk(5, "Rust China", "anyone tried hydrolysis on wayland?", 60, 12, false, false, false, false, "👥"),
+            mk(6, "Bob", "see you at the rust meetup", 50, 0, false, false, false, false, ""),
+            mk(7, "dogfood crew", "heap corruption is upstream", 40, 0, false, false, false, false, "👥"),
+            mk(8, "Mom", "call me when free", 30, 1, false, false, false, false, ""),
+            mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "📢"),
+            mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, ""),
+        ]);
+        self.folders.set(vec![
+            FolderRow { id: 0, title: "All".into(), active: true },
+            FolderRow { id: -1, title: "Archived".into(), active: false },
+            FolderRow { id: 2, title: "Work".into(), active: false },
+        ]);
+        let styled = styled_from_formatted(&types::FormattedText {
+            text: "check https://waterui.dev for the docs".into(),
+            entities: vec![types::TextEntity {
+                offset: 0,
+                length: 5,
+                r#type: enums::TextEntityType::Bold,
+            }],
+        });
+        let m = |id: i64, sender: &str, text: &str, time: &str, outgoing: bool, read_out: bool, reply: &str, reactions: &str, fwd: &str, media: &str| MessageRow {
+            id,
+            sender: Str::from(sender.to_string()),
+            text: Str::from(text.to_string()),
+            time: Str::from(time.to_string()),
+            outgoing,
+            read_out,
+            can_edit: outgoing,
+            reply_excerpt: Str::from(reply.to_string()),
+            media_file: 0,
+            play_file: 0,
+            media_label: Str::from(media.to_string()),
+            reactions: Str::from(reactions.to_string()),
+            failed: false,
+            pending: false,
+            highlighted: false,
+            my_reaction: Str::from(""),
+            styled: StyledStr::empty(),
+            webpage: Str::from(""),
+            forwarded_from: Str::from(fwd.to_string()),
+        };
+        let mut msgs = vec![
+            m(10, "Alice", "morning! did the camera filters example work?", "09:41", false, false, "", "", "", ""),
+            m(11, "", "yes — device.clone() into Arc, preview straight on the GpuSurface", "09:42", true, true, "morning! did the camera…", "", "", ""),
+            m(12, "Alice", "nice. and the NV12 conversion?", "09:42", false, false, "", "👍2 ❤️1", "", ""),
+            m(13, "", "compute pass now — only the encoder input buffer ever leaves the GPU", "09:43", true, true, "", "", "", ""),
+        ];
+        msgs[3].styled = styled;
+        // real rows carry plain text alongside the styled body
+        msgs[3].text = Str::from("check https://waterui.dev for the docs");
+        msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "", "", ""));
+        msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
+        msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
+        msgs.push(m(17, "Alice", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
+        self.messages.set(msgs);
+        self.pinned_label.set_from("Alice: shipping it 🚀");
+        self.sessions.set(vec![
+            SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "current session · this device".into(), current: true },
+            SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
+        ]);
+        self.privacy_rows.set(vec![
+            PrivacyRow { setting: "Phone number".into(), audience: "My contacts".into(), key: enums::UserPrivacySetting::ShowPhoneNumber },
+            PrivacyRow { setting: "Last seen & online".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowStatus },
+            PrivacyRow { setting: "Profile photos".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowProfilePhoto },
+        ]);
+        self.contacts.set(vec![
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }) },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }) },
+        ]);
+        self.twofa.set_from("enabled");
+        self.sticker_packs.set(vec![
+            PackRow { id: 1, title: "Hot Cherry".into() },
+        ]);
+        self.accounts.set(vec![AccountRow { id: 1, label: "Lexo · current".into() }]);
     }
 
     /// Kick off the authorization flow once the view is mounted.
@@ -2082,9 +2193,9 @@ impl Store {
         .detach();
     }
 
-    /// Scroll/jump to a message: loads a window of history centered on it,
-    /// scrolls to the estimated offset and flash-highlights the bubble.
-    /// (ScrollController is Point-based — no per-item scroll exists.)
+    /// Scroll/jump to a message: loads a window of history around it, then
+    /// drives `List`'s `ScrollController<usize>` to the exact row index and
+    /// flash-highlights the bubble.
     pub fn jump_to_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
         if chat_id == 0 {
@@ -2114,16 +2225,10 @@ impl Store {
                 for (i, r) in list.iter_mut().enumerate() {
                     r.highlighted = Some(i) == pos;
                 }
-                let from_bottom = pos
-                    .map(|p| list.len().saturating_sub(1 + p) as f32);
                 store.messages.set(list);
                 store.highlight_msg.set(message_id);
-                if let Some(from_bottom) = from_bottom {
-                    // Rows render newest-at-bottom; estimate ~52 px per row
-                    // from the bottom edge (no per-item scroll API exists).
-                    store
-                        .scroll
-                        .scroll_to(Point::new(0.0, from_bottom * 52.0));
+                if let Some(idx) = pos {
+                    store.scroll.scroll_to(idx);
                 }
             }
         })
@@ -2201,7 +2306,8 @@ impl Store {
     }
 
     fn scroll_bottom(&self) {
-        self.scroll.scroll_to(Point::new(0.0, f32::MAX / 2.0));
+        let last = self.messages.get().len().saturating_sub(1);
+        self.scroll.scroll_to(last);
     }
 
     pub fn send(&self) {
@@ -2552,24 +2658,66 @@ impl Store {
 
     /// Open the video-note sheet: spin up camera + preview pump.
     pub fn open_video_note(&self) {
-        if self.video_session.borrow().is_some() {
-            self.video_note_open.set(true);
-            return;
+        if self.video_shared.borrow().is_none() {
+            // Fresh shared state — the GpuSurface's GpuView opens the camera on
+            // the render surface's own device/queue in `setup`.
+            *self.video_shared.borrow_mut() = Some(crate::capture::new_video_note_shared());
         }
         self.video_note_open.set(true);
-        self.video_status.set_from("starting camera…");
-        let (tx, rx) = mpsc::channel();
-        // open_camera blocks on the GPU adapter — run it off the UI thread.
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::capture::open_camera());
-        });
-        *self.video_open_rx.borrow_mut() = Some(rx);
+    }
+
+    /// Close the sheet and drop the camera session.
+    pub fn close_video_note(&self) {
+        if self.video_recording.get() {
+            self.finish_video_record();
+        }
+        self.video_shared.borrow_mut().take();
+        self.video_done_rx.borrow_mut().take();
+        self.video_note_open.set(false);
+        self.video_recording.set(false);
+        self.video_elapsed.set_from("");
+    }
+
+    /// Start collecting frames for the recording.
+    pub fn start_video_record(&self) {
+        let shared = self.video_shared.borrow().clone();
+        let Some(shared) = shared else {
+            return;
+        };
+        let path = self.next_capture_path("mp4");
+        *self.video_path.borrow_mut() = path;
+        crate::capture::video_note_start_recording(&shared, self.video_path.borrow().clone().into());
+        self.video_recording.set(true);
+        self.refresh_video_elapsed();
+    }
+
+    /// Update the video-note elapsed label.
+    pub fn refresh_video_elapsed(&self) {
+        let shared = self.video_shared.borrow().clone();
+        let secs = shared
+            .as_ref()
+            .map(crate::capture::video_note_elapsed)
+            .unwrap_or(0);
+        self.video_elapsed.set_from(format!("0:{secs:02}"));
+    }
+
+    /// Stop recording; the encoder thread finishes the mp4 and replies on a
+    /// channel this poll reads back on the UI task (never blocks).
+    pub fn finish_video_record(&self) {
+        self.video_recording.set(false);
+        let shared = self.video_shared.borrow().clone();
+        let Some(shared) = shared else {
+            return;
+        };
+        let rx = crate::capture::video_note_stop_recording(&shared);
+        shared.borrow().status.set_from("finishing…");
+        *self.video_done_rx.borrow_mut() = rx;
         let store = self.clone();
         spawn_local(async move {
             loop {
-                sleep(std::time::Duration::from_millis(100)).await;
+                sleep(std::time::Duration::from_millis(120)).await;
                 let result = {
-                    let mut slot = store.video_open_rx.borrow_mut();
+                    let mut slot = store.video_done_rx.borrow_mut();
                     match slot.as_ref().map(|rx| rx.try_recv()) {
                         Some(Ok(result)) => {
                             *slot = None;
@@ -2583,14 +2731,24 @@ impl Store {
                     }
                 };
                 match result {
-                    Some(Ok(cap)) => {
-                        *store.video_session.borrow_mut() = Some(cap);
-                        store.video_status.set_from("");
-                        store.pump_video_preview();
+                    Some(Ok(done)) => {
+                        let thumb_path = store.next_capture_path("jpg");
+                        let thumb_path_w = thumb_path.clone();
+                        let thumb_bytes = done.thumb;
+                        std::thread::spawn(move || {
+                            let _ = std::fs::write(thumb_path_w, &thumb_bytes);
+                        });
+                        let path = store.video_path.borrow().clone();
+                        store.send_video_file(path, thumb_path, done.duration);
+                        if let Some(sh) = store.video_shared.borrow().as_ref() {
+                            sh.borrow().status.set_from("sent");
+                        }
                         break;
                     }
                     Some(Err(e)) => {
-                        store.video_status.set_from(format!("camera: {e}"));
+                        if let Some(sh) = store.video_shared.borrow().as_ref() {
+                            sh.borrow().status.set_from(format!("encode: {e}"));
+                        }
                         break;
                     }
                     None => break,
@@ -2598,86 +2756,6 @@ impl Store {
             }
         })
         .detach();
-    }
-
-    /// Close the sheet and drop the camera session.
-    pub fn close_video_note(&self) {
-        self.video_session.borrow_mut().take();
-        self.video_note_open.set(false);
-        self.video_recording.set(false);
-        self.video_status.set_from("");
-        self.video_elapsed.set_from("");
-    }
-
-    /// Pump latest camera frames into the sheet's preview image (~30 Hz).
-    fn pump_video_preview(&self) {
-        let store = self.clone();
-        spawn_local(async move {
-            loop {
-                sleep(std::time::Duration::from_millis(33)).await;
-                let done = {
-                    let session = store.video_session.borrow();
-                    session.is_none()
-                };
-                if done {
-                    break;
-                }
-                let frame = {
-                    let session = store.video_session.borrow();
-                    session.as_ref().and_then(|s| s.next_preview())
-                };
-                if let (Some(rgba), Some(handle)) =
-                    (frame, store.video_preview.borrow().clone())
-                {
-                    handle.set(image(
-                        rgba,
-                        crate::capture::VIDEO_NOTE_SIZE,
-                        crate::capture::VIDEO_NOTE_SIZE,
-                    ));
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Start collecting frames for the recording.
-    pub fn start_video_record(&self) {
-        if let Some(cap) = self.video_session.borrow_mut().as_mut() {
-            cap.start_recording();
-            self.video_recording.set(true);
-            self.refresh_video_elapsed();
-        }
-    }
-
-    /// Update the video-note elapsed label.
-    pub fn refresh_video_elapsed(&self) {
-        let secs = self
-            .video_session
-            .borrow()
-            .as_ref()
-            .map(|c| c.elapsed())
-            .unwrap_or(0);
-        self.video_elapsed.set_from(format!("0:{secs:02}"));
-    }
-
-    /// Stop recording, encode mp4, send as a video note.
-    pub fn finish_video_record(&self) {
-        self.video_recording.set(false);
-        let path = self.next_capture_path("mp4");
-        let result = {
-            let session = self.video_session.borrow();
-            session.as_ref().map(|s| s.finish(std::path::Path::new(&path)))
-        };
-        match result {
-            Some(Ok((duration, thumb))) => {
-                let thumb_path = self.next_capture_path("jpg");
-                let _ = std::fs::write(&thumb_path, &thumb);
-                self.send_video_file(path, thumb_path, duration);
-                self.video_status.set_from("sent");
-            }
-            Some(Err(e)) => self.video_status.set_from(format!("encode: {e}")),
-            None => self.video_status.set_from("no camera"),
-        }
     }
 
     /// Send the recorded mp4 as a video-note message.

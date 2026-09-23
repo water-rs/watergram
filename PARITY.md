@@ -47,7 +47,7 @@
 | 复制文本 | ✅ | `getMessage` + 剪贴板 | — |
 | 已读标记（拉取后回执） | ✅ | `viewMessages` | — |
 | 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
-| 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + 按行高估算 `ScrollController` 滚动 + 气泡高亮 | — |
+| 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + `List` `ScrollController<usize>` 按索引精确滚动 + 气泡高亮 | — |
 | 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
 | Reactions 展示 | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
@@ -65,7 +65,7 @@
 | 发送视频 | ✅ | `sendMessage(inputMessageVideo)`（按扩展名分发） | `attachment_content_dispatch` |
 | 发送文件 | ✅ | `sendMessage(inputMessageDocument)`（默认兜底） | `attachment_content_dispatch` |
 | 语音消息（录制/发送/播放） | ✅ | 播放：`video_player`；录制：waterkit-audio cpal → opus-pure Ogg/Opus + waveform → `inputMessageVoiceNote` | `opus_ogg_container`、`waveform_encodes_100_bars`、`voice_record_button_handles_missing_device` |
-| 视频消息 | ✅ | 播放：`video_player`；录制：waterkit-camera → wgpu readback → 方形裁剪 → waterkit-codec H.264 → VideoWriter mp4 → `inputMessageVideoNote`（VA-API 编码需 /dev/dri） | `nv12_layout`、`crop_square`、`video_note_handles_missing_camera` |
+| 视频消息 | ✅ | 播放：`video_player`；录制：GpuSurface/GpuView 直渲预览（device.clone → Arc，帧留 GPU）→ compute pass NV12 → waterkit-codec H.264 → VideoWriter mp4 → `inputMessageVideoNote`（VA-API 编码需 /dev/dri） | `nv12_layout`、`crop_square`、`video_note_handles_missing_camera` |
 | 贴纸 | ✅ | `getRecentStickers`/`searchStickers`/`getInstalledStickerSets`/`getStickerSet`（emoji 搜索+贴纸包浏览）→ `inputMessageSticker` | `sticker_picker_toggles` |
 | GIF | ✅ | `getSavedAnimations` + @gif inline bot `getInlineQueryResults` trending 搜索 → `inputMessageAnimation` | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
