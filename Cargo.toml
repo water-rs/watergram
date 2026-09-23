@@ -78,6 +78,8 @@ pollster = "1"
 # release carries these.
 [patch.crates-io]
 hydrolysis = { git = "https://github.com/water-rs/hydrolysis", rev = "47b1081206c1e88a3c011aafe7bf186352ac52e4" }
+nami-core = { git = "https://github.com/water-rs/nami", rev = "969900ea8d5dacb20c276fe829d73468d5d59162" }
+
 block = { git = "https://github.com/Dicklesworthstone/rust-block", rev = "b39ae859d1ee8e8cb5eef6a516471f1578d26b96" }
 xcb = { git = "https://github.com/rust-x-bindings/rust-xcb", rev = "ae3b2cd080e78173223038ccbebdc644eaf4a9ad" }
 vello = { git = "https://github.com/lexoliu/vello", rev = "5e5f538556be16527f67379b105af82f408b747d" }

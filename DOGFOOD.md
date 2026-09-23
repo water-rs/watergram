@@ -720,6 +720,15 @@ Real-renderer verification of the chat page, the docked/overlay switch,
 and the media grid is therefore **blocked on nami#23** — the equivalent
 `#[waterui::test]` probes stay green (waterui#1213).
 
+**r13 RESOLVED:** nami#23 landed (nami dev `969900ea`, consumed via
+`[patch.crates-io] nami-core`). The chat page — including the honest
+`when(docked,…).otherwise(…)` switch and the shared-media grid — now
+mounts and renders on the winit renderer with **zero panics** at both
+1400×900 (docked) and 1000×700 (overlay). waterui#1213 stays open: the
+`tests::nami_cancel_reentrancy_minimal` repro still does not panic under
+SemanticApp, so the testing-runtime gap is real even though the crash
+itself is fixed upstream.
+
 ---
 
 ## r11-4b: SemanticRuntime layout diverges from the winit renderer and from SemanticApp
@@ -753,5 +762,109 @@ Three divergences on the identical view tree, all reproducible via
    `118.8×93.75` ≈ 5 lines at cap 120); SemanticRuntime renders one line
    clipped at the cap edge (visible in r11 mcp screenshots at
    `WATERGRAM_WIN_SIZE=1400x900`).
+
+---
+
+## r13-1: `water run` ignores the app's `[patch.crates-io]` — git-pin fixes never reach the real renderer
+
+**Version:** water dev channel, watergram stable channel + `[patch]`
+pins (waterui `b838d73`, hydrolysis `47b1081`, nami-core `969900ea`).
+
+`water run` generates a managed crate at
+`~/.water/build_cache/<app>/managed_backends/hydrolysis` with its OWN
+`Cargo.toml` and `Cargo.lock`, and builds *that* as the binary. The app
+is only a `path` dependency there, and `[patch.crates-io]` does not
+propagate from non-root manifests — so the shipped binary resolves
+**registry** nami-core 0.3.3 and **registry** hydrolysis 0.3.1 (no #115
+icon-button fix, no dev waterui, no nami#23 fix) even though the app's
+lockfile pins all three to dev revs. Observed: `cargo tree` in the
+managed dir shows `nami-core v0.3.3 (registry)` after the app-side patch
+was added; `water run` reproduced the *pre-fix* panic on the fixed nami
+dev rev until the same patch was hand-added to the generated manifest.
+Expected: the generated manifest inherits/merges the app's
+`[patch.crates-io]` table (or `water run` builds the app workspace
+directly) so a documented `[patch]` flow exercises the pinned revs end
+to end. Workaround used this session (documented, not in the repo):
+patch the generated Cargo.toml the same way and build the bin target
+inside the managed dir.
+
+---
+
+## r13-2b: compressed single-line preview starves the spacer — badge off the trailing edge, no ellipsis
+
+**Version:** waterui dev `b838d73`, hydrolysis `47b1081`, nami-core
+`969900ea`. Probes: `tests::probe_row_bisect` (variants D vs E) and
+`tests::probe_chat_row_badge`.
+
+```rust
+hstack((
+    text("RC").padding_with(44.0),                    // avatar slot
+    vstack((
+        hstack((title, spacer(), "14:32")).spacing(4.0),
+        hstack((preview.caption().line_limit(1), spacer(), badge))
+            .spacing(4.0),
+    ))
+    .spacing(2.0)
+    .leading(),
+))
+.spacing(10.0)
+.padding_with((6.0, 10.0))
+```
+
+at a 340px viewport (the inner column is offered ~201.7 after the
+avatar):
+
+- title row: `14:32` placed at `(300.1, 259.3, 29.9, 14.1)` — spacer
+  expands, text lands on the trailing edge at x=330. ✓
+- preview row: preview text placed `(128.3, …, 141.7, 14.1)` — narrower
+  than the ~193.7 share it could keep — `spacer` allocated ~0, badge
+  `Image (277.9, …, 25.5, 18.1)` ends at x=303.4, **~27 short** of the
+  trailing edge. The preview is hard-clipped with **no ellipsis**.
+- Same shape with a preview that fits (`"call me when free"`): badge at
+  `(311.3, …, 18.7, 18.1)` ends x=330 — correct. Only breaks under
+  width pressure.
+
+Expected: under `compress_to_fit` the leftover slack goes to the stretch
+child (the spacer) so the badge keeps the trailing edge, and a
+line-limited text ellipsizes at its box edge. Observed: slack is given
+to no child (the hstack leaves ~26.6dp unused inside its placed box),
+and `text().line_limit(1)` clips without an ellipsis — `text.rs` says
+the ellipsis comes "where the backend's native text machinery provides
+it", so the ellipsis half is a hydrolysis text gap; the spacer
+starvation is the layout half.
+
+---
+
+## r13-3: `Menu` item actions cannot extract env state — popup env does not inherit `.state(&store)`
+
+**Version:** waterui dev `b838d73`, verified under SemanticApp
+(`tests::archive_toggle_rebuilds_list`).
+
+```rust
+Menu::new(
+    label("Menu").icon(mdi::menu()).icon_only(),
+    (
+        "Archive".action(|store: Store| store.toggle_archive_view()),
+        ...
+    ),
+)
+```
+
+Mounted under `views::sidebar_view(...).state(&store)`: the menu button
+opens the dropdown, the item resolves — and tapping it panics:
+`failed to extract watergram::state::Store from environment for action:
+Environment state Store not found at position 0; install the value with
+.state(&value) on an ancestor of the handler's view`. Installing
+`.state(&store)` directly on the `Menu` widget does not reach the popup
+either — the popup env is a fresh root, not a descendant of the widget's
+env. Working pattern: zero-arg closures that capture the store
+(`move || s.toggle_archive_view()`), navigation via a store-owned
+`NavigationPath`. The same gap presumably applies to `context_menu`
+`.action(|store: Store| …)` items (same popup-env mechanism) —
+unverified: SemanticApp offers no way to open a context menu and tap its
+items, and the ~60 context-menu action sites in the app are unchanged
+until the real renderer can drive one. Whether the hydrolysis Menu
+realization shares the env-rooting behavior is likewise open — the
+finding is SemanticApp-verified.
 
 ---

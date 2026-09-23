@@ -92,6 +92,7 @@ pub fn app(mut env: Environment) -> App {
             store.selected.set(Some(1));
             store.open_chat.set(1);
             store.info_open.set(true);
+            store.load_shared_media();
         }
     }
     env.install(
@@ -119,6 +120,7 @@ pub fn app(mut env: Environment) -> App {
                             s.selected.set(Some(1));
                             s.open_chat.set(1);
                             s.info_open.set(true);
+                            s.load_shared_media();
                         }
                         Some("attach") => {
                             s.selected.set(Some(1));
@@ -522,7 +524,8 @@ mod tests {
         store.chats.set(vec![chat(1, "Alice", "hello", 100)]);
         let mode = store.archive_mode.clone();
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
-        app.query().role(Role::BUTTON).label("Archive").tap();
+        app.query().label("Menu").tap();
+        app.query().label("Archive").tap();
         assert!(mode.get());
     }
 
@@ -902,6 +905,158 @@ mod tests {
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_outgoing.txt", &mut app);
         let _ = app.snapshot().save_png("/tmp/probe_outgoing.png");
+    }
+
+    /// r13-2b bisect: same structure as the row's preview line —
+    /// text(line_limit 1) + spacer + Image badge, inside a vstack.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_row_bisect(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use std::num::NonZeroUsize;
+        use waterui::shape::Circle;
+        use waterui::theme::color::{Accent, AccentForeground, Foreground};
+        let one = NonZeroUsize::new(1).unwrap();
+        let mut app = ui.viewport(340, 300).mount_offscreen(move || {
+            vstack((
+            vstack((
+                // A: plain spacer + text badge
+                hstack((
+                    text("anyone tried hydrolysis on wayland?").caption().line_limit(one).muted(),
+                    spacer(),
+                    text("12").caption(),
+                ))
+                .spacing(4.0),
+                // B: no line_limit
+                hstack((
+                    text("anyone tried hydrolysis on wayland?").caption().muted(),
+                    spacer(),
+                    text("12").caption(),
+                ))
+                .spacing(4.0),
+                // C: line_limit + Circle Image badge
+                hstack((
+                    text("anyone tried hydrolysis on wayland?").caption().line_limit(one).muted(),
+                    spacer(),
+                    text("12")
+                        .caption()
+                        .foreground(AccentForeground)
+                        .padding_with((2.0, 6.0))
+                        .background(Circle.fill(Accent)),
+                ))
+                .spacing(4.0),
+            ))
+            .spacing(8.0)
+            .leading()
+            .padding_with((6.0, 10.0)),
+            // D: outer hstack with an avatar sibling (full row shape)
+            hstack((
+                text("RC").padding_with(44.0),
+                vstack((
+                    hstack((
+                        text("Rust China").body().line_limit(one).foreground(Foreground),
+                        spacer(),
+                        text("14:32").caption().muted(),
+                    ))
+                    .spacing(4.0),
+                    hstack((
+                        text("anyone tried hydrolysis on wayland?").caption().line_limit(one).muted(),
+                        spacer(),
+                        text("12")
+                            .caption()
+                            .foreground(AccentForeground)
+                            .padding_with((2.0, 6.0))
+                            .background(Circle.fill(Accent)),
+                    ))
+                    .spacing(4.0),
+                ))
+                .spacing(2.0)
+                .leading(),
+            ))
+            .spacing(10.0)
+            .padding_with((6.0, 10.0)),
+            // E: same full-row shape, short preview that fits
+            hstack((
+                text("RC").padding_with(44.0),
+                vstack((
+                    hstack((
+                        text("Rust China").body().line_limit(one).foreground(Foreground),
+                        spacer(),
+                        text("14:32").caption().muted(),
+                    ))
+                    .spacing(4.0),
+                    hstack((
+                        text("call me when free").caption().line_limit(one).muted(),
+                        spacer(),
+                        text("1")
+                            .caption()
+                            .foreground(AccentForeground)
+                            .padding_with((2.0, 6.0))
+                            .background(Circle.fill(Accent)),
+                    ))
+                    .spacing(4.0),
+                ))
+                .spacing(2.0)
+                .leading(),
+            ))
+            .spacing(10.0)
+            .padding_with((6.0, 10.0)),
+            ))
+            .spacing(12.0)
+            .leading()
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_rowbisect.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_rowbisect.png");
+    }
+
+    /// r13-2a: the sidebar toolbar row must keep every child inside the
+    /// 340px sidebar (registry-hydrolysis icon buttons are ~72dp wide, so a
+    /// four-button row overflowed into the detail pane).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_sidebar_toolbar(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
+            views::sidebar_view(inner.clone()).state(&store)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_toolbar.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_toolbar.png");
+        // Search field, menu button, connection label, new-chat button —
+        // bounds dump is checked manually: every child must end at x<=340.
+    }
+
+    /// r13-2b: measure the second hstack of a chat row — long preview with
+    /// unread badge. The badge must pin to the trailing edge and the preview
+    /// must ellipsize inside its offered width.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_chat_row_badge(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut app = ui.viewport(340, 200).mount_offscreen(move || {
+            views::chat_row(
+                store.clone(),
+                ChatRow {
+                    id: 5,
+                    title: "Rust China".into(),
+                    preview: "anyone tried hydrolysis on wayland? it renders".into(),
+                    order: 0,
+                    unread: 12,
+                    pinned: false,
+                    muted: false,
+                    marked_unread: false,
+                    in_archive: false,
+                    photo_file: 0,
+                    time: "14:32".into(),
+                    typing: false,
+                    online: false,
+                    kind_icon: "group".into(),
+                },
+            )
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_chatrow.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_chatrow.png");
+        app.query().label("12").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1571,6 +1726,56 @@ mod tests {
         app.query().label("Blocked users").assert_exists();
         app.query().label("Spammer").assert_exists();
         app.query().label("Unblock").assert_exists();
+    }
+
+    /// r13-4: Settings → Language lists the packs from
+    /// `getLocalizationTargetInfo` (demo seeds three).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn lang_pack_section(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.load_language_packs(); // demo branch seeds three rows
+        let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
+        app.query().label("Language").assert_exists();
+        app.query().label("English").assert_exists();
+        app.query().label("简体中文 — Chinese (Simplified)").assert_exists();
+        app.query().label("Deutsch — German").assert_exists();
+    }
+
+    #[test]
+    fn tr_lookup_picks_plural_slots_and_falls_back() {
+        let store = store();
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "Members".to_string(),
+            tdlib_rs::enums::LanguagePackStringValue::Pluralized(
+                tdlib_rs::types::LanguagePackStringValuePluralized {
+                    one_value: "1 member".into(),
+                    other_value: "{count} members".into(),
+                    ..Default::default()
+                },
+            ),
+        );
+        map.insert(
+            "Settings".to_string(),
+            tdlib_rs::enums::LanguagePackStringValue::Ordinary(
+                tdlib_rs::types::LanguagePackStringValueOrdinary {
+                    value: "Einstellungen".into(),
+                },
+            ),
+        );
+        map.insert(
+            "Gone".to_string(),
+            tdlib_rs::enums::LanguagePackStringValue::Deleted,
+        );
+        store.lang_strings.set(map);
+        assert_eq!(store.tr("Settings", 0, "Settings").as_str(), "Einstellungen");
+        assert_eq!(store.tr("Members", 1, "Members").as_str(), "1 member");
+        assert_eq!(
+            store.tr("Members", 5, "Members").as_str(),
+            "{count} members"
+        );
+        assert_eq!(store.tr("Gone", 0, "fallback").as_str(), "fallback");
+        assert_eq!(store.tr("Missing", 0, "fallback").as_str(), "fallback");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]

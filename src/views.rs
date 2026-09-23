@@ -33,16 +33,13 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{AccountRow, ChatRow, FolderRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
-use mdi::account;
+use crate::state::{AccountRow, ChatRow, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use mdi::folder_plus;
 use mdi::account_group;
 use mdi::alert_circle;
-use mdi::archive;
-use mdi::bookmark;
-use mdi::bullhorn;
 use mdi::clock_outline;
 use mdi::camera;
+use mdi::check;
 use mdi::microphone;
 use mdi::file_gif_box;
 use mdi::close;
@@ -50,12 +47,12 @@ use mdi::delete_sweep;
 use mdi::account_plus;
 use mdi::emoticon;
 use mdi::link_variant;
-use mdi::cog;
 use mdi::file;
 use mdi::image_outline;
 use mdi::information;
 use mdi::lock;
 use mdi::magnify;
+use mdi::menu;
 use mdi::paperclip;
 use mdi::pin;
 use mdi::poll;
@@ -309,20 +306,37 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
 
     vstack((
         hstack((
-            icon_button_nav(plus(), "New chat", |nav: Navigator<Route>| {
-                nav.push(Route::NewChat)
-            }),
-            icon_button(archive(), "Archive", |store: Store| {
-                store.toggle_archive_view()
-            }),
-            icon_button(account(), "Accounts", |store: Store| {
-                store.accounts_open.toggle()
-            }),
+            // Telegram Desktop header: a menu button holds the secondary
+            // actions; at registry-hydrolysis button widths (~72dp each) a
+            // row of four icon buttons overflows the 340px sidebar.
+            // Menu items' actions run under the popup's env, which does not
+            // inherit the app's `.state(&store)` — env extraction of Store /
+            // Navigator fails there (SemanticApp probe; DOGFOOD). Capture
+            // the store in zero-arg closures instead.
+            Menu::new(
+                label("Menu").icon(menu()).icon_only(),
+                ({
+                    let s = store.clone();
+                    store.tr("ArchivedChats", 0, "Archive").action(move || {
+                        s.toggle_archive_view()
+                    })
+                }, {
+                    let s = store.clone();
+                    store.tr("Accounts", 0, "Accounts").action(move || {
+                        s.toggle_accounts()
+                    })
+                }, {
+                    let s = store.clone();
+                    store
+                        .tr("Settings", 0, "Settings")
+                        .action(move || s.nav.push(Route::Settings))
+                }),
+            ),
             spacer(),
             text!("{conn}").caption().muted(),
             spacer(),
-            icon_button_nav(cog(), "Settings", |nav: Navigator<Route>| {
-                nav.push(Route::Settings)
+            icon_button_nav(plus(), "New chat", |nav: Navigator<Route>| {
+                nav.push(Route::NewChat)
             }),
         ))
         .padding_with((6.0, 12.0)),
@@ -534,14 +548,14 @@ where
         .action(move |nav: Navigator<Route>| on_tap(nav))
 }
 
+/// Chat-list kind glyph: Telegram Desktop shows none for private chats,
+/// groups, or channels (the avatar carries the type) — only a lock marks a
+/// secret chat.
 pub(crate) fn kind_icon(kind: &str) -> impl View {
-    match kind {
-        "group" => account_group().tint(MutedForeground).size(12.0, 12.0),
-        "channel" => bullhorn().tint(MutedForeground).size(12.0, 12.0),
-        "secret" => lock().tint(MutedForeground).size(12.0, 12.0),
-        "saved" => bookmark().tint(MutedForeground).size(12.0, 12.0),
-        _ => account().tint(MutedForeground).size(12.0, 12.0),
-    }
+    when(kind == "secret", || {
+        lock().tint(MutedForeground).size(12.0, 12.0)
+    })
+    .otherwise(|| ())
 }
 
 pub(crate) fn initials(name: &str) -> Str {
@@ -1547,7 +1561,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                 Color::from(BorderColor).height(1.0),
                 hstack((
                     spacer(),
-                    text("Unread messages")
+                    text(store.tr("UnreadMessages", 0, "Unread messages"))
                         .caption()
                         .bold()
                         .foreground(Accent)
@@ -1671,6 +1685,9 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
 // Pushed routes
 // ---------------------------------------------------------------------------
 
+// LangRow fields are immutable row data — the active flag updates by
+// replacing the pack list, not by mutating the row in place.
+#[allow(collection_item_snapshot)]
 pub(crate) fn settings_view(store: Store) -> NavigationView {
     store.start_notification_watchers();
     let me = store.me.clone();
@@ -1725,7 +1742,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         .spacing(10.0)
         .leading(),
         vstack((
-            text("Privacy").caption().muted(),
+            text(store.tr("PrivacySettings", 0, "Privacy"))
+                .caption()
+                .muted(),
             hstack((
                 text("Two-step verification"),
                 spacer(),
@@ -1765,7 +1784,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 },
             ),
             vstack((
-                text("Notifications").caption().muted(),
+                text(store.tr("Notifications", 0, "Notifications"))
+                    .caption()
+                    .muted(),
                 toggle("Private chats", &store.notif_private),
                 toggle("Groups", &store.notif_groups),
                 toggle("Channels", &store.notif_channels),
@@ -1773,7 +1794,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             .spacing(4.0)
             .leading(),
             hstack((
-                text("Active sessions").caption().muted(),
+                text(store.tr("SessionsTitle", 0, "Active sessions"))
+                    .caption()
+                    .muted(),
                 spacer(),
                 text("Terminate other sessions")
                     .caption()
@@ -1781,7 +1804,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     .on_tap(|store: Store| store.terminate_all_sessions()),
             )),
             vstack((
-                text("Blocked users").caption().muted(),
+                text(store.tr("BlockedUsers", 0, "Blocked users"))
+                    .caption()
+                    .muted(),
                 VStack::for_each(
                     SignalCollection::new(store.blocked.clone()),
                     |row: MemberRow| {
@@ -1821,7 +1846,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         .spacing(10.0)
         .leading(),
         vstack((
-            text("Storage").caption().muted(),
+            text(store.tr("StorageUsage", 0, "Storage"))
+                .caption()
+                .muted(),
             hstack((
                 text!("{storage}", storage = store.storage_summary.clone())
                     .muted(),
@@ -1839,10 +1866,37 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
         ))
         .spacing(8.0)
         .leading(),
-        text("Appearance").caption().muted(),
+        // Language: packs from getLocalizationTargetInfo; tapping applies
+        // setOption language_pack_id and refetches the pack's strings.
+        vstack((
+            text(store.tr("Language", 0, "Language"))
+                .caption()
+                .muted(),
+            VStack::for_each(
+                SignalCollection::new(store.lang_packs.clone()),
+                |row: LangRow| {
+                    let id = row.id.clone();
+                    hstack((
+                        text(row.name.clone()),
+                        when(row.beta, || text("beta").caption().muted()),
+                        spacer(),
+                        when(row.active, || check().tint(Accent).size(16.0, 16.0)),
+                    ))
+                    .padding_with((4.0, 0.0))
+                    .on_tap(move |store: Store| store.apply_language(&id))
+                },
+            ),
+        ))
+        .spacing(4.0)
+        .leading(),
+        text(store.tr("Appearance", 0, "Appearance"))
+            .caption()
+            .muted(),
         toggle("Dark mode", &dark),
-        text("Session").caption().muted(),
-        button("Log out").action(|store: Store| store.logout()),
+        text(store.tr("SessionsTitle", 0, "Session"))
+            .caption()
+            .muted(),
+        button(store.tr("LogOut", 0, "Log out")).action(|store: Store| store.logout()),
     ))
     .spacing(10.0)
     .leading()
@@ -1855,6 +1909,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             store.load_storage();
             store.load_privacy();
             store.load_blocked();
+            store.load_language_packs();
         }
     });
     let store_for_twofa = store.clone();
@@ -2177,22 +2232,33 @@ pub(crate) fn poll_creator(store: Store) -> impl View {
         field("Question", &question_b).prompt("Ask a question"),
         option_stack.spacing(4.0),
         hstack((
-            text("+ Add an option")
+            text(store.tr("AddAnOption", 0, "+ Add an option"))
                 .caption()
                 .foreground(Accent)
                 .on_tap(|store: Store| store.add_poll_option()),
             spacer(),
         ))
-        .padding_with((0.0, 10.0)),
-        toggle("Anonymous votes", &anon_b),
-        when(regular, move || toggle("Multiple answers", &multi_b)),
-        toggle("Quiz mode", &quiz_b),
+        .padding_with((0.0, 12.0)),
+        toggle(store.tr("PollAnonymous", 0, "Anonymous votes"), &anon_b)
+            .padding_with((0.0, 12.0)),
+        when(regular, {
+            let multi_label = store.tr("PollMultiple", 0, "Multiple answers");
+            move || {
+                toggle(multi_label.clone(), &multi_b).padding_with((0.0, 12.0))
+            }
+        }),
+        toggle(store.tr("QuizMode", 0, "Quiz mode"), &quiz_b)
+            .padding_with((0.0, 12.0)),
+        // Telegram actions: text buttons on the trailing edge, primary last.
         hstack((
-            button("Create").action(|store: Store| store.send_poll()),
             spacer(),
-            button("Cancel").action(|store: Store| store.poll_open.set(false)),
+            button(store.tr("Cancel", 0, "Cancel"))
+                .style(ButtonStyle::Plain)
+                .action(|store: Store| store.poll_open.set(false)),
+            button(store.tr("Create", 0, "Create"))
+                .action(|store: Store| store.send_poll()),
         ))
-        .padding_with((0.0, 10.0)),
+        .padding_with((0.0, 12.0)),
     ))
     .spacing(6.0)
     .padding_with((6.0, 0.0))
@@ -2271,7 +2337,9 @@ pub(crate) fn info_panel(store: Store) -> impl View {
         ))
         .padding_with((8.0, 14.0)),
         hstack((
-            text("Members").caption().muted(),
+            text(store.tr("Members", 0, "Members"))
+                .caption()
+                .muted(),
             spacer(),
             text!("{n}", n = store.members_count.clone())
                 .caption()

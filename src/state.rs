@@ -411,6 +411,13 @@ pub struct Store {
     /// Account switcher rows + dropdown state.
     pub accounts: Binding<Vec<AccountRow>>,
     pub accounts_open: Binding<bool>,
+    /// Language packs from `getLocalizationTargetInfo` (Settings → Language).
+    pub lang_packs: Binding<Vec<LangRow>>,
+    /// Currently applied language pack id ("en" default).
+    pub lang_id: Binding<Str>,
+    /// Localization key -> value of the applied pack (LanguagePackStringValue
+    /// enums so plural forms stay available to `tr`).
+    pub lang_strings: Binding<HashMap<String, enums::LanguagePackStringValue>>,
     /// Installed sticker packs shown above the sticker cells.
     pub sticker_packs: Binding<Vec<PackRow>>,
     /// Live voice capture session (recorder + collector thread).
@@ -483,6 +490,20 @@ pub struct AccountRow {
     #[id]
     pub id: i32,
     pub label: Str,
+}
+
+/// A language pack from `getLocalizationTargetInfo`.
+#[derive(Clone, Identifiable)]
+pub struct LangRow {
+    /// Language pack id (row key).
+    #[id]
+    pub id: Str,
+    /// "native — English" name as shown by Telegram ("Deutsch — German").
+    pub name: Str,
+    /// Pack marked beta by Telegram.
+    pub beta: bool,
+    /// Currently applied pack.
+    pub active: bool,
 }
 
 /// Peer profile card for the Profile route.
@@ -829,6 +850,10 @@ impl Store {
             editing_folder: Binding::i32(0),
             accounts: Binding::<Vec<AccountRow>>::default(),
             accounts_open: Binding::bool(false),
+            lang_packs: Binding::<Vec<LangRow>>::default(),
+            lang_id: Binding::container(Str::from("en")),
+            lang_strings:
+                Binding::<HashMap<String, enums::LanguagePackStringValue>>::default(),
             sticker_packs: Binding::<Vec<PackRow>>::default(),
             voice_session: Rc::new(RefCell::new(None)),
             recording_voice: Binding::bool(false),
@@ -1871,10 +1896,18 @@ impl Store {
             }
             enums::Update::Option(o) => {
                 if o.name == "my_id"
-                    && let enums::OptionValue::Integer(v) = o.value
+                    && let enums::OptionValue::Integer(v) = &o.value
                 {
                     self.my_id.set(v.value);
                 }
+                if o.name == "language_pack_id"
+                    && let enums::OptionValue::String(v) = &o.value
+                {
+                    self.lang_id.set_from(v.value.clone());
+                }
+            }
+            enums::Update::LanguagePackStrings(u) => {
+                self.merge_language_strings(&u);
             }
             enums::Update::ConnectionState(s) => {
                 let label = match s.state {
@@ -2018,6 +2051,7 @@ impl Store {
             let _ = functions::load_chats(Some(enums::ChatList::Main), 200, client).await;
         })
         .detach();
+        self.load_language_packs();
     }
 
     fn reset(&self) {
@@ -2289,7 +2323,7 @@ impl Store {
     /// Shared media grid for the info panel: `searchChatMessages` with
     /// the PhotoAndVideo filter; photo small-file ids go through
     /// `want_file_id` so thumbs download and show via `file_signal`.
-    fn load_shared_media(&self) {
+    pub fn load_shared_media(&self) {
         let chat_id = self.open_chat.get();
         if chat_id == 0 {
             return;
@@ -3699,6 +3733,11 @@ impl Store {
         self.set_list(if next { -1 } else { 0 });
     }
 
+    /// Toggle the accounts panel from the sidebar menu.
+    pub fn toggle_accounts(&self) {
+        self.accounts_open.toggle();
+    }
+
     /// Switch the sidebar list: 0 = All chats, -1 = Archive, n = folder.
     pub fn set_list(&self, list_id: i32) {
         if self.active_folder.get() == list_id && self.archive_mode.get() == (list_id == -1) {
@@ -4988,6 +5027,152 @@ impl Store {
             }
         })
         .detach();
+    }
+
+    /// Look up a localization key in the applied language pack; `n` selects
+    /// the plural slot (zero/one/other — few/many collapse into `other`,
+    /// which needs the pack's `plural_code` to disambiguate). Missing or
+    /// deleted keys fall back to the app's English literal.
+    pub fn tr(&self, key: &str, n: i64, fallback: &str) -> Str {
+        use enums::LanguagePackStringValue as V;
+        let pick = |p: &types::LanguagePackStringValuePluralized| {
+            let out = match n {
+                0 if !p.zero_value.is_empty() => &p.zero_value,
+                1 if !p.one_value.is_empty() => &p.one_value,
+                _ => &p.other_value,
+            };
+            out.clone()
+        };
+        match self.lang_strings.get().get(key) {
+            Some(V::Ordinary(o)) => Str::from(o.value.clone()),
+            Some(V::Pluralized(p)) => Str::from(pick(p)),
+            _ => Str::from(fallback.to_string()),
+        }
+    }
+
+    /// Fetch pack strings for `id` into `lang_strings` and mark it applied.
+    async fn refresh_language(&self, id: &str, client: i32) {
+        let id = if id.is_empty() { "en" } else { id };
+        if client != 0 {
+            let _ = functions::synchronize_language_pack(id.into(), client).await;
+            if let Ok(enums::LanguagePackStrings::LanguagePackStrings(pack)) =
+                functions::get_language_pack_strings(id.into(), vec![], client)
+                    .await
+            {
+                let mut map = HashMap::new();
+                for s in pack.strings {
+                    if let Some(v) = s.value {
+                        map.insert(s.key, v);
+                    }
+                }
+                self.lang_strings.set(map);
+            }
+        }
+        self.lang_id.set_from(id.to_string());
+    }
+
+    /// List available language packs + load the applied pack's strings.
+    /// Called after login; `Update::LanguagePackStrings` keeps the map fresh.
+    pub fn load_language_packs(&self) {
+        let client = self.client_id.get();
+        if client == 0 {
+            // Demo mode: representative packs so Settings → Language renders.
+            self.lang_packs.set(vec![
+                LangRow {
+                    id: "en".into(),
+                    name: "English".into(),
+                    beta: false,
+                    active: true,
+                },
+                LangRow {
+                    id: "zh-hans-raw".into(),
+                    name: "简体中文 — Chinese (Simplified)".into(),
+                    beta: false,
+                    active: false,
+                },
+                LangRow {
+                    id: "de".into(),
+                    name: "Deutsch — German".into(),
+                    beta: true,
+                    active: false,
+                },
+            ]);
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            let mut current = store.lang_id.get().to_string();
+            if let Ok(enums::OptionValue::String(s)) =
+                functions::get_option("language_pack_id".into(), client).await
+            {
+                current = s.value.clone();
+            }
+            store.refresh_language(&current, client).await;
+            if let Ok(enums::LocalizationTargetInfo::LocalizationTargetInfo(
+                info,
+            )) = functions::get_localization_target_info(false, client).await
+            {
+                store.lang_packs.set(
+                    info.language_packs
+                        .iter()
+                        .map(|p| LangRow {
+                            id: p.id.clone().into(),
+                            name: format!("{} — {}", p.native_name, p.name)
+                                .into(),
+                            beta: p.is_beta,
+                            active: p.id.as_str() == current,
+                        })
+                        .collect(),
+                );
+            }
+        })
+        .detach();
+    }
+
+    /// Switch the UI language: `setOption language_pack_id`, then fetch the
+    /// pack's strings. Telegram applies on restart; views rebuild lazily.
+    pub fn apply_language(&self, id: &str) {
+        let id = id.to_string();
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            if client != 0 {
+                let _ = functions::set_option(
+                    "language_pack_id".into(),
+                    Some(enums::OptionValue::String(types::OptionValueString {
+                        value: id.clone(),
+                    })),
+                    client,
+                )
+                .await;
+            }
+            store.refresh_language(&id, client).await;
+            let mut packs = store.lang_packs.get();
+            for p in packs.iter_mut() {
+                p.active = p.id.as_str() == id;
+            }
+            store.lang_packs.set(packs);
+        })
+        .detach();
+    }
+
+    /// Merge pushed `Update::LanguagePackStrings` for the applied pack.
+    fn merge_language_strings(&self, u: &types::UpdateLanguagePackStrings) {
+        if u.language_pack_id != self.lang_id.get().as_str() {
+            return;
+        }
+        let mut map = self.lang_strings.get();
+        for s in &u.strings {
+            match &s.value {
+                Some(v) => {
+                    map.insert(s.key.clone(), v.clone());
+                }
+                None => {
+                    map.remove(&s.key);
+                }
+            }
+        }
+        self.lang_strings.set(map);
     }
 
     /// Save profile fields to the account.
