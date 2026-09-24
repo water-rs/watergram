@@ -3037,7 +3037,7 @@ impl Store {
         .detach();
     }
 
-    fn scroll_bottom(&self) {
+    pub(crate) fn scroll_bottom(&self) {
         let last = self.messages.get().len().saturating_sub(1);
         self.scroll.scroll_to(last);
     }

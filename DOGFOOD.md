@@ -432,7 +432,19 @@ window edge** (measured `scroll_view (835,172,280,528)`, cells clipped
 at x≈1000). Once #115 lands (~40-48 dp icon buttons) the pane floor
 drops ≈150 dp and the panel fits. Not routed around: the panel is the
 M3-correct `hstack`+fixed-width sibling composition; shrinking it
-below 280 would mis-size the shared-media grid.
+below 280 would mis-size the shared-media grid. (Superseded at r12:
+the panel now docks ≥1120 px and overlays below, per Telegram
+Desktop's own threshold — the clip no longer occurs at any width.)
+
+**r14 update — #115 landed on hydrolysis dev e676ca8.** Icon-only
+`button()`s now lay out at the M3 48 dp touch target: probe bounds on
+the new pins show `Attach file` `(6,644,48,48)` and `New chat`
+`(280,6,48,48)` — 48×48 boxes with the centred 40 dp container, all
+composer/toolbar children inside their panes. **One exception:
+`Menu::new(label(t).icon(i).icon_only(), items)` still measures
+72×40** (`(12,10,72,40)`) — the menu trigger builds its own
+`MENU_TRIGGER_STYLE` path and does not honour `icon_only`. That is a
+framework finding on top of #115.
 
 ### `EdgeInsets` tuple order is `(vertical, horizontal)` — ergonomics trap
 
@@ -868,3 +880,91 @@ realization shares the env-rooting behavior is likewise open — the
 finding is SemanticApp-verified.
 
 ---
+## r14: keyboard + accessibility-tree findings
+
+All verified with probe bounds/dumps; app-side fixes (decorative
+`.a11y_hidden(true)`, Button-role promotion, real `button()` for chips,
+`ModalInteraction` escape scopes on every overlay) are in views.rs.
+
+### Semantic walk never registers `hit_test.modal_interaction` — modal
+### Escape is untestable on `ui.mount`
+
+`ModalInteraction` reaches `hit_test.modal_interaction` only inside
+`bind_interaction_target_with_focus` (hit_test.rs:2275), which runs in the
+*rendered* widget emit path. The headless semantic walk emits a11y nodes
+from retained state via `emit_button_accessibility(ctx=None)` — no ctx, no
+interaction-target binding — so on `ui.mount` the flag is always `None`
+and `handle_keyboard_key_down`'s modal-Escape branch can never fire.
+Minimal repro:
+
+```rust
+let closed = waterui::reactive::binding(false);
+let esc = waterui_backend_core::widget::ModalInteraction::new(
+    true,
+    waterui::handler::SharedAction::new(move |_: Environment| closed.set(true)),
+);
+ui.viewport(300, 300).mount(move || {
+    vstack((button("Inside").action(|_: Store| {}),)).with(esc.clone())
+});
+app.settle(); app.press_named_key("Escape"); app.settle();
+// expected: closed == true; observed (mount): false.
+// Same test on ui.mount_offscreen: true — the rendered path registers.
+```
+
+Workaround for tests: drive modal-Escape tests on `mount_offscreen`.
+(`tests::probe_modal_escape_minimal`, `keyboard_escape_dismisses_*`.)
+
+### `press_named_key` emits `KeyState::Pressed` only — Enter/Space can
+### never activate on rendered runtimes
+
+`key_press_event` (testing/driver.rs:288) is the only key constructor and
+emits `Pressed` — there is no release event. Rendered runtimes
+(`mount_offscreen`, winit) use `KeyboardActivation::PressRelease`: press
+arms on key-down, activation fires on key-UP — so `press_named_key("Enter")`
+can never activate anything there (verified: a11y focus lands on the
+button node, `el.tap()`/a11y Click works, Enter does nothing). The headless
+semantic runtime uses `KeyboardActivation::Semantic` — activation fires on
+key-down — so Enter tests must run on `ui.mount`. Result: the two halves
+of the keyboard contract are each testable on only one runtime today
+(Enter on `mount`, modal Escape on `mount_offscreen`); on a real winit
+window the full contract presumably holds but cannot be exercised by the
+testing API. A `key_release_event`/`press_and_release` would close it.
+
+### `ui_focus()` reports text-input focus only
+
+`ui_focus()` is `focused_text_input_accessibility_node` — it stays `None`
+when keyboard focus sits on a button/list item. The a11y focus that covers
+every focusable node is `app.tree().focus()` (`update.focus`); keyboard
+tests must use it (fixed in `keyboard_tab_cycles_chat`).
+
+### Every drawn shape/fill leaks an unnamed `Image` a11y node
+
+`emit_graphics_image_accessibility` (renderer/tree/nodes.rs:984) emits
+`AccessibilityNodeRole::Image` for every graphics leaf — `.background(fill)`,
+`Circle.fill` avatars, badge dots, selection pills — each an unnamed
+role-Image leaf in the tree (`AccessibilityHidden` at :992 suppresses it).
+Audit consequence: a bare `text("…").background(fill)` or any decorative
+fill becomes an "unnamed IMAGE" violation unless the app marks every such
+view `.a11y_hidden(true)` (done app-side). Arguably anonymous fills should
+not emit a11y nodes at all — a shape has no text content and no action.
+
+### `text().on_tap` gesture targets: no role, no focus, no modal scope
+
+Gesture-only `on_tap` targets never call `bind_interaction_target` — they
+get no Button role, no keyboard focus, no focus binding, and crucially no
+`hit_test.modal_interaction` registration. Consequence measured: a `when`
+panel whose only controls are `text().on_tap` rows cannot be dismissed by
+Escape through `ModalInteraction` (the scope never registers) and cannot
+be reached by Tab. App fix: real `button().style(ButtonStyle::Plain)` for
+those rows (panel_tab_chip rewritten; verified Escape now closes the
+emoji panel on the rendered runtime). Whether plain-gesture targets should
+register as focusable/button-like is a framework question — today they are
+pointer-only.
+
+### No arrow-key navigation on list rows
+
+`keyboard_arrows_chat_list` probe: `ArrowDown` on the sidebar `List` does
+not move the selection (tree rows emit no Increment/Decrement/step
+semantics the arrow path can use). Telegram Desktop moves the chat
+selection with Up/Down. App-side this would need the framework to give
+list rows arrow semantics — recorded, not worked around.

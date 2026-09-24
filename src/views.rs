@@ -7,13 +7,14 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 
+use waterui_backend_core::widget::ModalInteraction;
 use waterui::component::list::{List, ListItem};
 use waterui::layout::frame::Frame;
 use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
 use waterui::media::Photo;
 use waterui::video::video_player;
-use waterui::accessibility::{AccessibilityChildren, AccessibilityRole};
+use waterui::accessibility::AccessibilityRole;
 use waterui::navigation::{
     ColumnWidth, NavigationSplitView, NavigationToolbar, NavigationToolbarItem,
     NavigationToolbarPlacement, NavigationView, Navigator,
@@ -28,7 +29,18 @@ use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Background, Error, Foreground,
     MutedForeground, Surface, SurfaceVariant,
 };
+use waterui::handler::SharedAction;
 use waterui::widget::condition::when;
+
+/// Escape-key dispatch for overlay layers: `ModalInteraction` marks a
+/// subtree as a modal scope, so the backend sends Escape to the topmost
+/// open overlay before any other handler (Telegram Desktop parity).
+fn modal_escape(store: Store, close: fn(&Store)) -> ModalInteraction {
+    ModalInteraction::new(
+        true,
+        SharedAction::new(move |_: Environment| close(&store)),
+    )
+}
 use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
@@ -417,6 +429,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         SignalCollection::new(folder_tabs.clone()),
                         move |tab: FolderRow| {
                             let label = tab.title.clone();
+                            let a11y = label.clone();
                             let id = tab.id;
                             let chip = if tab.active {
                                 text(label)
@@ -432,11 +445,15 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 .background(if tab.active {
                                     RoundedRectangle::new(0.5)
                                         .fill(SurfaceVariant)
+                                        .a11y_hidden(true)
                                         .anyview()
                                 } else {
                                     AnyView::default()
                                 })
-                                .on_tap(move |store: Store| store.set_list(id));
+                                .on_tap(move |store: Store| store.set_list(id))
+                                .a11y_label(a11y)
+                                .a11y_role(AccessibilityRole::Button)
+                                ;
                             if id > 0 {
                                 chip.context_menu((
                                     "Edit folder".action(move |store: Store| {
@@ -454,14 +471,12 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                     )),
                     // Same chip metrics as the tab chips so the row stays at
                     // chip height (the 40dp icon chip would stretch the row).
-                    folder_plus()
-                        .foreground(Accent)
-                        .size(14.0, 14.0)
-                        .padding_with((chip_pad_v, 8.0_f32))
-                        .on_tap(|store: Store| store.open_folder_editor(0))
-                        .a11y_label("New folder")
-                        .a11y_role(AccessibilityRole::Button)
-                        .a11y_children(AccessibilityChildren::ExcludeDescendants),
+                    button(Label::new("New folder", move || {
+                        folder_plus().foreground(Accent).size(14.0, 14.0)
+                    }))
+                    .style(ButtonStyle::Plain)
+                    .action(|store: Store| store.open_folder_editor(0))
+                    .padding_with((chip_pad_v, 8.0_f32)),
                 ))
                 .height(chip_row_h)
                 .padding_with((4.0, 8.0)),
@@ -556,6 +571,7 @@ pub(crate) fn kind_icon(kind: &str) -> impl View {
         lock().tint(MutedForeground).size(12.0, 12.0)
     })
     .otherwise(|| ())
+    .a11y_hidden(true)
 }
 
 pub(crate) fn initials(name: &str) -> Str {
@@ -573,6 +589,8 @@ pub(crate) fn avatar(store: Store, file_id: i32, title: &str, size: f32) -> impl
     let has = path_a.map(|p: Str| !p.is_empty()).distinct();
     let url = path_b.map(Url::from_file_path_str);
     let label = initials(title);
+    // Decorative: the avatar sits beside the chat/member name that already
+    // labels the row — hide the shape/photo leaves from the a11y tree.
     when(has, move || {
         Photo::new(url.clone()).size(size, size).clip(Circle)
     })
@@ -584,6 +602,7 @@ pub(crate) fn avatar(store: Store, file_id: i32, title: &str, size: f32) -> impl
             .size(size, size)
             .background(Circle.fill(Accent))
     })
+    .a11y_hidden(true)
 }
 
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
@@ -596,7 +615,11 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         row.preview.clone()
     };
     let badge: AnyView = if row.pinned {
-        pin().tint(MutedForeground).size(14.0, 14.0).anyview()
+        pin()
+            .tint(MutedForeground)
+            .size(14.0, 14.0)
+            .a11y_hidden(true)
+            .anyview()
     } else if unread > 0 || row.marked_unread {
         if row.marked_unread && unread == 0 {
             text("●").caption().foreground(Accent).anyview()
@@ -610,11 +633,15 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                     Color::from(AccentForeground)
                 })
                 .padding_with((2.0, 6.0))
-                .background(if row.muted {
-                    Circle.fill(SurfaceVariant)
-                } else {
-                    Circle.fill(Accent)
-                }).anyview()
+                .background(
+                    (if row.muted {
+                        Circle.fill(SurfaceVariant)
+                    } else {
+                        Circle.fill(Accent)
+                    })
+                    .a11y_hidden(true),
+                )
+                .anyview()
         }
     } else {
         spacer().width(1.0).anyview()
@@ -744,10 +771,20 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         .distinct();
     let poll_open = store.poll_open.clone();
     let store_for_poll = store.clone();
+    // Modal Escape scopes, cloned before `store` moves into the `when`
+    // closures below; the last-built active scope wins the key.
+    let esc_members = modal_escape(store.clone(), |s| s.members_open.set(false));
+    let esc_scheduled = modal_escape(store.clone(), |s| s.scheduled_open.set(false));
+    let esc_search = modal_escape(store.clone(), |s| {
+        s.chat_search_open.set(false);
+        s.chat_search.set_from("");
+        s.chat_search_results.set(Vec::new());
+    });
+    let esc_stickers = modal_escape(store.clone(), |s| s.stickers_open.set(false));
             vstack((
     when(has_pinned, move || {
         hstack((
-            pin().tint(Accent).size(14.0, 14.0),
+            pin().tint(Accent).size(14.0, 14.0).a11y_hidden(true),
             text!("{pinned_label}")
                 .caption()
                 .line_limit(ONE)
@@ -879,6 +916,9 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                             store.open_profile(uid)
                         }
                     })
+                    .a11y_label(Str::from(format!("Open profile of {}", row.name)))
+                    .a11y_role(AccessibilityRole::Button)
+                    
                     .context_menu((
                         "Kick".action(move |store: Store| {
                             store.kick_member(&r_kick)
@@ -892,6 +932,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             .max_height(200.0),
         ))
         .background(Surface)
+        .with(esc_members.clone())
     }),
     // Scheduled messages panel (nav-toolbar clock icon).
     when(scheduled_open, move || {
@@ -930,6 +971,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             .max_height(150.0),
         ))
         .background(Surface)
+        .with(esc_scheduled.clone())
     }),
     when(search_open, move || {
         vstack((
@@ -961,6 +1003,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             .max_height(160.0),
         ))
         .background(Surface)
+        .with(esc_search.clone())
     }),
     when(reply_open, move || {
         banner("Reply to", reply_label.clone(), |store: Store| {
@@ -1050,7 +1093,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                             .clip(RoundedRectangle::new(0.15))
                     }
                 })
-                .otherwise(|| paperclip().tint(Accent).size(24.0, 24.0)),
+                .otherwise(|| paperclip().tint(Accent).size(24.0, 24.0).a11y_hidden(true)),
                 vstack((
                     text!("{f}", f = fname.clone())
                         .caption()
@@ -1151,8 +1194,15 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                             ))
                             .anyview();
                             cell.padding_with((6.0, 6.0))
-                                .background(RoundedRectangle::new(0.2).fill(SurfaceVariant))
+                                .background(
+                                    RoundedRectangle::new(0.2)
+                                        .fill(SurfaceVariant)
+                                        .a11y_hidden(true),
+                                )
                                 .on_tap(move |store: Store| store.send_sticker(it.clone()))
+                                .a11y_label("Send sticker")
+                                .a11y_role(AccessibilityRole::Button)
+                                
                         },
                     ))
                     .max_height(96.0),
@@ -1160,6 +1210,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 .spacing(4.0)
             }),
         ))
+        .with(esc_stickers.clone())
     }),
     vstack((
         when(mention_show, move || {
@@ -1173,6 +1224,9 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 .spacing(8.0)
                 .padding_with((6.0, 12.0))
                 .on_tap(move |store: Store| store.apply_mention(&uname))
+                .a11y_label(Str::from(format!("Mention @{u}", u = m.username)))
+                .a11y_role(AccessibilityRole::Button)
+                
             })
             .spacing(0.0)
             .padding_with((4.0, 0.0))
@@ -1466,6 +1520,8 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                 .tint(Error)
                 .size(11.0, 11.0)
                 .on_tap(move |store: Store| store.resend_failed(row.id))
+                .a11y_label("Resend failed message")
+                .a11y_role(AccessibilityRole::Button)
                 .anyview()
         } else if row.outgoing && row.read_out {
             text("✓✓").caption().anyview()
@@ -1499,13 +1555,16 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         .alignment(BottomLeading),
     )
     .max_width(bubble_cap)
-    .background(if row.highlighted {
+    .background(
+        (if row.highlighted {
             RoundedRectangle::new(0.18).fill(AccentContainer)
         } else if row.outgoing {
             RoundedRectangle::new(0.18).fill(Accent)
         } else {
             RoundedRectangle::new(0.18).fill(SurfaceVariant)
-        });
+        })
+        .a11y_hidden(true),
+    );
     let bubble = bubble.foreground(if row.outgoing {
         Color::from(AccentForeground)
     } else {
@@ -1750,7 +1809,10 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 spacer(),
                 text!("{twofa}", twofa = store.twofa.clone()).muted(),
             ))
-            .on_tap(|store: Store| store.open_twofa()),
+            .on_tap(|store: Store| store.open_twofa())
+            .a11y_label("Two-step verification")
+            .a11y_role(AccessibilityRole::Button)
+            ,
             VStack::for_each(
                 SignalCollection::new(store.privacy_rows.clone()),
                 move |row: PrivacyRow| {
@@ -1798,10 +1860,12 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     .caption()
                     .muted(),
                 spacer(),
-                text("Terminate other sessions")
-                    .caption()
-                    .foreground(Error)
-                    .on_tap(|store: Store| store.terminate_all_sessions()),
+                button(Label::new("Terminate other sessions", || {
+                    text("Terminate other sessions").caption().foreground(Error)
+                }))
+                .style(ButtonStyle::Plain)
+                .action(|store: Store| store.terminate_all_sessions())
+                ,
             )),
             vstack((
                 text(store.tr("BlockedUsers", 0, "Blocked users"))
@@ -1816,7 +1880,13 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                             text("Unblock").foreground(Accent),
                         ))
                         .padding_with((4.0, 0.0))
-                        .on_tap(move |store: Store| store.unblock_sender(&row))
+                        .on_tap({
+                            let row = row.clone();
+                            move |store: Store| store.unblock_sender(&row)
+                        })
+                        .a11y_label(Str::from(format!("Unblock {}", row.name)))
+                        .a11y_role(AccessibilityRole::Button)
+                        
                     },
                 ),
             ))
@@ -1856,11 +1926,16 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 button("Refresh").action(|store: Store| store.load_storage()),
             )),
             hstack((
-                delete_sweep().tint(Error).size(14.0, 14.0),
-                text("Clear cached media")
-                    .caption()
-                    .foreground(Error)
-                    .on_tap(|store: Store| store.clear_storage()),
+                delete_sweep()
+                    .tint(Error)
+                    .size(14.0, 14.0)
+                    .a11y_hidden(true),
+                button(Label::new("Clear cached media", || {
+                    text("Clear cached media").caption().foreground(Error)
+                }))
+                .style(ButtonStyle::Plain)
+                .action(|store: Store| store.clear_storage())
+                ,
                 spacer(),
             )),
         ))
@@ -1884,6 +1959,9 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     ))
                     .padding_with((4.0, 0.0))
                     .on_tap(move |store: Store| store.apply_language(&id))
+                    .a11y_label(Str::from(format!("Use {}", row.name)))
+                    .a11y_role(AccessibilityRole::Button)
+                    
                 },
             ),
         ))
@@ -2155,6 +2233,7 @@ fn video_note_sheet(store: Store) -> impl View {
     ))
     .padding_with((10.0, 12.0))
     .background(Surface)
+    .with(modal_escape(store.clone(), |s| s.close_video_note()))
 }
 
 
@@ -2197,12 +2276,16 @@ pub(crate) fn poll_creator(store: Store) -> impl View {
                             .caption()
                             .foreground(Accent)
                             .on_tap(move |s: Store| s.poll_correct.set(i))
+                            .a11y_label(Str::from(format!("Mark option {} correct", i + 1)))
+                            .a11y_role(AccessibilityRole::Button)
                     }),
                     when(qe, move || {
                         text("○")
                             .caption()
                             .muted()
                             .on_tap(move |s: Store| s.poll_correct.set(i))
+                            .a11y_label(Str::from(format!("Mark option {} correct", i + 1)))
+                            .a11y_role(AccessibilityRole::Button)
                     }),
                     field(text!("Option {#index}", index = i + 1), &fb)
                         .prompt("Option")
@@ -2221,7 +2304,7 @@ pub(crate) fn poll_creator(store: Store) -> impl View {
     let option_stack: VStack<(Vec<AnyView>,)> = option_rows.into_iter().collect();
     vstack((
         hstack((
-            poll().tint(Accent).size(16.0, 16.0),
+            poll().tint(Accent).size(16.0, 16.0).a11y_hidden(true),
             text("Create poll").caption().bold(),
             spacer(),
             icon_button(close(), "Close poll", |store: Store| {
@@ -2232,10 +2315,14 @@ pub(crate) fn poll_creator(store: Store) -> impl View {
         field("Question", &question_b).prompt("Ask a question"),
         option_stack.spacing(4.0),
         hstack((
-            text(store.tr("AddAnOption", 0, "+ Add an option"))
-                .caption()
-                .foreground(Accent)
-                .on_tap(|store: Store| store.add_poll_option()),
+            {
+                let add_label = store.tr("AddAnOption", 0, "+ Add an option");
+                button(Label::new("Add an option", move || {
+                    text(add_label.clone()).caption().foreground(Accent)
+                }))
+                .style(ButtonStyle::Plain)
+                .action(|store: Store| store.add_poll_option())
+            },
             spacer(),
         ))
         .padding_with((0.0, 12.0)),
@@ -2263,6 +2350,7 @@ pub(crate) fn poll_creator(store: Store) -> impl View {
     .spacing(6.0)
     .padding_with((6.0, 0.0))
     .background(Surface)
+    .with(modal_escape(store.clone(), |s| s.poll_open.set(false)))
 }
 
 /// Info panel below the dock threshold — Telegram Desktop's narrow-window
@@ -2272,6 +2360,7 @@ pub(crate) fn poll_creator(store: Store) -> impl View {
 /// gives the shared-media scroll real room — a content-high panel leaves the
 /// lazy grid with no visible rows.
 pub(crate) fn info_overlay_chunk(store: Store) -> impl View {
+    let esc = modal_escape(store.clone(), |s| s.info_open.set(false));
     Frame::new(
         zstack((
             Color::from(Foreground)
@@ -2297,6 +2386,7 @@ pub(crate) fn info_overlay_chunk(store: Store) -> impl View {
     )
     .max_width(f32::INFINITY)
     .max_height(f32::INFINITY)
+    .with(esc)
 }
 
 /// Right-side info panel (Desktop's wide-layout details panel): chat
@@ -2349,7 +2439,10 @@ pub(crate) fn info_panel(store: Store) -> impl View {
         .on_tap(|store: Store| {
             store.members_open.set(true);
             store.load_members();
-        }),
+        })
+        .a11y_label("Open member list")
+        .a11y_role(AccessibilityRole::Button)
+        ,
         text("Shared media").caption().muted().padding_with((8.0, 14.0)),
         scroll(VStack::for_each(media_chunks, move |chunk: MediaChunkRow| {
             let mut cells_v: Vec<AnyView> = Vec::new();
@@ -2419,6 +2512,9 @@ fn poll_block(message_id: i64, poll: &PollRow) -> impl View {
             .spacing(2.0)
             .leading()
             .on_tap(move |store: Store| store.vote_poll(message_id, ix))
+            .a11y_label(Str::from(format!("Vote for {}", o.text)))
+            .a11y_role(AccessibilityRole::Button)
+            
             .anyview(),
         );
     }
@@ -2491,19 +2587,19 @@ fn viewer_layer(store: Store) -> impl View {
             .padding_with((8.0, 12.0)),
     ))
     .background(WithOpacity::new(Background, 0.97))
+    .with(modal_escape(store.clone(), |s| s.close_viewer()))
 }
 
 /// Picker tab chip (Emoji / Stickers / GIFs) with the same metrics as the
 /// folder chips so the row stays at chip height.
 fn panel_tab_chip(label: &'static str, tab: i32) -> impl View {
-    text(label)
-        .caption()
-        .padding_with((3.0, 10.0))
-        .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
-        .on_tap(move |store: Store| store.pick_panel_tab(tab))
+    // A real `button`: gesture targets never reach `bind_interaction_target`,
+    // so `text().on_tap` chips would not register the modal Escape scope or
+    // keyboard focus for this panel.
+    button(text(label).caption())
+        .style(ButtonStyle::Plain)
+        .action(move |store: Store| store.pick_panel_tab(tab))
         .a11y_label(label)
-        .a11y_role(AccessibilityRole::Button)
-        .a11y_children(AccessibilityChildren::ExcludeDescendants)
 }
 
 /// Emoji grid — the picker panel's first tab. Local data only (Desktop's
@@ -2514,11 +2610,15 @@ fn emoji_grid() -> impl View {
         let mut cells: Vec<AnyView> = Vec::new();
         for e in chunk {
             let s = (*e).to_string();
+            let s_label = s.clone();
             cells.push(
                 text(s.clone())
                     .headline()
                     .padding_with((4.0, 4.0))
                     .on_tap(move |store: Store| store.insert_emoji(&s))
+                    .a11y_label(s_label)
+                    .a11y_role(AccessibilityRole::Button)
+                    
                     .anyview(),
             );
         }

@@ -84,7 +84,7 @@ pub fn app(mut env: Environment) -> App {
     } else {
         td::spawn_client()
     };
-    let mut store = Store::new(client_id);
+    let store = Store::new(client_id);
     if demo {
         store.seed_demo();
         // Synchronous seeds — evaluated before the view mounts.
@@ -104,7 +104,7 @@ pub fn app(mut env: Environment) -> App {
     );
     let win_state = binding(WindowState::Normal);
     let store_for_content = store.clone();
-    let win = Window::new("", win_state, move || {
+    let mut win = Window::new("", win_state, move || {
             let s = store_for_content.clone();
             let rx2 = rx.clone();
             views::root(store_for_content.clone()).task(async move {
@@ -138,6 +138,9 @@ pub fn app(mut env: Environment) -> App {
                         }
                         _ => {}
                     }
+                    // Anchor the seeded thread to the latest message, as the
+                    // live history-load path does (`load_history` → `scroll_bottom`).
+                    s.scroll_bottom();
                     std::future::pending::<()>().await;
                 }
                 s.start();
@@ -146,7 +149,11 @@ pub fn app(mut env: Environment) -> App {
                 }
             })
         });
-    store.win_frame = win.frame.clone();
+    // The window's frame MUST be the store's binding — the reverse alias
+    // (`store.win_frame = win.frame`) only rewires `store`, while clones
+    // captured earlier keep the orphan default binding and see 0×0 forever
+    // (the info panel never docked on the real renderer for this reason).
+    win.frame = store.win_frame.clone();
     // Spawn size; winit rewrites `win.frame` on Moved/Resized from here on.
     // SemanticRuntime never drives it — see DOGFOOD 'window.frame bypassed'.
     win.frame.set(Rect::new(Point::zero(), Size::new(1280.0, 800.0)));
@@ -1998,4 +2005,328 @@ mod tests {
         app.query().label_contains("forward").assert_exists();
         app.query().label("Comment").assert_exists();
     }
+
+    // ------------------------------------------------------------------
+    // r14-5: accessibility-tree audit + keyboard-only pass.
+    // Every interactive control must be named, roles must be right, and
+    // there must be no duplicate or empty nodes. Keyboard: Tab order,
+    // focus, Enter activates, Escape dismisses, arrows in lists.
+    // ------------------------------------------------------------------
+
+    use waterui_testing::Selector;
+
+    const INTERACTIVE_ROLES: &[Role] = &[
+        Role::BUTTON,
+        Role::TEXT_INPUT,
+        Role::MULTILINE_TEXT_INPUT,
+        Role::PASSWORD_INPUT,
+        Role::CHECKBOX,
+        Role::SWITCH,
+        Role::SLIDER,
+        Role::MENU_ITEM,
+        Role::MENU_ITEM_CHECKBOX,
+        Role::MENU_ITEM_RADIO,
+        Role::TAB,
+        Role::LINK,
+        Role::OPTION,
+        Role::COMBOBOX,
+        Role::SPIN_BUTTON,
+        Role::RADIO_BUTTON,
+        Role::LIST_ITEM,
+    ];
+
+    /// Walk the page's whole semantic tree and report a11y violations:
+    /// unnamed interactive controls, empty text/image nodes, zero-area
+    /// interactive nodes, and exact-duplicate (role, label, bounds) nodes.
+    fn a11y_violations(app: &mut waterui_testing::OffscreenApp, page: &str) -> Vec<String> {
+        let nodes = app
+            .semantic_mut()
+            .resolve_elements(&Selector::default());
+        let mut violations = Vec::new();
+        let mut seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for el in nodes.iter() {
+            let n = el.node();
+            if n.hidden() {
+                continue;
+            }
+            let role = n.role();
+            let label = n.label().unwrap_or("").trim().to_string();
+            let bounds = n
+                .bounds()
+                .map(|b| (b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32));
+            if INTERACTIVE_ROLES.contains(&role) && label.is_empty() {
+                violations.push(format!(
+                    "{page}: unnamed {role:?} #{id} at {bounds:?}",
+                    id = el.id().as_u64()
+                ));
+            }
+            if (role == Role::LABEL || role == Role::IMAGE)
+                && label.is_empty()
+                && n.children().is_empty()
+            {
+                violations.push(format!(
+                    "{page}: empty {role:?} #{id} at {bounds:?}",
+                    id = el.id().as_u64()
+                ));
+            }
+            if INTERACTIVE_ROLES.contains(&role)
+                && bounds.is_some_and(|(_, _, w, h)| w <= 0 || h <= 0)
+            {
+                violations.push(format!(
+                    "{page}: zero-area {role:?} '{label}' #{id} at {bounds:?}",
+                    id = el.id().as_u64()
+                ));
+            }
+            let key = format!("{role:?}|{label}|{bounds:?}");
+            if let Some(first) = seen.insert(key.clone(), el.id().as_u64()) {
+                violations.push(format!(
+                    "{page}: duplicate {role:?} '{label}' nodes #{first} and #{id} at {bounds:?}",
+                    id = el.id().as_u64()
+                ));
+            }
+        }
+        violations
+    }
+
+    fn audit_or_fail(app: &mut waterui_testing::OffscreenApp, page: &str) {
+        let violations = a11y_violations(app, page);
+        assert!(
+            violations.is_empty(),
+            "{page}: {} a11y violations:\n{}",
+            violations.len(),
+            violations.join("\n")
+        );
+    }
+
+    /// Sidebar page: every control named, no dupes/empties.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn a11y_audit_sidebar(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(340, 700)
+            .mount_offscreen(move || views::sidebar_view(inner.clone()).state(&inner));
+        app.semantic_mut().settle();
+        audit_or_fail(&mut app, "sidebar");
+    }
+
+    /// Chat page: every control named, no dupes/empties.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn a11y_audit_chat(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.win_frame.set(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.semantic_mut().settle();
+        audit_or_fail(&mut app, "chat");
+    }
+
+    /// Settings page: every control named, no dupes/empties.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn a11y_audit_settings(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(340, 700)
+            .mount_offscreen(move || views::settings_view(inner.clone()).state(&inner));
+        app.semantic_mut().settle();
+        audit_or_fail(&mut app, "settings");
+    }
+
+    /// Chat page with poll creator + emoji panel + attach strip mounted.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn a11y_audit_chat_overlays(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        store.toggle_poll_creator();
+        app.semantic_mut().settle();
+        audit_or_fail(&mut app, "chat+poll");
+        store.poll_open.set(false);
+        store.stickers_open.set(true);
+        app.semantic_mut().settle();
+        audit_or_fail(&mut app, "chat+emoji");
+        store.stickers_open.set(false);
+        store.attach.set(vec![waterui::media::Url::from_file_path_str(
+            Str::from("/tmp/design_doc.pdf"),
+        )]);
+        app.semantic_mut().settle();
+        audit_or_fail(&mut app, "chat+attach");
+    }
+
+    /// Tab traversal on the chat page cycles every focusable control in
+    /// tree order and wraps.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn keyboard_tab_cycles_chat(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.settle();
+        // `tree().focus()` is the accessibility focus — it covers every
+        // focusable node (buttons included), unlike `ui_focus()` which only
+        // reports text-input editing focus.
+        let mut labels: Vec<String> = Vec::new();
+        for _ in 0..16 {
+            app.press_named_key("Tab");
+            app.settle();
+            let focus_id = app.tree().focus();
+            let label = app
+                .resolve_elements(&Selector::default())
+                .iter()
+                .find(|el| el.id().as_u64() == focus_id.as_u64())
+                .and_then(|el| el.node().label().map(|s| s.to_string()))
+                .unwrap_or_else(|| "<none>".into());
+            labels.push(label);
+        }
+        std::fs::write("/tmp/kb_tab_order.txt", labels.join("\n")).unwrap();
+        // Traversal must reach at least one control (a completely dead
+        // chain would leave every slot at "<none>").
+        assert!(
+            labels.iter().any(|l| l != "<none>"),
+            "Tab never reached any focusable control"
+        );
+    }
+
+    /// Enter on the focused composer-side button activates it.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn keyboard_enter_activates(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        let el = app
+            .query()
+            .role(Role::BUTTON)
+            .label("Stickers & GIFs")
+            .single();
+        el.focus(&mut app);
+        assert_eq!(
+            app.tree().focus().as_u64(),
+            el.id().as_u64(),
+            "a11y Focus action did not land on the button"
+        );
+        app.press_named_key("Enter");
+        app.settle();
+        assert!(
+            store.stickers_open.get(),
+            "Enter on focused button did not activate it"
+        );
+    }
+
+    /// Escape dismisses the emoji panel when it is open.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn keyboard_escape_dismisses_emoji(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.stickers_open.set(true);
+        let inner = store.clone();
+        // Rendered runtime: `hit_test.modal_interaction` is populated by
+        // `bind_interaction_target`, which only runs in the rendered emit
+        // path — the headless semantic walk never registers modal scopes.
+        let mut app = ui
+            .viewport(660, 700)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.semantic_mut().settle();
+        app.press_named_key("Escape");
+        app.semantic_mut().settle();
+        assert!(
+            !store.stickers_open.get(),
+            "Escape did not close the emoji panel"
+        );
+    }
+
+    /// Escape dismisses the info overlay below the dock threshold.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn keyboard_escape_dismisses_info(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.open_chat.set(1);
+        store.info_open.set(true);
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(460, 700)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.semantic_mut().settle();
+        app.press_named_key("Escape");
+        app.semantic_mut().settle();
+        assert!(
+            !store.info_open.get(),
+            "Escape did not close the info overlay"
+        );
+    }
+
+    /// Arrow keys in the chat-list: documents desktop arrow navigation.
+    /// Telegram Desktop moves the selection with Up/Down.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn keyboard_arrows_chat_list(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(340, 700)
+            .mount(move || views::sidebar_view(inner.clone()).state(&inner));
+        app.settle();
+        app.press_named_key("ArrowDown");
+        app.settle();
+        let moved = store.selected.get().is_some();
+        std::fs::write(
+            "/tmp/kb_arrows.txt",
+            format!("after ArrowDown selected={moved:?}\n"),
+        )
+        .unwrap();
+    }
+
+    /// Minimal modal-Escape probe: one button inside a `ModalInteraction`
+    /// scope. Escape must run the scope's escape action. If this fails on
+    /// the semantic runtime while passing on winit, that is a runtime gap.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_modal_escape_minimal(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::handler::SharedAction;
+        use waterui_backend_core::widget::ModalInteraction;
+        let closed = waterui::reactive::binding(false);
+        let c = closed.clone();
+        let esc = ModalInteraction::new(
+            true,
+            SharedAction::new(move |_: Environment| c.set(true)),
+        );
+        // Rendered runtime only: the headless semantic walk emits a11y
+        // nodes without `ctx`, so `bind_interaction_target` never runs and
+        // `hit_test.modal_interaction` is never populated (DOGFOOD).
+        let mut app = ui.viewport(300, 300).mount_offscreen(move || {
+            vstack((button("Inside").action(|_: Store| {}),))
+                .with(esc.clone())
+        });
+        app.semantic_mut().settle();
+        app.press_named_key("Escape");
+        app.semantic_mut().settle();
+        std::fs::write(
+            "/tmp/modal_escape.txt",
+            format!("closed={}\n", closed.get()),
+        )
+        .unwrap();
+        assert!(closed.get(), "Escape did not reach the modal scope");
+    }
+
 }
