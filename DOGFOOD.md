@@ -1274,6 +1274,20 @@ bounds still does not toggle the reaction (`r21/react_tap2.png` —
 count unchanged); a tap on a bubble body instead scrolls/presses the
 row. Still open. Fix session running on hydrolysis `c19e8437`.
 
+**FIXED upstream** — hydrolysis dev `5fd1c37f` (#183: innermost pointer
+target wins inside a `ListItem`). Verified live on the real renderer at
+1400×900:
+
+- pointer tap on the "❤ 1" reaction pill under the 🔥 message toggles it
+  to the chosen **accent "❤ 2" pill** (`r22b/after_drag.png`); the row
+  content change re-anchors the list to the unread divider.
+- pointer tap on the photo media slot ("photo · 182 KB" pill) opens the
+  media viewer overlay — "Alice" header, Close button, "Downloading…"
+  body, "photo.jpg" caption (`r22b/viewer.png`).
+
+Both fires land on the nested `on_tap` inside the `List` row, matching
+the semantic runtime. Closed.
+
 ## r20-3: `NavigationView` emits an empty subtitle `Label` node when no subtitle is bound
 
 On the r20 pins (waterui `2912a678` + hydrolysis `2e6f401`) the nav-bar

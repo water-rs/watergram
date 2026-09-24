@@ -1087,6 +1087,9 @@ impl Store {
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
         msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
         msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
+        // A real file id so tapping the media slot opens the viewer (demo
+        // has no downloaded bytes, so the viewer shows "Downloading…").
+        msgs.last_mut().unwrap().media_file = 1;
         msgs[2].unread_divider = true;
         msgs.push(m(17, "Alice", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
         {
