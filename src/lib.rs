@@ -93,12 +93,14 @@ pub fn app(mut env: Environment) -> App {
         if demo_page() == Some("info") {
             store.selected.set(Some(1));
             store.open_chat.set(1);
+            store.regroup_messages();
             store.info_open.set(true);
             store.load_shared_media();
         }
         if demo_page() == Some("chat") {
             store.selected.set(Some(1));
             store.open_chat.set(1);
+            store.regroup_messages();
         }
     }
     env.install(
@@ -125,6 +127,7 @@ pub fn app(mut env: Environment) -> App {
                         Some("info") => {
                             s.selected.set(Some(1));
                             s.open_chat.set(1);
+                            s.regroup_messages();
                             s.info_open.set(true);
                             s.load_shared_media();
                         }
@@ -237,6 +240,11 @@ mod tests {
             webpage: "".into(),
             forwarded_from: "".into(),
             poll: None,
+            group_first: true,
+            group_last: true,
+            avatar_col: false,
+            show_avatar: false,
+            sender_photo: 0,
         }
     }
 
@@ -764,6 +772,35 @@ mod tests {
         // deleting d2a's row recomputes on the next set
         store.set_messages(vec![got[0].clone(), got[1].clone()]);
         assert!(!store.messages.snapshot()[1].day_header);
+    }
+
+    #[test]
+    fn set_messages_groups_runs() {
+        let store = store();
+        let mut group = chat(1, "g", "", 1);
+        group.kind_icon = "group".into();
+        let mut dm = chat(2, "dm", "", 0);
+        dm.kind_icon = "person".into();
+        store.chats.set(vec![group, dm]);
+        store.open_chat.set(1);
+        store.set_messages(Store::demo_conversation());
+        let rows = store.messages.snapshot();
+        let find = |id: i64| rows.iter().find(|r| r.id == id).unwrap().clone();
+        // Alice's 09:46-09:48 run (photo, forwarded, poll): the name shows
+        // only on the run's first row, the avatar only on the last.
+        let (first, mid, last) = (find(16), find(17), find(18));
+        assert!(first.group_first && !first.show_avatar);
+        assert!(!mid.group_first && !mid.show_avatar);
+        assert!(!last.group_first && last.group_last && last.show_avatar);
+        // A one-message run gets both marks.
+        let fire = find(20);
+        assert!(fire.group_first && fire.group_last && fire.show_avatar);
+        // Outgoing rows never get the avatar column.
+        assert!(rows.iter().filter(|r| r.outgoing).all(|r| !r.avatar_col));
+        // A private chat shows no avatar column at all.
+        store.open_chat.set(2);
+        store.set_messages(Store::demo_conversation());
+        assert!(store.messages.snapshot().iter().all(|r| !r.avatar_col));
     }
 
     #[test]
@@ -1374,6 +1411,79 @@ mod tests {
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_hug.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_hug.png");
+    }
+
+    /// r23-1: the real emoji-only bubble — measure the bubble frame, the
+    /// glyph run, and the meta overlay to see who over-widens it.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_emoji_bubble(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let m = msg(1, "🎉🎉🎉", true);
+        let mut app = ui.viewport(1000, 300).mount_offscreen(move || {
+            views::message_bubble(store.clone(), m.clone()).padding_with((2.0, 12.0))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_emoji.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/probe_emoji.png");
+    }
+
+    /// Control: the meta overlay via `overlay()` (base dictates size,
+    /// layer aligns within base bounds) — meta should land bottom-trailing
+    /// of the content run, and the pair should hug content width.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_emoji_bubble_finite(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let mut app = ui.viewport(800, 200).mount_offscreen(move || {
+            hstack((
+                overlay(
+                    overlay(
+                        vstack((text("🎉🎉🎉").size(44.0),))
+                            .leading()
+                            .padding_with([10.0, 30.0, 10.0, 10.0]),
+                        text("👍1").caption().padding_with([0.0, 11.0, 10.0, 10.0]),
+                    )
+                    .bottom_leading(),
+                    hstack((text("12:00").caption(), text("✓✓").caption()))
+                        .spacing(3.0)
+                        .padding_with([0.0, 8.0, 0.0, 8.0]),
+                )
+                .bottom_trailing()
+                .max_width(420.0)
+                .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
+                spacer(),
+            ))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_emoji_finite.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/probe_emoji_finite.png");
+    }
+
+    /// Edge case: meta wider than content ("edited 12:00 ✓✓" over "hi") —
+    /// the decoration keeps its own size under overlay(), so it overflows
+    /// the base on the leading side. Measures how far out it pokes.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_meta_wider_than_content(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let mut app = ui.viewport(800, 200).mount_offscreen(move || {
+            hstack((
+                overlay(
+                    vstack((text("hi").body(),))
+                        .leading()
+                        .padding_with([10.0, 30.0, 10.0, 10.0])
+                        .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
+                    hstack((
+                        text("edited").caption(),
+                        text("12:00").caption(),
+                        text("✓✓").caption(),
+                    ))
+                    .spacing(3.0)
+                    .padding_with([0.0, 8.0, 0.0, 8.0]),
+                )
+                .bottom_trailing(),
+                spacer(),
+            ))
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_meta_wide.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/probe_meta_wide.png");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]

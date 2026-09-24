@@ -68,6 +68,7 @@
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
 | 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
+| 消息分组（同发送者连发折叠 + 头像列） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母圆）；组间间距大于组内 | `set_messages_groups_runs` |
 
 ## 4. 媒体与附件
 
@@ -131,6 +132,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：84 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
+- 已实现 ✅：85 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
 - 现有测试：18 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。

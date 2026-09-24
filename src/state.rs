@@ -198,6 +198,18 @@ pub struct MessageRow {
     pub edited: bool,
     /// Poll content (question/options/votes) when the message is a poll.
     pub poll: Option<PollRow>,
+    /// First row of a same-sender run (Desktop message grouping): the
+    /// sender name shows only on it.
+    pub group_first: bool,
+    /// Last row of a same-sender run — in groups it carries the avatar.
+    pub group_last: bool,
+    /// Incoming row in a group/channel: reserve the avatar column so the
+    /// run's bubbles stay aligned.
+    pub avatar_col: bool,
+    /// Paint the sender avatar circle (`avatar_col` on the run's last row).
+    pub show_avatar: bool,
+    /// Sender profile-photo small file id (0 → initials).
+    pub sender_photo: i32,
 }
 
 /// A single poll answer option as shown inside a poll bubble.
@@ -1064,6 +1076,11 @@ impl Store {
             pending: false,
             highlighted: false,
             unread_divider: false,
+            group_first: true,
+            group_last: true,
+            avatar_col: false,
+            show_avatar: false,
+            sender_photo: 0,
             day: 0,
             day_header: false,
             day_label: Str::from(""),
@@ -1487,9 +1504,29 @@ impl Store {
         }
     }
 
+    /// Small profile-photo file id for a `MessageSender` (0 → initials).
+    fn sender_photo(&self, sender: &enums::MessageSender) -> i32 {
+        match sender {
+            enums::MessageSender::User(u) => self
+                .users
+                .borrow()
+                .get(&u.user_id)
+                .and_then(|u| u.profile_photo.as_ref())
+                .map(|p| p.small.id)
+                .unwrap_or(0),
+            enums::MessageSender::Chat(c) => self
+                .chat_objs
+                .borrow()
+                .get(&c.chat_id)
+                .and_then(|c| c.photo.as_ref())
+                .map(|p| p.small.id)
+                .unwrap_or(0),
+        }
+    }
+
     /// Build a `MessageRow` from a TDLib message. Runs on the UI thread, so it
     /// may borrow the caches and kick off file downloads.
-#[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
+    #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
     pub fn message_row(&self, m: &types::Message) -> MessageRow {
         let (mut text, media_file, media_label, play_file) = Self::content_preview(&m.content);
         if let enums::MessageContent::MessageText(t) = &m.content {
@@ -1593,9 +1630,14 @@ impl Store {
             }
             _ => None,
         };
+        let sender_photo = self.sender_photo(&m.sender_id);
+        if sender_photo != 0 {
+            self.want_file_id(sender_photo);
+        }
         MessageRow {
             id: m.id,
             sender: self.sender_name(&m.sender_id),
+            sender_photo,
             text,
             time: fmt_time(m.date),
             outgoing: m.is_outgoing,
@@ -1614,6 +1656,10 @@ impl Store {
             pending,
             highlighted: false,
             unread_divider: false,
+            group_first: true,
+            group_last: true,
+            avatar_col: false,
+            show_avatar: false,
             day: local_day(m.date),
             day_header: false,
             day_label: Str::from(""),
@@ -2631,7 +2677,41 @@ impl Store {
             }
             prev_day = r.day;
         }
+        // Desktop message grouping: consecutive rows sharing direction and
+        // sender form one visual run — the sender name shows on the run's
+        // first row and, in groups/channels, the sender avatar on its last.
+        // Unread dividers and day headers break a run.
+        let grouped = self
+            .chats
+            .snapshot()
+            .iter()
+            .find(|r| r.id == self.open_chat.get())
+            .map(|r| matches!(r.kind_icon.to_string().as_str(), "group" | "channel"))
+            .unwrap_or(false);
+        let n = rows.len();
+        for i in 0..n {
+            let same_run = |a: &MessageRow, b: &MessageRow| {
+                a.outgoing == b.outgoing
+                    && a.sender == b.sender
+                    && !b.unread_divider
+                    && !b.day_header
+            };
+            let first = i == 0 || !same_run(&rows[i - 1], &rows[i]);
+            let last = i + 1 == n || !same_run(&rows[i], &rows[i + 1]);
+            let r = &mut rows[i];
+            r.group_first = first;
+            r.group_last = last;
+            r.avatar_col = grouped && !r.outgoing;
+            r.show_avatar = r.avatar_col && last;
+        }
         self.messages.set(rows);
+    }
+
+    /// Re-run the day-header/grouping pass on the current rows — demo
+    /// seeds set `open_chat` after the initial `set_messages`, so the
+    /// grouping flags need a re-pass once the open chat is known.
+    pub fn regroup_messages(&self) {
+        self.set_messages(self.messages.snapshot());
     }
 
     /// Fetch the chat's pinned message into `pinned_label`/`pinned_id`.

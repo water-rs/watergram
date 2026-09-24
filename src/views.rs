@@ -24,9 +24,9 @@ use waterui::reactive::collection::SignalCollection;
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
 use waterui::shape::{Circle, RoundedRectangle, ShapeExt};
-use waterui::graphics::color::{BorderColor, WithOpacity};
+use waterui::graphics::color::{BorderColor, Srgb, WithOpacity};
 use waterui::theme::color::{
-    Accent, AccentContainer, AccentForeground, Background, Error, Foreground,
+    Accent, AccentContainer, AccentForeground, Error, Foreground,
     MutedForeground, Surface, SurfaceVariant,
 };
 use waterui::handler::SharedAction;
@@ -865,6 +865,11 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         }),
         List::for_each(messages, move |row: MessageRow| {
             let rid = row.id;
+            // Desktop packs a same-sender run nearly flush (~1pt) while runs
+            // stay separated (~4pt): the outer edge of a run keeps the full
+            // inset, inner edges collapse.
+            let pad_top = if row.group_first { 2.0 } else { 0.5 };
+            let pad_bottom = if row.group_last { 2.0 } else { 0.5 };
             let check = sel_msgs_rows
                 .map(move |v: Vec<i64>| v.contains(&rid))
                 .distinct();
@@ -886,7 +891,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                         store.toggle_select(rid);
                     }
                 })
-                .padding_with((2.0, 12.0)),
+                .padding_with([pad_top, pad_bottom, 12.0, 12.0]),
             )
         })
         .scroll_controller(&scroller),
@@ -1510,7 +1515,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                 .anyview(),
         ));
     }
-    if !row.outgoing && !sender.is_empty() {
+    if row.group_first && !row.outgoing && !sender.is_empty() {
         parts.push(
             text(sender.clone())
                 .caption()
@@ -1632,16 +1637,16 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let bubble_cap = store
         .win_frame
         .map(|f| ((f.width() - 340.0) * 0.72).clamp(220.0, 480.0));
+    // The meta overlay is a finite zstack child: `ZStackLayout` reports the
+    // envelope of its layers, so the bubble hugs max(content, meta) and the
+    // shared `BottomTrailing` alignment anchors the meta row at the content
+    // run's trailing edge (an infinite-width Frame child would inflate the
+    // stack to the bubble cap instead — r23-1).
     let bubble_inner = zstack((
         zstack((content, reactions_overlay)).alignment(BottomLeading),
-        // The meta overlay needs a trailing anchor: an infinite-width
-        // Frame fills the zstack's bounds, so `.alignment` can reach
-        // the trailing edge (a finite child only gets its own size).
-        Frame::new(meta_overlay)
-            .max_width(f32::INFINITY)
-            .alignment(BottomTrailing),
+        meta_overlay,
     ))
-    .alignment(BottomLeading);
+    .alignment(BottomTrailing);
     let bubble: AnyView = if emoji_n > 0 && !row.highlighted {
         // No fill: the emoji itself is the content (Telegram Desktop).
         Frame::new(bubble_inner)
@@ -1706,6 +1711,18 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
 
     let placed = if row.outgoing {
         hstack((spacer(), bubble)).anyview()
+    } else if row.avatar_col {
+        // Groups/channels reserve a leading avatar column on incoming rows
+        // so a run's bubbles stay aligned; the avatar itself shows only on
+        // the run's last row, bottom-aligned (Telegram Desktop).
+        let slot: AnyView = if row.show_avatar {
+            avatar(store.clone(), row.sender_photo, sender.as_str(), 32.0).anyview()
+        } else {
+            Color::from(Surface).size(32.0, 32.0).anyview()
+        };
+        hstack((vstack((spacer(), slot)).spacing(0.0), bubble, spacer()))
+            .spacing(4.0)
+            .anyview()
     } else {
         hstack((bubble, spacer())).anyview()
     };
@@ -2741,27 +2758,40 @@ fn viewer_layer(store: Store) -> impl View {
             },
         )
     })
-    .otherwise(|| text("Downloading…").caption().muted());
+    .otherwise(|| {
+        text("Downloading…")
+            .caption()
+            .foreground(Srgb::from_hex("#B0B0B0"))
+    });
+    // Desktop's media viewer: an opaque dark overlay carrying light text —
+    // light header row (sender + white controls) and a light caption under
+    // the media, nothing of the chat bleeds through.
+    let viewer_fg = Color::srgb_hex("#FFFFFF");
+    let viewer_scrim = Color::srgb_hex("#101010");
     vstack((
         hstack((
-            text(row.from.clone()).body().bold(),
+            text(row.from.clone())
+                .body()
+                .bold()
+                .foreground(viewer_fg.clone()),
             spacer(),
-            icon_button(close(), "Close viewer", |store: Store| {
+            icon_button(close().tint(viewer_fg.clone()), "Close viewer", |store: Store| {
                 store.close_viewer()
             }),
         ))
         .spacing(8.0)
         .padding_with((8.0, 12.0))
-        .background(Surface),
+        .background(viewer_scrim.clone()),
         spacer(),
         media,
         spacer(),
         text(row.caption.clone())
             .caption()
             .line_limit(THREE)
+            .foreground(viewer_fg.clone())
             .padding_with((8.0, 12.0)),
     ))
-    .background(WithOpacity::new(Background, 0.97))
+    .background(viewer_scrim)
     .with(modal_escape(store.clone(), |s| s.close_viewer()))
 }
 

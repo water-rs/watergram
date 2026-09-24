@@ -1359,3 +1359,97 @@ All of it is now explained by the pre-r19 Menu-fallback behaviour of
 the stale build; nothing was a defect of the current pins.
 
 </details>
+
+## r23-1: emoji-only timestamp detached from its glyphs — APP BUG (fixed)
+
+**Report:** on `r22b/chat1400.png` the outgoing 🎉🎉🎉's meta row
+("09:49 ✓✓") sat at the far right edge (~x=1360) ~40 pt below the glyph
+run (ends ~x=1065); the incoming 🔥's "09:50" sat ~390 pt right of its
+glyph. Telegram Desktop anchors the meta row at the trailing edge of the
+content run.
+
+**Diagnosis (bounds evidence):** the probe `probe_emoji_bubble`
+(`src/lib.rs`) dumps the real `message_bubble` view tree. The bubble's
+content is a `zstack((content, meta_overlay))` where the `meta_overlay`
+was wrapped in `Frame::new(...).max_width(f32::INFINITY)` — intended to
+right-anchor the meta row. But
+`ZStackLayout::size_that_fits`
+(`components/foundation/layout/src/stack/zstack.rs:86-96`) returns
+`f32::INFINITY` when ANY child measures infinite ("a layer that answers
+an unbounded extent makes the stack answer it too"). The infinite child
+inflated the whole stack to its proposal — the outer `bubble_cap`
+(~480 pt at 1400) — so the meta row anchored at the cap's trailing edge
+while the bubble's own fill and content stayed content-sized. The bubble
+looked narrow but reported wide: `glyphs x≈778-942` vs `meta x≈937-980`
+on a ~184 pt content run inside a ~220 pt measured stack (probe);
+~480 pt at real window width. App misuse, not a renderer defect —
+finite children ARE aligned inside the resolved bounds.
+
+**Fix (`src/views.rs` `message_bubble`):** `meta_overlay` is now a
+finite zstack child and the stack takes a shared
+`.alignment(BottomTrailing)` — stack width = max(content, meta), and
+both finite children align to the stack's bottom-trailing edge, so the
+meta row hugs the content run's trailing edge:
+
+```rust
+let bubble_inner = zstack((
+    zstack((content, reactions_overlay)).alignment(BottomLeading),
+    meta_overlay,
+))
+.alignment(BottomTrailing);
+```
+
+Alternatives considered and rejected: `overlay(base, layer)` keeps the
+decoration at ITS OWN size aligned inside the base's bounds — a meta
+wider than the content (e.g. `edited 09:43 ✓✓` under `hi`) overflows
+outside the bubble's bounds instead of widening it (probe
+`probe_meta_wider_than_content`: meta at x=-64.4 vs base 0-97). The
+shared-alignment zstack contains the meta in every case; when meta
+exceeds content the content right-aligns under it — the accepted edge
+case.
+
+**Verified:** `r23/chat1400.png` — "09:49 ✓✓" sits directly under the
+🎉🎉🎉 trailing edge, "09:50" under the 🔥 (`r23/chat800.png`,
+`r23/chat600.png` confirm at all widths).
+
+## r23-2: media-viewer scrim almost transparent — APP BUG (fixed)
+
+**Report:** on `r22b/viewer.png` the chat behind the viewer stayed
+readable (poll, bubbles, 🎉). Telegram Desktop's media viewer is an
+opaque dark overlay with a light header and caption.
+
+**Diagnosis:** the app styled the scrim
+`WithOpacity::new(Color::srgb_hex("#FAFAFA"), 0.97)` — a 97%-white fill
+with ~3% bleed-through. `WithOpacity::new(color, opacity)`
+(`components/visual/graphics/src/color/mod.rs:144-154`) documents 0 =
+fully transparent, 1 = fully opaque; the renderer blended the fill
+exactly as asked — alpha honored, not a framework blend bug. The defect
+was the app's colour choice (light, near-transparent), not the pipeline.
+
+**Fix (`src/views.rs` viewer overlay):** opaque dark scrim
+`#101010` + white header row (sender + white ✕ close) + white caption —
+Desktop's presentation. Verified `r23/viewer1400.png`: nothing of the
+chat bleeds through; "Alice" header, ✕, "Downloading…", "photo.jpg"
+caption all light on opaque dark.
+
+## r23-3: message grouping + sender avatars (pick)
+
+The most visible remaining gap vs Desktop's chat view: every incoming
+bubble repeated the sender name and groups showed no avatar column —
+the list read as flat uniform bubbles. `set_messages` now computes run
+flags (`group_first`/`group_last`/`avatar_col`/`show_avatar`); the
+sender name renders only on a run's first row, groups/channels reserve
+a bottom-aligned 32 dp avatar slot on the run's last row
+(`sender_photo`, initials fallback), and same-run rows pack at ~1 pt vs
+~4 pt between runs. `Store::regroup_messages()` re-passes when the demo
+seed's `open_chat` lands after `set_messages`. Test:
+`set_messages_groups_runs`. Captures: `r23/chat1400.png`,
+`r23/chat800.png`, `r23/chat600.png`.
+
+**Still open — cites:** hydrolysis#182 ("Archiv" chip clips mid-glyph in
+the horizontal-scroll chips row — visible in this round's captures too,
+`r23/chat1400.png` x≈243), cli#181 (launched-artifact staleness — this
+round's artifact: `$MB/dist/linux/debug/watergram-hydrolysis`, mtime
+2026-09-24 20:19 UTC, 171,100,872 bytes), hydrolysis#130
+(no-wrap-in-cap), waterui#1214 (`max_width` signal sampled at mount),
+nami#23, water-rs/cli#178 (verified fixed).
