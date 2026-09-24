@@ -1450,6 +1450,6 @@ seed's `open_chat` lands after `set_messages`. Test:
 the horizontal-scroll chips row — visible in this round's captures too,
 `r23/chat1400.png` x≈243), cli#181 (launched-artifact staleness — this
 round's artifact: `$MB/dist/linux/debug/watergram-hydrolysis`, mtime
-2026-09-24 20:19 UTC, 171,100,872 bytes), hydrolysis#130
+2026-09-24 20:36 UTC, 171,101,608 bytes), hydrolysis#130
 (no-wrap-in-cap), waterui#1214 (`max_width` signal sampled at mount),
 nami#23, water-rs/cli#178 (verified fixed).
