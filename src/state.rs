@@ -1186,6 +1186,32 @@ impl Store {
             .computed()
     }
 
+    /// Chat-detail header subtitle: typing overrides everything, groups and
+    /// channels show the member count, private chats show presence.
+    pub fn chat_subtitle(&self, chat_id: i64) -> Computed<Str> {
+        self.chats
+            .zip(&self.members_count)
+            .map(move |(rows, mc)| {
+                rows.iter()
+                    .find(|r| r.id == chat_id)
+                    .map(|r| {
+                        match (
+                            r.typing,
+                            r.kind_icon.to_string().as_str(),
+                            r.online,
+                        ) {
+                            (true, _, _) => Str::from("typing…"),
+                            (false, "group" | "channel", _) => mc.clone(),
+                            (false, _, true) => Str::from("online"),
+                            _ => Str::from(""),
+                        }
+                    })
+                    .unwrap_or_default()
+            })
+            .distinct()
+            .computed()
+    }
+
     /// Signal of `file_id -> download progress percent` (0-100).
     pub fn file_progress_signal(&self, file_id: i32) -> Computed<i32> {
         let progress = self.file_progress.clone();

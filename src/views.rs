@@ -631,11 +631,13 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                 } else {
                     Color::from(AccentForeground)
                 })
-                .padding_with((2.0, 6.0))
+                // M3 large badge: 16dp-tall pill growing horizontally,
+                // 4dp horizontal padding — not a circle.
+                .padding_with((1.0, 4.0))
                 .background(if row.muted {
-                    Circle.fill(SurfaceVariant)
+                    RoundedRectangle::new(0.5).fill(SurfaceVariant)
                 } else {
-                    Circle.fill(Accent)
+                    RoundedRectangle::new(0.5).fill(Accent)
                 })
                 .anyview()
         }
@@ -1283,21 +1285,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 .unwrap_or_default()
         })
         .distinct();
-    let subtitle = store
-        .chats
-        .map(move |rows| {
-            rows.iter()
-                .find(|r| r.id == chat_id)
-                .map(|r| {
-                    if r.online {
-                        Str::from("online")
-                    } else {
-                        Str::from("")
-                    }
-                })
-                .unwrap_or_default()
-        })
-        .distinct();
+    let subtitle = store.chat_subtitle(chat_id);
 
     let composer_b = store.composer.clone();
     let search_open2 = store.chat_search_open.clone();

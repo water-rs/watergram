@@ -87,12 +87,18 @@ pub fn app(mut env: Environment) -> App {
     let store = Store::new(client_id);
     if demo {
         store.seed_demo();
-        // Synchronous seeds — evaluated before the view mounts.
+        // Synchronous seeds — evaluated before the view mounts. The async
+        // `task` seeds below can land after the window's first layout, so
+        // anything that shapes the initial detail pane goes here.
         if demo_page() == Some("info") {
             store.selected.set(Some(1));
             store.open_chat.set(1);
             store.info_open.set(true);
             store.load_shared_media();
+        }
+        if demo_page() == Some("chat") {
+            store.selected.set(Some(1));
+            store.open_chat.set(1);
         }
     }
     env.install(
@@ -409,6 +415,35 @@ mod tests {
         caller.resend_failed(9);
         let row = msgs.get().into_iter().next().unwrap();
         assert!(row.pending && !row.failed);
+    }
+
+    /// Chat header subtitle: groups show member count, typing overrides,
+    /// private online shows "online". (The nav-bar subtitle is not
+    /// realized in the semantic tree, so this asserts the signal itself.)
+    #[test]
+    fn chat_header_subtitle() {
+        let store = store();
+        let mut group = chat(7, "dogfood crew", "p", 1);
+        group.kind_icon = "group".into();
+        store.chats.set(vec![group]);
+        store.members_count.set_from("5 members");
+        let sub = store.chat_subtitle(7);
+        assert_eq!(sub.get().to_string(), "5 members");
+
+        let mut rows = store.chats.get();
+        rows[0].typing = true;
+        store.chats.set(rows);
+        assert_eq!(sub.get().to_string(), "typing…");
+
+        let mut alice = chat(2, "Alice", "p", 1);
+        alice.online = true;
+        store.chats.set(vec![alice]);
+        let sub2 = store.chat_subtitle(2);
+        assert_eq!(sub2.get().to_string(), "online");
+
+        store.chats.set(vec![chat(6, "Bob", "p", 1)]);
+        let sub3 = store.chat_subtitle(6);
+        assert_eq!(sub3.get().to_string(), "");
     }
 
     /// 2FA sheet validates input before calling TDLib.
@@ -896,9 +931,11 @@ mod tests {
     use waterui::theme::color::{Surface, SurfaceVariant};
     use waterui::widget::condition::when;
 
-    fn dump_bounds(path: &str, app: &mut waterui_testing::OffscreenApp) {
+    fn dump_bounds<R: waterui_testing::RuntimeDriver>(
+        path: &str,
+        app: &mut waterui_testing::SemanticApp<R>,
+    ) {
         let nodes = app
-            .semantic_mut()
             .resolve_elements(&waterui_testing::Selector::default());
         let mut out = String::new();
         for el in nodes.iter() {
@@ -927,7 +964,7 @@ mod tests {
             .padding_with((2.0, 12.0))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_incoming.txt", &mut app);
+        dump_bounds("/tmp/probe_incoming.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_incoming.png");
     }
 
@@ -940,7 +977,7 @@ mod tests {
             views::message_bubble(store.clone(), m.clone()).padding_with((2.0, 12.0))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_outgoing.txt", &mut app);
+        dump_bounds("/tmp/probe_outgoing.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_outgoing.png");
     }
 
@@ -1041,7 +1078,7 @@ mod tests {
             .leading()
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_rowbisect.txt", &mut app);
+        dump_bounds("/tmp/probe_rowbisect.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_rowbisect.png");
     }
 
@@ -1057,7 +1094,7 @@ mod tests {
             views::sidebar_view(inner.clone()).state(&store)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_toolbar.txt", &mut app);
+        dump_bounds("/tmp/probe_toolbar.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_toolbar.png");
         // Search field, menu button, connection label, new-chat button —
         // bounds dump is checked manually: every child must end at x<=340.
@@ -1091,7 +1128,7 @@ mod tests {
             )
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_chatrow.txt", &mut app);
+        dump_bounds("/tmp/probe_chatrow.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_chatrow.png");
         app.query().label("12").assert_exists();
     }
@@ -1104,7 +1141,7 @@ mod tests {
                 .padding()
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_leading.txt", &mut app);
+        dump_bounds("/tmp/probe_leading.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1113,7 +1150,7 @@ mod tests {
             hstack((text("L"), spacer(), text("R"))).padding()
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_spacer.txt", &mut app);
+        dump_bounds("/tmp/probe_spacer.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1129,7 +1166,7 @@ mod tests {
             .padding_with(8.0)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_fields.txt", &mut app);
+        dump_bounds("/tmp/probe_fields.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_fields.png");
     }
 
@@ -1149,7 +1186,7 @@ mod tests {
             }),))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_list.txt", &mut app);
+        dump_bounds("/tmp/probe_list.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_list.png");
     }
 
@@ -1179,7 +1216,7 @@ mod tests {
             }),))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_list_plain.txt", &mut app);
+        dump_bounds("/tmp/probe_list_plain.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1206,7 +1243,7 @@ mod tests {
             ))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_hug.txt", &mut app);
+        dump_bounds("/tmp/probe_hug.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_hug.png");
     }
 
@@ -1224,7 +1261,7 @@ mod tests {
             ))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_hug_noz.txt", &mut app);
+        dump_bounds("/tmp/probe_hug_noz.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1240,7 +1277,7 @@ mod tests {
             ))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_hug_text.txt", &mut app);
+        dump_bounds("/tmp/probe_hug_text.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1254,7 +1291,7 @@ mod tests {
             views::chat_detail(inner.clone(), 1).state(&store)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_chat.txt", &mut app);
+        dump_bounds("/tmp/probe_chat.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_chat.png");
     }
 
@@ -1269,7 +1306,7 @@ mod tests {
             views::chat_detail(inner.clone(), 1).state(&store)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_chat_wide.txt", &mut app);
+        dump_bounds("/tmp/probe_chat_wide.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_chat_wide.png");
     }
 
@@ -1290,7 +1327,7 @@ mod tests {
             views::chat_detail(inner.clone(), 1).state(&store)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_info_dock.txt", &mut app);
+        dump_bounds("/tmp/probe_info_dock.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_info_dock.png");
     }
 
@@ -1317,7 +1354,7 @@ mod tests {
             waterui::prelude::Size::new(1400.0, 900.0),
         ));
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_info_late.txt", &mut app);
+        dump_bounds("/tmp/probe_info_late.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_info_late.png");
     }
 
@@ -1339,7 +1376,7 @@ mod tests {
         app.semantic_mut().settle();
         info.set(true);
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_info_open.txt", &mut app);
+        dump_bounds("/tmp/probe_info_open.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_info_open.png");
     }
 
@@ -1369,7 +1406,7 @@ mod tests {
         });
         app.semantic_mut().settle();
         let _ = app.snapshot().save_png("/tmp/probe_wrap3.png");
-        dump_bounds("/tmp/probe_wrap3.txt", &mut app);
+        dump_bounds("/tmp/probe_wrap3.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1389,7 +1426,7 @@ mod tests {
         });
         app.semantic_mut().settle();
         let _ = app.snapshot().save_png("/tmp/probe_wrap2.png");
-        dump_bounds("/tmp/probe_wrap2.txt", &mut app);
+        dump_bounds("/tmp/probe_wrap2.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1404,7 +1441,7 @@ mod tests {
         });
         app.semantic_mut().settle();
         let _ = app.snapshot().save_png("/tmp/probe_wrap.png");
-        dump_bounds("/tmp/probe_wrap.txt", &mut app);
+        dump_bounds("/tmp/probe_wrap.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1422,7 +1459,7 @@ mod tests {
             ))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_rules.txt", &mut app);
+        dump_bounds("/tmp/probe_rules.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_rules.png");
     }
 
@@ -1444,7 +1481,7 @@ mod tests {
             views::root(inner.clone()).state(&store)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_root_dock.txt", &mut app);
+        dump_bounds("/tmp/probe_root_dock.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_root_dock.png");
     }
 
@@ -1467,7 +1504,7 @@ mod tests {
         store.selected.set(Some(1));
         store.open_chat.set(1);
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_root_chat.txt", &mut app);
+        dump_bounds("/tmp/probe_root_chat.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_root_chat.png");
     }
 
@@ -1488,7 +1525,7 @@ mod tests {
             views::root(inner.clone()).state(&state)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_root_chat_pre.txt", &mut app);
+        dump_bounds("/tmp/probe_root_chat_pre.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_root_chat_pre.png");
     }
 
@@ -1508,7 +1545,7 @@ mod tests {
             views::root(inner.clone()).state(&state)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_root_placeholder.txt", &mut app);
+        dump_bounds("/tmp/probe_root_placeholder.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_root_placeholder.png");
     }
 
@@ -1523,7 +1560,7 @@ mod tests {
             views::settings_view(store.clone()).state(&state)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_settings.txt", &mut app);
+        dump_bounds("/tmp/probe_settings.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_settings.png");
     }
 
@@ -1575,7 +1612,7 @@ mod tests {
             .state(&state)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_row_width.txt", &mut app);
+        dump_bounds("/tmp/probe_row_width.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_row_width.png");
     }
 
@@ -1591,7 +1628,7 @@ mod tests {
             )
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_inset.txt", &mut app);
+        dump_bounds("/tmp/probe_inset.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1623,7 +1660,7 @@ mod tests {
             }),))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_list_when.txt", &mut app);
+        dump_bounds("/tmp/probe_list_when.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1640,7 +1677,7 @@ mod tests {
             }),))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_list_fixed.txt", &mut app);
+        dump_bounds("/tmp/probe_list_fixed.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1660,7 +1697,7 @@ mod tests {
             }),))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_list_pad.txt", &mut app);
+        dump_bounds("/tmp/probe_list_pad.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1740,7 +1777,7 @@ mod tests {
             }),))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_ladder.txt", &mut app);
+        dump_bounds("/tmp/probe_ladder.txt", app.semantic_mut());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1762,7 +1799,7 @@ mod tests {
             ))
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_hscroll.txt", &mut app);
+        dump_bounds("/tmp/probe_hscroll.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_hscroll.png");
     }
 
@@ -1774,7 +1811,7 @@ mod tests {
             views::sidebar_view(store.clone()).state(&store)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_sidebar.txt", &mut app);
+        dump_bounds("/tmp/probe_sidebar.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_sidebar.png");
     }
 
@@ -1972,7 +2009,7 @@ mod tests {
             .viewport(660, 700)
             .mount_offscreen(move || views::poll_creator(st.clone()));
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_poll.txt", &mut app);
+        dump_bounds("/tmp/probe_poll.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_poll.png");
         app.query().label("Question").assert_exists();
         app.query().label("Option 4").assert_exists();
@@ -2001,7 +2038,7 @@ mod tests {
             .alignment(TopTrailing)
         });
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_zalign.txt", &mut app);
+        dump_bounds("/tmp/probe_zalign.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_zalign.png");
     }
 
@@ -2023,7 +2060,7 @@ mod tests {
             .viewport(1000, 700)
             .mount_offscreen(move || views::info_overlay_chunk(st.clone()));
         app.semantic_mut().settle();
-        dump_bounds("/tmp/probe_overlay.txt", &mut app);
+        dump_bounds("/tmp/probe_overlay.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_overlay.png");
         app.query().label("Shared media").assert_exists();
         app.query().label("🌄").assert_exists();

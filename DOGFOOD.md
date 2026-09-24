@@ -785,6 +785,14 @@ Three divergences on the identical view tree, all reproducible via
 
 ## r13-1: `water run` ignores the app's `[patch.crates-io]` — git-pin fixes never reach the real renderer
 
+**RESOLVED upstream (cli#178 → PR #179).** Verified on cli dev
+`0414a255`: the regenerated managed `Cargo.toml` follows the app's
+`[patch.crates-io]` on **every** `water run`, not only on first
+generation — flipping hydrolysis `ab98d5fb ↔ e676ca88` in the app's
+patch table was reflected in the managed manifest on each run. The
+manual repin step below is no longer needed.
+
+
 **Version:** water dev channel, watergram stable channel + `[patch]`
 pins (waterui `b838d73`, hydrolysis `47b1081`, nami-core `969900ea`).
 
@@ -1066,7 +1074,9 @@ own `[patch.crates-io]` table that `water run` does not refresh from the
 app's `[patch]` (cli#178) — it still pinned the r14 revs (hydrolysis
 e676ca88 + waterui a3e2818c, both pre-#149) while the app's `[patch]`
 had moved on. So every real-renderer capture since ran hydrolysis older
-than the app's pins.
+than the app's pins. (The stale-table root cause — cli#178 — is fixed
+upstream by cli PR #179; verified on cli dev `0414a255`, see r13-1's
+RESOLVED note. No manual sync step is needed any more.)
 
 App side is correct: `Menu::new(label("Menu").icon(icon).icon_only())`
 → `icon_only` → `icon_button_metrics` = `ButtonMetrics(0,0,48,48)`,
@@ -1075,6 +1085,7 @@ App side is correct: `Menu::new(label("Menu").icon(icon).icon_only())`
 835-870,955`). After repinning the generated crate by hand, the real
 renderer draws the 48×48 circle. Lesson: the managed-backend patch table
 must be kept in sync manually until cli#178 lands — kept out of the repo.
+(cli PR #179 fixed it; verified on cli dev `0414a255`.)
 
 ## r17-3: chips row clipping "Archive" → "Archiv" is the scroll viewport, not a truncation defect
 
@@ -1122,3 +1133,15 @@ fault; no DOGFOOD repro needed — resolved upstream.
 - Unchanged: chips row still shows "Archiv" by scroll design (r17-3);
   "Watergram" title still sits flush after the 48 dp leading item per
   `NAVIGATION_BAR_ITEM_SPACING` = 0 (r16-1 verdict — spec-correct).
+
+## r18-1: nav-bar subtitle is not realized in the semantic tree
+
+`NavigationView::navigation_subtitle(text)` renders under the title on
+the real renderer (winit), but `ui.mount`'s semantic tree contains no
+node for it: `resolve_elements` on `chat_detail` shows `Header
+"dogfood crew"` plus toolbar buttons and content — no `"5 members"`
+label anywhere (probe: `dump_bounds` after mounting chat_detail).
+Title is realized, subtitle is silently absent, so subtitle content is
+untestable via `#[waterui::test]` queries. Sibling of waterui#1213:
+the semantic runtime realizes only part of the navigation chrome.
+
