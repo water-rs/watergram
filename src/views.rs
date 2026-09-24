@@ -408,7 +408,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 .padding_with((2.0, 8.0))
                 .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
                 .on_tap(|store: Store| {
-                    let v = !store.forward_noattr.get();
+                    let v = !store.forward_noattr.snapshot();
                     store.forward_noattr.set(v);
                 })
                 .a11y_label("Forward without attribution")
@@ -642,6 +642,20 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
             .muted()
             .anyview(),
     };
+    // Unread-mention "@" badge: same M3 badge pill as the unread count,
+    // sitting to its left (Telegram Desktop's row layout).
+    let mention_badge: AnyView = if row.unread_mentions > 0 {
+        text("@")
+            .caption()
+            .bold()
+            .foreground(AccentForeground)
+            .padding_with((1.0, 4.0))
+            .background(RoundedRectangle::new(0.5).fill(Accent))
+            .a11y_label(format!("{} unread mentions", row.unread_mentions))
+            .anyview()
+    } else {
+        spacer().width(0.0).anyview()
+    };
     let badge: AnyView = if row.pinned {
         pin()
             .tint(MutedForeground)
@@ -691,6 +705,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
             hstack((
                 preview_line,
                 spacer(),
+                mention_badge,
                 badge,
             ))
             .spacing(4.0),
@@ -867,7 +882,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 .on_tap(move |store: Store| {
                     // Only multi-select mode: context-menu "Select"
                     // seeds the set; further taps toggle membership.
-                    if !store.selected_msgs.get().is_empty() {
+                    if !store.selected_msgs.snapshot().is_empty() {
                         store.toggle_select(rid);
                     }
                 })
@@ -1171,7 +1186,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                         {
                             let q = sticker_q.clone();
                             icon_button(file_gif_box(), "Search GIFs", move |store: Store| {
-                                store.search_gifs_by(q.get().to_string())
+                                store.search_gifs_by(q.snapshot().to_string())
                             })
                         },
                     ))
@@ -1376,13 +1391,13 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .item(NavigationToolbarItem::new(
                 NavigationToolbarPlacement::TopBarTrailing,
                 icon_button(magnify(), "Search in chat", move |store: Store| {
-                    store.chat_search_open.set(!search_open2.get())
+                    store.chat_search_open.set(!search_open2.snapshot())
                 }),
             ))
             .item(NavigationToolbarItem::new(
                 NavigationToolbarPlacement::TopBarTrailing,
                 icon_button(account_group(), "Members", move |store: Store| {
-                    let open = !store.members_open.get();
+                    let open = !store.members_open.snapshot();
                     store.members_open.set(open);
                     if open {
                         store.load_members();
@@ -1721,12 +1736,12 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
         vstack((
             when(has, move || {
                 if audio_only {
-                    video_player(url.get())
+                    video_player(url.snapshot())
                         .max_height(56.0)
                         .max_width(320.0)
                         .anyview()
                 } else {
-                    video_player(url.get())
+                    video_player(url.snapshot())
                         .max_height(240.0)
                         .max_width(320.0)
                         .clip(RoundedRectangle::new(0.12))
@@ -1844,7 +1859,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             field("Bio", &store.edit_bio).prompt("a few words about you"),
             field("Username", &store.edit_username).prompt("username (no @)"),
             hstack((
-                when(note.clone().map(|s| !s.as_str().is_empty()), move || {
+                when(note.map(|s| !s.as_str().is_empty()), move || {
                     text!("{profile_note}", profile_note = note.clone())
                         .caption()
                         .muted()
@@ -2158,7 +2173,7 @@ pub(crate) fn profile_view(store: Store) -> NavigationView {
         hstack((
             spacer(),
             button("Message").action(move |store: Store| {
-                let id = uid.get();
+                let id = uid.snapshot();
                 if id != 0 {
                     store.nav.pop();
                     store.start_chat_with(id);
@@ -2654,11 +2669,11 @@ fn poll_block(message_id: i64, poll: &PollRow) -> impl View {
 /// In-pane media viewer (Desktop's viewer is fullscreen; ours covers the
 /// detail pane): photo or playable payload with sender, caption, close.
 #[allow(signal_get_in_view)] // the `when` gate rebuilds this view when the
-// viewer opens; `url.get()` then reads the resolved path at rebuild time.
+// viewer opens; `url.snapshot()` then reads the resolved path at rebuild time.
 fn viewer_layer(store: Store) -> impl View {
     // The `when(viewer_open)` gate on the caller side hides this layer until
     // a viewer row exists; file 0 simply resolves to the Downloading branch.
-    let row = store.viewer.get().unwrap_or(ViewerRow {
+    let row = store.viewer.snapshot().unwrap_or(ViewerRow {
         file: 0,
         video: false,
         caption: "".into(),
@@ -2675,9 +2690,9 @@ fn viewer_layer(store: Store) -> impl View {
     let media = when(has, move || {
         let url_v = url.clone();
         let url_p = url_photo.clone();
-        when(video, move || video_player(url_v.get()).max_height(420.0)).otherwise(
+        when(video, move || video_player(url_v.snapshot()).max_height(420.0)).otherwise(
             move || {
-                Photo::new(url_p.get())
+                Photo::new(url_p.snapshot())
                     .max_width(430.0)
                     .max_height(430.0)
                     .clip(RoundedRectangle::new(0.05))

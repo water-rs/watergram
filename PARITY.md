@@ -23,7 +23,7 @@
 | 功能 | 状态 | TDLib API | 测试 |
 |---|---|---|---|
 | 列表排序（位置/时间） | ✅ | `loadChats` + `updateChatPosition`/`updateChatLastMessage` | `chat_list_rows` |
-| 未读数 / 提及徽标 | ✅ | `Chat.unread_count`/`unread_mention_count` | `chat_list_rows` |
+| 未读数 / 提及徽标 | ✅ | `Chat.unread_count`/`unread_mention_count` → unread pill + `@` mention pill | `chat_list_rows`, `chat_row_mention_badge` |
 | 置顶聊天 | ✅ | `toggleChatIsPinned` | — |
 | 静音 / 通知设置 | ✅ | `setChatNotificationSettings` | — |
 | 头像 + 在线状态点 | ✅ | `chat.photo`/`user.status` + `downloadFile` | `chat_list_rows` |

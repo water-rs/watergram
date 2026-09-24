@@ -197,6 +197,7 @@ mod tests {
             draft: "".into(),
             order,
             unread: 0,
+            unread_mentions: 0,
             pinned: false,
             muted: false,
             photo_file: 0,
@@ -254,7 +255,7 @@ mod tests {
         let for_assert = store.api_id.clone();
         let mut app = ui.mount(move || views::api_keys_screen(store.clone()).state(&store));
         app.query().label("API ID").single().set_text(&mut app, "94575");
-        assert_eq!(for_assert.get().to_string(), "94575");
+        assert_eq!(for_assert.snapshot().to_string(), "94575");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -326,17 +327,17 @@ mod tests {
             .role(Role::LIST_ITEM)
             .label_contains("Zelda")
             .tap();
-        assert_eq!(store.list_selection.get(), Some(1));
+        assert_eq!(store.list_selection.snapshot(), Some(1));
         assert_eq!(store.open_chat.get(), 1);
         app.query()
             .role(Role::LIST_ITEM)
             .label_contains("Zelda")
             .focus();
         app.press_named_key("ArrowDown");
-        assert_eq!(store.list_selection.get(), Some(2));
+        assert_eq!(store.list_selection.snapshot(), Some(2));
         assert_eq!(store.open_chat.get(), 2);
         app.press_named_key("End");
-        assert_eq!(store.list_selection.get(), Some(3));
+        assert_eq!(store.list_selection.snapshot(), Some(3));
         assert_eq!(store.open_chat.get(), 3);
     }
 
@@ -367,7 +368,7 @@ mod tests {
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("Message").single().set_text(&mut app, "hello world");
         app.query().role(Role::BUTTON).label("Send").tap();
-        assert_eq!(composer.get().to_string(), "");
+        assert_eq!(composer.snapshot().to_string(), "");
     }
 
     /// Voice note: on a host with no mic the button stays usable and the
@@ -389,11 +390,11 @@ mod tests {
         // Either the recorder started (real mic present) or the exact
         // device error surfaced — a listed-but-unopenable device lands on
         // the second path (enumeration can succeed while open() fails).
-        if rec.get() {
+        if rec.snapshot() {
             caller.cancel_voice_record();
-            assert!(!rec.get());
+            assert!(!rec.snapshot());
         } else {
-            let err = err_b.get().to_string();
+            let err = err_b.snapshot().to_string();
             assert!(!err.is_empty(), "missing/unopenable device must surface an error");
         }
     }
@@ -412,13 +413,13 @@ mod tests {
             .role(Role::BUTTON)
             .label("Video note")
             .tap();
-        assert!(open.get());
+        assert!(open.snapshot());
         // The sheet's GpuSurface owns the camera; on a machine without one its
         // shared status must surface the failure (or be mid-open).
         std::thread::sleep(std::time::Duration::from_millis(600));
         let shared = caller.video_shared.borrow().clone();
         let status = shared
-            .map(|s| s.borrow().status.get().to_string())
+            .map(|s| s.borrow().status.snapshot().to_string())
             .unwrap_or_default();
         if crate::capture::camera_count() == 0 {
             assert!(
@@ -446,7 +447,7 @@ mod tests {
             .label_contains("was not delivered")
             .assert_exists();
         caller.resend_failed(9);
-        let row = msgs.get().into_iter().next().unwrap();
+        let row = msgs.snapshot().into_iter().next().unwrap();
         assert!(row.pending && !row.failed);
     }
 
@@ -461,22 +462,22 @@ mod tests {
         store.chats.set(vec![group]);
         store.members_count.set_from("5 members");
         let sub = store.chat_subtitle(7);
-        assert_eq!(sub.get().to_string(), "5 members");
+        assert_eq!(sub.snapshot().to_string(), "5 members");
 
-        let mut rows = store.chats.get();
+        let mut rows = store.chats.snapshot();
         rows[0].typing = true;
         store.chats.set(rows);
-        assert_eq!(sub.get().to_string(), "typing…");
+        assert_eq!(sub.snapshot().to_string(), "typing…");
 
         let mut alice = chat(2, "Alice", "p", 1);
         alice.online = true;
         store.chats.set(vec![alice]);
         let sub2 = store.chat_subtitle(2);
-        assert_eq!(sub2.get().to_string(), "online");
+        assert_eq!(sub2.snapshot().to_string(), "online");
 
         store.chats.set(vec![chat(6, "Bob", "p", 1)]);
         let sub3 = store.chat_subtitle(6);
-        assert_eq!(sub3.get().to_string(), "");
+        assert_eq!(sub3.snapshot().to_string(), "");
     }
 
     /// 2FA sheet validates input before calling TDLib.
@@ -485,8 +486,8 @@ mod tests {
         let store = store();
         store.open_twofa();
         store.save_twofa();
-        assert!(!store.twofa_note.get().to_string().is_empty());
-        assert!(store.twofa_open.get());
+        assert!(!store.twofa_note.snapshot().to_string().is_empty());
+        assert!(store.twofa_open.snapshot());
     }
 
     /// Per-user privacy exception merge: allow-list wins, denies drop out.
@@ -531,7 +532,7 @@ mod tests {
         let dark = store.dark.clone();
         let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
         app.query().label("Dark mode").tap();
-        assert!(dark.get());
+        assert!(dark.snapshot());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -620,17 +621,17 @@ mod tests {
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label_contains("React with 👍").assert_exists();
         app.query().label_contains("React with 👍").tap();
-        let chips = &store.messages.get()[0].reaction_chips;
+        let chips = &store.messages.snapshot()[0].reaction_chips;
         assert_eq!(chips.len(), 1);
         assert_eq!(chips[0].count, 3);
         assert!(chips[0].chosen);
-        assert_eq!(store.messages.get()[0].my_reaction.as_str(), "👍");
+        assert_eq!(store.messages.snapshot()[0].my_reaction.as_str(), "👍");
         // second tap removes it — count back to 2, unchosen
         app.query().label_contains("React with 👍").tap();
-        let chips = &store.messages.get()[0].reaction_chips;
+        let chips = &store.messages.snapshot()[0].reaction_chips;
         assert_eq!(chips[0].count, 2);
         assert!(!chips[0].chosen);
-        assert_eq!(store.messages.get()[0].my_reaction.as_str(), "");
+        assert_eq!(store.messages.snapshot()[0].my_reaction.as_str(), "");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -642,7 +643,7 @@ mod tests {
         let mut app = ui.mount(move || views::sidebar_stack(store.clone()).state(&store));
         app.query().label("Menu").tap();
         app.query().label("Archive").tap();
-        assert!(mode.get());
+        assert!(mode.snapshot());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -677,7 +678,7 @@ mod tests {
         store.select_chat(8);
         assert!(store.drafts.borrow().get(&7).is_some());
         store.select_chat(7);
-        assert_eq!(store.composer.get().to_string(), "half typed");
+        assert_eq!(store.composer.snapshot().to_string(), "half typed");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -726,7 +727,7 @@ mod tests {
         rows[1].day = today - 1;
         rows[2].day = today;
         store.set_messages(rows);
-        let got = store.messages.get();
+        let got = store.messages.snapshot();
         assert!(got[0].day_header);
         assert_eq!(got[0].day_label.as_str(), "Yesterday");
         assert!(!got[1].day_header);
@@ -734,7 +735,7 @@ mod tests {
         assert_eq!(got[2].day_label.as_str(), "Today");
         // deleting d2a's row recomputes on the next set
         store.set_messages(vec![got[0].clone(), got[1].clone()]);
-        assert!(!store.messages.get()[1].day_header);
+        assert!(!store.messages.snapshot()[1].day_header);
     }
 
     #[test]
@@ -838,7 +839,7 @@ mod tests {
         let flag = store.stickers_open.clone();
         let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query().role(Role::BUTTON).label("Stickers & GIFs").tap();
-        assert!(flag.get());
+        assert!(flag.snapshot());
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -848,7 +849,7 @@ mod tests {
         let flag = store.add_contact_open.clone();
         let mut app = ui.mount(move || views::new_chat_view(inner.clone()).state(&store));
         app.query().role(Role::BUTTON).label("Add contact").tap();
-        assert!(flag.get());
+        assert!(flag.snapshot());
         app.query().label("Phone").assert_exists();
     }
 
@@ -1182,6 +1183,7 @@ mod tests {
                     draft: "".into(),
                     order: 0,
                     unread: 12,
+                    unread_mentions: 0,
                     pinned: false,
                     muted: false,
                     marked_unread: false,
@@ -1198,6 +1200,38 @@ mod tests {
         dump_bounds("/tmp/probe_chatrow.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_chatrow.png");
         app.query().label("12").assert_exists();
+    }
+
+    /// Unread-mention badge: a row with `unread_mentions > 0` shows the "@"
+    /// pill labelled "N unread mentions" (Telegram Desktop parity).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn chat_row_mention_badge(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut app = ui.viewport(340, 200).mount_offscreen(move || {
+            views::chat_row(
+                store.clone(),
+                ChatRow {
+                    id: 5,
+                    title: "Rust China".into(),
+                    preview: "anyone tried hydrolysis on wayland?".into(),
+                    draft: "".into(),
+                    order: 0,
+                    unread: 12,
+                    unread_mentions: 2,
+                    pinned: false,
+                    muted: false,
+                    marked_unread: false,
+                    in_archive: false,
+                    photo_file: 0,
+                    time: "14:32".into(),
+                    typing: false,
+                    online: false,
+                    kind_icon: "group".into(),
+                },
+            )
+        });
+        app.semantic_mut().settle();
+        app.query().label_contains("unread mentions").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -2217,7 +2251,7 @@ mod tests {
         app.query().label("@alice").assert_exists();
         app.query().label("@bob").assert_not_exists();
         store.apply_mention("alice");
-        assert!(store.composer.get().contains("@alice "));
+        assert!(store.composer.snapshot().contains("@alice "));
     }
 
     /// Poll creator: opening the panel shows question + 2 option fields,
@@ -2232,7 +2266,7 @@ mod tests {
         app.query().label("Question").assert_exists();
         // Empty question/options: send is a no-op, panel stays open.
         store.send_poll();
-        assert!(store.poll_open.get());
+        assert!(store.poll_open.snapshot());
         app.query().label("Option 1").single().set_text(&mut app, "yes");
         app.query().label("Option 2").single().set_text(&mut app, "no");
         app.query().label("Option 3").assert_not_exists();
@@ -2240,9 +2274,9 @@ mod tests {
         app.query().label("Option 3").assert_exists();
         store.poll_question.set(Str::from("pick one"));
         app.query().role(Role::BUTTON).label("Create").tap();
-        assert!(!store.poll_open.get());
-        assert_eq!(store.poll_question.get().to_string(), "");
-        assert_eq!(store.poll_option_count.get(), 2);
+        assert!(!store.poll_open.snapshot());
+        assert_eq!(store.poll_question.snapshot().to_string(), "");
+        assert_eq!(store.poll_option_count.snapshot(), 2);
     }
 
     /// Option removal shifts later texts up and keeps at least two slots.
@@ -2254,12 +2288,12 @@ mod tests {
         store.poll_option_fields[2].set_from("c");
         store.poll_option_count.set(3);
         store.remove_poll_option(1);
-        assert_eq!(store.poll_option_fields[0].get().to_string(), "a");
-        assert_eq!(store.poll_option_fields[1].get().to_string(), "c");
-        assert_eq!(store.poll_option_count.get(), 2);
+        assert_eq!(store.poll_option_fields[0].snapshot().to_string(), "a");
+        assert_eq!(store.poll_option_fields[1].snapshot().to_string(), "c");
+        assert_eq!(store.poll_option_count.snapshot(), 2);
         // Floor at two options.
         store.remove_poll_option(0);
-        assert_eq!(store.poll_option_count.get(), 2);
+        assert_eq!(store.poll_option_count.snapshot(), 2);
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -2327,14 +2361,9 @@ mod tests {
                     id = el.id().as_u64()
                 ));
             }
-            // DOGFOOD r20-3: the nav-bar subtitle slot materializes as an
-            // empty Label with no bounds on pages that bind no subtitle —
-            // skip unlaid-out nodes (framework placeholder), still flag
-            // laid-out empty labels.
             if (role == Role::LABEL || role == Role::IMAGE)
                 && label.is_empty()
                 && n.children().is_empty()
-                && bounds.is_some()
             {
                 violations.push(format!(
                     "{page}: empty {role:?} #{id} at {bounds:?}",
@@ -2500,7 +2529,7 @@ mod tests {
         app.press_named_key("Enter");
         app.settle();
         assert!(
-            store.stickers_open.get(),
+            store.stickers_open.snapshot(),
             "Enter on focused button did not activate it"
         );
     }
@@ -2527,7 +2556,7 @@ mod tests {
         app.press_named_key("Enter");
         app.semantic_mut().settle();
         assert!(
-            store.stickers_open.get(),
+            store.stickers_open.snapshot(),
             "Enter on focused button did not activate it on the rendered runtime"
         );
     }
@@ -2548,7 +2577,7 @@ mod tests {
         app.press_named_key("Escape");
         app.settle();
         assert!(
-            !store.stickers_open.get(),
+            !store.stickers_open.snapshot(),
             "Escape did not close the emoji panel"
         );
     }
@@ -2569,7 +2598,7 @@ mod tests {
         app.press_named_key("Escape");
         app.settle();
         assert!(
-            !store.info_open.get(),
+            !store.info_open.snapshot(),
             "Escape did not close the info overlay"
         );
     }
@@ -2587,7 +2616,7 @@ mod tests {
         app.settle();
         app.press_named_key("ArrowDown");
         app.settle();
-        let moved = store.selected.get().is_some();
+        let moved = store.selected.snapshot().is_some();
         std::fs::write(
             "/tmp/kb_arrows.txt",
             format!("after ArrowDown selected={moved:?}\n"),
@@ -2618,13 +2647,52 @@ mod tests {
         app.settle();
         std::fs::write(
             "/tmp/modal_escape.txt",
-            format!("closed={}\n", closed.get()),
+            format!("closed={}\n", closed.snapshot()),
         )
         .unwrap();
-        assert!(closed.get(), "Escape did not reach the modal scope");
+        assert!(closed.snapshot(), "Escape did not reach the modal scope");
     }
 
 
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_mention_live(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
+            views::sidebar_view(inner.clone()).state(&inner)
+        });
+        app.semantic_mut().settle();
+        let nodes = app.semantic_mut().resolve_elements(&Selector::default());
+        for el in nodes.iter() {
+            let n = el.node();
+            let l = n.label().unwrap_or("").to_string();
+            if l.contains("mention") || l == "@" {
+                eprintln!("MENTION NODE #{} {:?} '{}' bounds={:?}", el.id().as_u64(), n.role(), l, n.bounds());
+            }
+        }
+        eprintln!("chats[4].mentions = {}", store.chats.snapshot()[4].unread_mentions);
+        let _ = app.snapshot().save_png("/tmp/r21/sidebar_offscreen.png");
+    }
 
-
+    /// Probe: dump the chips-row layout — scroll viewport vs chip vs button.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_chips_bounds(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
+            views::sidebar_view(inner.clone()).state(&inner)
+        });
+        app.semantic_mut().settle();
+        for el in app.semantic_mut().resolve_elements(&Selector::default()).iter() {
+            let n = el.node();
+            let l = n.label().unwrap_or("").to_string();
+            if l.contains("All") || l.contains("Archive") || l.contains("Work")
+                || l.contains("Personal") || l.contains("New folder")
+                || format!("{:?}", n.role()).to_uppercase().contains("SCROLL") {
+                eprintln!("CHIP #{} {:?} '{}' bounds={:?}", el.id().as_u64(), n.role(), l, n.bounds());
+            }
+        }
+    }
 }

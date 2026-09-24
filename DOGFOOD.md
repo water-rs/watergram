@@ -1201,15 +1201,11 @@ stale, not invalid. Both asserts live identically on upstream dev
 (`2b05cf0`, `list.rs:460`/`:469`) — pre-existing, only surfaced now
 that the selection path opens chats by pointer.
 
-Filed upstream as water-rs/hydrolysis#168 (fix session running). The
-vendored fix is gone with the vendor; on upstream dev the pointer chat
-open still panics — that IS the honest repro for #168, no app-side
-workaround. Verified fix from the vendored patch: record the request
-in `pending_scroll` and `return` while `index >= row_count` — the
-per-frame re-check lets the glide settle once the collection reaches
-the index, matching the "re-issue until the animation settles" design
-already documented in the function (tested here: after the fix the
-click-through glide reached the last bubble, see `sel_tap.png`).
+Filed upstream as water-rs/hydrolysis#168 — **FIXED upstream** at
+hydrolysis dev `3ba17866` by #178 (a pending scroll target waits for
+its row). Verified end-to-end on the real renderer: pointer tap on the
+"WaterUI devs" chat row opens the conversation — no panic, full message
+history rendered (`r21/chat_open_click.png`). Closed.
 
 ## r20-1: filter chip "Archive" cuts to "Archiv" mid-glyph with ~40 pt of slack — no ellipsis, no compression
 
@@ -1226,6 +1222,20 @@ workaround — the chips stay `scroll_horizontal` by design (Telegram
 Desktop scrolls them too); the defect is that the viewport edge clips a
 glyph instead of (a) getting the available width, or (b) ellipsizing the
 clipped label.
+
+**r21 re-verification (hydrolysis `3ba17866`, #179 landed): still
+reproduces.** #179 ("a vertical scroll's minimum width is its content's")
+covers a different axis — it does not apply to this horizontal scroller.
+Measured on `ui.mount` at 340 pt (`probe_chips_bounds`): the ScrollView
+viewport is x8..x244 (w=236); the "Archive" chip button is x186.9..x246.6
+and its label x196.9..x236.6 (39.69 — the semantic layout claims it
+fits); the "New folder" button sits at x262, leaving ≈18 pt of unclaimed
+slack between the viewport edge (x244) and the button. On winit the
+label renders ~6 pt wider than the semantic measure → its 'e' crosses
+the viewport edge and paints "Archiv" (pixel-verified: text ends at
+x243 = the scroller's clip edge). Two live defects, both framework:
+the hstack does not grant its leftover to the scroll viewport, and the
+text node's semantic measure under-reports the winit glyph width.
 
 ## r20-2: `on_tap` targets inside a `List` row are unreachable on the real renderer — the row's press target consumes the pointer event
 
@@ -1251,7 +1261,13 @@ items use); only the real-renderer hit test fails to reach it.
 
 Upstream: innermost-target-wins dispatch for pointer press inside
 `ListItem` content (or a documented way for a row to host nested tap
-targets). No app-side workaround.
+targets). Filed as **water-rs/hydrolysis#175**; fix session running.
+No app-side workaround.
+
+Re-verified on hydrolysis `3ba17866`: pointer tap at the "👍 3" chip's
+bounds still does not toggle the reaction (`r21/react_tap2.png` —
+count unchanged); a tap on a bubble body instead scrolls/presses the
+row. Still open.
 
 ## r20-3: `NavigationView` emits an empty subtitle `Label` node when no subtitle is bound
 
@@ -1263,9 +1279,54 @@ node directly under the Window (`#2 Role(Label) '' bounds=None`) —
 unbound placeholder noise for assistive tech.
 
 Repro: `a11y_audit_settings` dump on the r19 pins had no such node; on
-the r20 pins it is present on every nav page with no subtitle. Expected:
-the subtitle slot stays out of the semantic tree until a subtitle is
-bound (matching pre-r20 behaviour and the r18-1 intent). No app-side
-workaround — the app does not reference the slot when unset. The audit
-in `src/lib.rs` skips empty `Label` nodes that were never laid out
-(`bounds == None`) pending the upstream fix.
+the r20 pins it is present on every nav page with no subtitle. The same
+regression makes an empty `text("")` emit an empty `Label` — the empty
+`profile_note` was the first one the audit caught (the app gates it with
+`when` because Telegram shows no note until there is feedback, which is
+also correct product behaviour). Expected: neither an unbound subtitle
+slot nor an empty text emits a node. Filed as **water-rs/hydrolysis#176**;
+fix session running. The audit has NO skip — `a11y_audit_settings`
+fails honestly on this node until the fix lands.
+
+## r21-1: sidebar `Menu` inline icon row — RETRACTED (stale-binary artifact)
+
+The r21 captures that showed the `Menu`'s items painting as a persistent
+inline icon row under the search field ran a stale binary: the managed
+backend's launch artifact had been copied from
+`~/.water/build_cache/target/shared/...` (a Sep-23 build at the r14-era
+pins), not from the managed crate's own `target/debug/` output. On the
+real r21 pins (hydrolysis `3ba17866`, m3 `94bde7b`, waterui `70c3b7c`,
+nami `5dc2d92e`) the icon row is ABSENT — the sidebar shows only the
+48 dp `Menu` icon-button trigger in the top bar (`r21/list_3ba1786.png`),
+which is the m3#87 contract verified. What appeared in the stale build
+was the pre-r19 `Menu`-trigger fallback: at those pins `icon_only` was
+unimplemented, the 72×40 trigger showed the first item's glyph, and the
+companion items painted beside it — matching every observed detail
+(~80 pt pitch, item glyph semantics, Settings landing past the sidebar
+edge). No framework defect at the current pins; the earlier write-up is
+kept below for the record.
+
+Lesson recorded: the managed backend's real build output lands at
+`$MB/target/debug/watergram-hydrolysis-<hash>` (where `$MB` is the
+managed crate dir), and only that path proves a binary matches the
+pinned sources — verified via `ls -la` on the artifact copied to
+`dist/linux/debug/`.
+
+<details><summary>Superseded r21-1 text (stale binary)</summary>
+
+On the r21 pins the `sidebar_stack` navigation toolbar carries one
+`NavigationToolbarItem::new(TopBarLeading, Menu::new(label("Menu").icon
+(menu()).icon_only(), items))` (`src/views.rs:261-287`). On the stale
+build the Menu trigger was not drawn in the top bar and the menu's items
+painted as a persistent inline icon row under the search field at
+y≈153: `+`  📦  👤  `Online`  ⚙ at x≈48/128/208/290/360 — ~80 pt pitch,
+purple Material glyphs, with a muted `Online` text co-located between
+the account and cog glyphs; the last glyph landed past the 340 pt
+sidebar edge. Taps fired the items' commands (New chat / archive view /
+accounts / Settings). The row was absent from the semantic tree and
+from `mount_offscreen`.
+
+All of it is now explained by the pre-r19 Menu-fallback behaviour of
+the stale build; nothing was a defect of the current pins.
+
+</details>

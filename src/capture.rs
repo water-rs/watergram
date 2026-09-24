@@ -24,7 +24,7 @@ use waterui::binding::Binding;
 use waterui::graphics::{GpuContext, GpuFrame, GpuView};
 use waterui::prelude::Environment;
 use waterkit_camera::Camera;
-use waterkit_codec::{CodecType, Encoder};
+use waterkit_codec::{CodecType, Encoder, EncoderProfile};
 use waterkit_video_container::{MuxerCodecType, VideoWriter};
 use futures_lite::StreamExt;
 
@@ -784,7 +784,7 @@ fn recorder_thread(
     path: PathBuf,
 ) {
     let run = || -> Result<VideoNoteDone, String> {
-        let mut enc = Encoder::new(CodecType::H264, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE)
+        let mut enc = Encoder::new(CodecType::H264, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE, EncoderProfile::Realtime)
             .map_err(|e| e.to_string())?;
         let mut writer = VideoWriter::new(
             &path,

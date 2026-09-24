@@ -114,6 +114,8 @@ pub struct ChatRow {
     pub draft: Str,
     pub order: i64,
     pub unread: i32,
+    /// TDLib `unread_mention_count` — renders the `@` badge on the row.
+    pub unread_mentions: i32,
     pub pinned: bool,
     pub muted: bool,
     pub marked_unread: bool,
@@ -777,8 +779,8 @@ pub(crate) fn privacy_audience(rules: &[enums::UserPrivacySettingRule]) -> &'sta
 impl Store {
     /// The chat list currently shown in the sidebar.
     fn active_list(&self) -> enums::ChatList {
-        let folder = self.active_folder.get();
-        if self.archive_mode.get() {
+        let folder = self.active_folder.snapshot();
+        if self.archive_mode.snapshot() {
             enums::ChatList::Archive
         } else if folder > 0 {
             enums::ChatList::Folder(types::ChatListFolder {
@@ -967,6 +969,7 @@ impl Store {
                 draft: "".into(),
                 order,
                 unread,
+                unread_mentions: 0,
                 pinned,
                 muted,
                 marked_unread: false,
@@ -994,6 +997,7 @@ impl Store {
         ]);
         // Demo draft on a visible row (Telegram Desktop shows "Draft: …").
         self.set_draft(3, Some("release notes proofread".into()));
+        self.update_chat_row(5, |r| r.unread_mentions = 2);
         // Mirrors TDLib `chatFolders`: only user-created folders — the
         // built-in All/Archive lists are synthesized by the sidebar itself.
         self.folders.set(vec![
@@ -1684,6 +1688,7 @@ impl Store {
                 .unwrap_or_default(),
             order,
             unread: chat.unread_count,
+            unread_mentions: chat.unread_mention_count,
             pinned,
             muted,
             marked_unread: chat.is_marked_as_unread,
@@ -1694,7 +1699,7 @@ impl Store {
             online,
             kind_icon: kind_icon.into(),
         };
-        let mut list = self.chats.get();
+        let mut list = self.chats.snapshot();
         match list.iter().position(|r| r.id == chat.id) {
             Some(i) => list[i] = row,
             None => {
@@ -1711,7 +1716,7 @@ impl Store {
     }
 
     fn update_chat_row(&self, chat_id: i64, f: impl Fn(&mut ChatRow)) {
-        let mut list = self.chats.get();
+        let mut list = self.chats.snapshot();
         if let Some(r) = list.iter_mut().find(|r| r.id == chat_id) {
             f(r);
             list.sort();
@@ -1720,7 +1725,7 @@ impl Store {
     }
 
     fn update_message_row(&self, message_id: i64, f: impl Fn(&mut MessageRow)) {
-        let mut list = self.messages.get();
+        let mut list = self.messages.snapshot();
         if let Some(r) = list.iter_mut().find(|r| r.id == message_id) {
             f(r);
             self.set_messages(list);
@@ -1739,7 +1744,7 @@ impl Store {
         if let Some(p) = positions.iter().find(|p| p.list == active).cloned() {
             let (order, pinned) = (p.order, p.is_pinned);
             if order == 0 {
-                let mut list = self.chats.get();
+                let mut list = self.chats.snapshot();
                 list.retain(|r| r.id != chat_id);
                 self.chats.set(list);
             } else {
@@ -1850,7 +1855,7 @@ impl Store {
                     c.last_read_outbox_message_id = u.last_read_outbox_message_id;
                 }
                 if u.chat_id == self.open_chat.get() {
-                    let mut list = self.messages.get();
+                    let mut list = self.messages.snapshot();
                     for r in list.iter_mut() {
                         if r.outgoing && r.id <= u.last_read_outbox_message_id {
                             r.pending = false;
@@ -1866,6 +1871,14 @@ impl Store {
                 }
                 self.update_chat_row(u.chat_id, |r| {
                     r.marked_unread = u.is_marked_as_unread
+                });
+            }
+            enums::Update::ChatUnreadMentionCount(u) => {
+                if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
+                    c.unread_mention_count = u.unread_mention_count;
+                }
+                self.update_chat_row(u.chat_id, |r| {
+                    r.unread_mentions = u.unread_mention_count
                 });
             }
             enums::Update::MessageInteractionInfo(u) => {
@@ -1945,7 +1958,7 @@ impl Store {
                 let m = u.message;
                 if m.chat_id == self.open_chat.get() {
                     let row = self.message_row(&m);
-                    let mut list = self.messages.get();
+                    let mut list = self.messages.snapshot();
                     if !list.iter().any(|r| r.id == row.id) {
                         list.push(row);
                         list.sort();
@@ -1970,7 +1983,7 @@ impl Store {
             }
             enums::Update::MessageSendSucceeded(u) => {
                 if u.message.chat_id == self.open_chat.get() {
-                    let mut list = self.messages.get();
+                    let mut list = self.messages.snapshot();
                     list.retain(|r| r.id != u.old_message_id && r.id != u.message.id);
                     list.push(self.message_row(&u.message));
                     list.sort();
@@ -2014,7 +2027,7 @@ impl Store {
             }
             enums::Update::DeleteMessages(u) => {
                 if u.chat_id == self.open_chat.get() {
-                    let mut list = self.messages.get();
+                    let mut list = self.messages.snapshot();
                     list.retain(|r| !u.message_ids.contains(&r.id));
                     self.set_messages(list);
                 }
@@ -2218,8 +2231,8 @@ impl Store {
     // ----- actions called from views -----
 
     pub fn submit_api_keys(&self) {
-        let id: i32 = self.api_id.get().trim().parse().unwrap_or(0);
-        let hash = self.api_hash.get().to_string();
+        let id: i32 = self.api_id.snapshot().trim().parse().unwrap_or(0);
+        let hash = self.api_hash.snapshot().to_string();
         if id <= 0 || hash.is_empty() {
             self.auth_note.set_from("Enter a valid api_id and api_hash (from my.telegram.org).");
             return;
@@ -2227,14 +2240,14 @@ impl Store {
         let cfg = Config {
             api_id: id,
             api_hash: hash,
-            test_dc: self.test_dc.get(),
+            test_dc: self.test_dc.snapshot(),
         };
         cfg.save();
         self.set_tdlib_parameters(cfg);
     }
 
     pub fn submit_phone(&self) {
-        let phone = self.phone.get().to_string();
+        let phone = self.phone.snapshot().to_string();
         if phone.trim().is_empty() {
             self.auth_note.set_from("Enter your phone number.");
             return;
@@ -2278,7 +2291,7 @@ impl Store {
     }
 
     pub fn submit_code(&self) {
-        let code = self.code.get().to_string();
+        let code = self.code.snapshot().to_string();
         if code.trim().is_empty() {
             return;
         }
@@ -2300,7 +2313,7 @@ impl Store {
     }
 
     pub fn submit_password(&self) {
-        let pw = self.password.get().expose().to_string();
+        let pw = self.password.snapshot().expose().to_string();
         if pw.is_empty() {
             return;
         }
@@ -2322,12 +2335,12 @@ impl Store {
     }
 
     pub fn register(&self) {
-        let first = self.first_name.get().to_string();
+        let first = self.first_name.snapshot().to_string();
         if first.trim().is_empty() {
             self.auth_note.set_from("First name is required.");
             return;
         }
-        let last = self.last_name.get().to_string();
+        let last = self.last_name.snapshot().to_string();
         self.busy.set(true);
         let client = self.client_id.get();
         let store = self.clone();
@@ -2358,8 +2371,8 @@ impl Store {
         // Forwarding mode: a pending forwarded message (or a selected
         // batch) routes the tap to forwardMessages instead of opening the
         // chat. `send_copy` forwards without author attribution.
-        let batch = self.forward_ids.get();
-        let single = self.forward_message.get();
+        let batch = self.forward_ids.snapshot();
+        let single = self.forward_message.snapshot();
         if !batch.is_empty() || single.is_some() {
             let (from, msg_ids) = if !batch.is_empty() {
                 (self.open_chat.get(), batch)
@@ -2367,8 +2380,8 @@ impl Store {
                 let (from, msg_id) = single.unwrap_or_default();
                 (from, vec![msg_id])
             };
-            let send_copy = self.forward_noattr.get();
-            let comment = self.forward_comment.get();
+            let send_copy = self.forward_noattr.snapshot();
+            let comment = self.forward_comment.snapshot();
             self.forward_message.set(None);
             self.forward_ids.set(Vec::new());
             self.forward_noattr.set(false);
@@ -2404,7 +2417,7 @@ impl Store {
             // The tap already highlighted the row — restore the highlight to
             // the still-open chat (forwarding does not open a chat).
             self.syncing_selection.set(true);
-            self.list_selection.set(self.selected.get());
+            self.list_selection.set(self.selected.snapshot());
             self.syncing_selection.set(false);
             return;
         }
@@ -2433,7 +2446,7 @@ impl Store {
         self.chat_search_results.set(Vec::new());
         self.members.set(Vec::new());
         if prev != 0 {
-            let cur = self.composer.get();
+            let cur = self.composer.snapshot();
             self.set_draft(prev, if cur.is_empty() { None } else { Some(cur.clone()) });
             self.sync_draft(prev, cur);
         }
@@ -2473,13 +2486,13 @@ impl Store {
 
     /// Toggle the right-side info panel and (re)load shared media.
     pub fn toggle_info(&self) {
-        let open = !self.info_open.get();
+        let open = !self.info_open.snapshot();
         self.info_open.set(open);
         if open {
             self.load_shared_media();
             let kind = self
                 .chats
-                .get()
+                .snapshot()
                 .iter()
                 .find(|r| r.id == self.open_chat.get())
                 .map(|r| r.kind_icon.to_string())
@@ -2573,12 +2586,12 @@ impl Store {
             .unwrap_or(0);
         let unread = self
             .chats
-            .get()
+            .snapshot()
             .iter()
             .find(|r| r.id == chat_id)
             .map(|r| r.unread)
             .unwrap_or(0);
-        let mut list = self.messages.get();
+        let mut list = self.messages.snapshot();
         let target = if unread > 0 {
             list.iter()
                 .filter(|r| !r.outgoing)
@@ -2795,7 +2808,7 @@ impl Store {
             )
             .await
             {
-                let mut list = store.messages.get();
+                let mut list = store.messages.snapshot();
                 for m in msgs.messages.iter().flatten() {
                     let row = store.message_row(m);
                     if !list.iter().any(|r| r.id == row.id) {
@@ -2868,7 +2881,7 @@ impl Store {
 
     /// Append an emoji (or any text) to the composer from the picker.
     pub fn insert_emoji(&self, emoji: &str) {
-        let mut s = self.composer.get().to_string();
+        let mut s = self.composer.snapshot().to_string();
         s.push_str(emoji);
         self.composer.set_from(s);
     }
@@ -2923,7 +2936,7 @@ impl Store {
 
     /// Append one empty option slot, capped at `POLL_MAX_OPTIONS`.
     pub fn add_poll_option(&self) {
-        let n = self.poll_option_count.get();
+        let n = self.poll_option_count.snapshot();
         if n < self.poll_option_fields.len() {
             self.poll_option_count.set(n + 1);
         }
@@ -2932,17 +2945,17 @@ impl Store {
     /// Remove the option at `ix`, shifting later texts up; a poll keeps at
     /// least two options.
     pub fn remove_poll_option(&self, ix: usize) {
-        let n = self.poll_option_count.get();
+        let n = self.poll_option_count.snapshot();
         if n <= 2 || ix >= n {
             return;
         }
         for i in ix..n - 1 {
-            let next = self.poll_option_fields[i + 1].get();
+            let next = self.poll_option_fields[i + 1].snapshot();
             self.poll_option_fields[i].set(next);
         }
         self.poll_option_fields[n - 1].set_from("");
         self.poll_option_count.set(n - 1);
-        let correct = self.poll_correct.get();
+        let correct = self.poll_correct.snapshot();
         if correct >= n - 1 {
             self.poll_correct.set(0);
         }
@@ -2952,12 +2965,12 @@ impl Store {
     /// question and at least two non-empty options are filled.
     pub fn send_poll(&self) {
         let chat_id = self.open_chat.get();
-        let question = self.poll_question.get().to_string().trim().to_string();
-        let n = self.poll_option_count.get();
+        let question = self.poll_question.snapshot().to_string().trim().to_string();
+        let n = self.poll_option_count.snapshot();
         let options: Vec<String> = (0..n)
             .map(|i| {
                 self.poll_option_fields[i]
-                    .get()
+                    .snapshot()
                     .to_string()
                     .trim()
                     .to_string()
@@ -2967,10 +2980,10 @@ impl Store {
         if chat_id == 0 || question.is_empty() || options.len() < 2 {
             return;
         }
-        let quiz = self.poll_quiz.get();
-        let correct = self.poll_correct.get().min(options.len() - 1) as i32;
-        let multiple = self.poll_multiple.get();
-        let anonymous = self.poll_anonymous.get();
+        let quiz = self.poll_quiz.snapshot();
+        let correct = self.poll_correct.snapshot().min(options.len() - 1) as i32;
+        let multiple = self.poll_multiple.snapshot();
+        let anonymous = self.poll_anonymous.snapshot();
         self.poll_open.set(false);
         self.poll_question.set_from("");
         for field in &self.poll_option_fields {
@@ -3110,7 +3123,7 @@ impl Store {
 
     /// Fetch the open chat's scheduled messages and open the panel.
     pub fn toggle_scheduled(&self) {
-        let open = !self.scheduled_open.get();
+        let open = !self.scheduled_open.snapshot();
         self.scheduled_open.set(open);
         if open {
             self.load_scheduled();
@@ -3160,7 +3173,7 @@ impl Store {
     /// Multi-selection: context-menu "Select" starts it, tapping a bubble
     /// toggles membership; an empty selection ends the mode.
     pub fn toggle_select(&self, message_id: i64) {
-        let mut sel = self.selected_msgs.get();
+        let mut sel = self.selected_msgs.snapshot();
         if sel.contains(&message_id) {
             sel.retain(|&x| x != message_id);
         } else {
@@ -3176,7 +3189,7 @@ impl Store {
     /// Batch-delete the selected messages (revoke for everyone).
     pub fn delete_selected(&self) {
         let chat_id = self.open_chat.get();
-        let ids = self.selected_msgs.get();
+        let ids = self.selected_msgs.snapshot();
         self.selected_msgs.set(Vec::new());
         if chat_id == 0 || ids.is_empty() {
             return;
@@ -3191,7 +3204,7 @@ impl Store {
     /// Stage the selected batch for forwarding; the next chat tap delivers
     /// it (same pick-a-chat flow as single-message forward).
     pub fn forward_selected(&self) {
-        let ids = self.selected_msgs.get();
+        let ids = self.selected_msgs.snapshot();
         if ids.is_empty() {
             return;
         }
@@ -3225,7 +3238,7 @@ impl Store {
             }
             self.no_more_history
                 .set(msgs.messages.len() < 50);
-            let mut list = self.messages.get();
+            let mut list = self.messages.snapshot();
             for row in rows.drain(..) {
                 if !list.iter().any(|r| r.id == row.id) {
                     list.push(row);
@@ -3254,7 +3267,7 @@ impl Store {
 
     /// Fetch the next page of older history for the open chat.
     pub fn load_older(&self) {
-        if self.loading_history.get() || self.no_more_history.get() {
+        if self.loading_history.snapshot() || self.no_more_history.snapshot() {
             return;
         }
         let chat_id = self.open_chat.get();
@@ -3270,7 +3283,7 @@ impl Store {
     }
 
     pub(crate) fn scroll_bottom(&self) {
-        let last = self.messages.get().len().saturating_sub(1);
+        let last = self.messages.snapshot().len().saturating_sub(1);
         self.scroll.scroll_to(last);
     }
 
@@ -3303,16 +3316,16 @@ impl Store {
     /// Shared composer send path. `options` applies to text sends only —
     /// attachments always go immediately for now.
     fn send_opt(&self, options: Option<types::MessageSendOptions>) {
-        if !self.attach.get().is_empty() {
+        if !self.attach.snapshot().is_empty() {
             self.send_attachment();
             return;
         }
         let chat_id = self.open_chat.get();
-        let text = self.composer.get().to_string();
+        let text = self.composer.snapshot().to_string();
         if chat_id == 0 || text.trim().is_empty() {
             return;
         }
-        if let Some(msg_id) = self.editing.get() {
+        if let Some(msg_id) = self.editing.snapshot() {
             self.editing.set(None);
             self.composer.set_from("");
             self.set_draft(chat_id, None);
@@ -3338,7 +3351,7 @@ impl Store {
             .detach();
             return;
         }
-        let reply = self.reply_to.get().map(|id| {
+        let reply = self.reply_to.snapshot().map(|id| {
             enums::InputMessageReplyTo::Message(types::InputMessageReplyToMessage {
                 message_id: id,
                 quote: None,
@@ -3468,7 +3481,7 @@ impl Store {
 
     pub fn send_attachment(&self) {
         let chat_id = self.open_chat.get();
-        let urls = self.attach.get();
+        let urls = self.attach.snapshot();
         if chat_id == 0 || urls.is_empty() {
             return;
         }
@@ -3480,9 +3493,9 @@ impl Store {
         if paths.is_empty() {
             return;
         }
-        let preview_caption = self.attach_caption.get().to_string();
+        let preview_caption = self.attach_caption.snapshot().to_string();
         let caption = if preview_caption.is_empty() {
-            self.composer.get().to_string()
+            self.composer.snapshot().to_string()
         } else {
             preview_caption
         };
@@ -3638,7 +3651,7 @@ impl Store {
 
     /// Close the sheet and drop the camera session.
     pub fn close_video_note(&self) {
-        if self.video_recording.get() {
+        if self.video_recording.snapshot() {
             self.finish_video_record();
         }
         self.video_shared.borrow_mut().take();
@@ -3888,7 +3901,7 @@ impl Store {
     pub fn toggle_pin(&self, chat_id: i64) {
         let pinned = self
             .chats
-            .get()
+            .snapshot()
             .iter()
             .find(|r| r.id == chat_id)
             .map(|r| r.pinned)
@@ -3961,7 +3974,7 @@ impl Store {
 
     /// Switch the sidebar between the Main and Archive chat lists.
     pub fn toggle_archive_view(&self) {
-        let next = !self.archive_mode.get();
+        let next = !self.archive_mode.snapshot();
         self.set_list(if next { -1 } else { 0 });
     }
 
@@ -3972,7 +3985,7 @@ impl Store {
 
     /// Switch the sidebar list: 0 = All chats, -1 = Archive, n = folder.
     pub fn set_list(&self, list_id: i32) {
-        if self.active_folder.get() == list_id && self.archive_mode.get() == (list_id == -1) {
+        if self.active_folder.snapshot() == list_id && self.archive_mode.snapshot() == (list_id == -1) {
             return;
         }
         self.active_folder.set(list_id);
@@ -4023,7 +4036,7 @@ impl Store {
 
     /// Replace the trailing @token in the composer with `@username `.
     pub fn apply_mention(&self, username: &str) {
-        let cur = self.composer.get().to_string();
+        let cur = self.composer.snapshot().to_string();
         if let Some(tok) = Self::mention_token(&cur) {
             let at = cur.len() - tok.len() - 1;
             let mut s = String::with_capacity(at + username.len() + 2);
@@ -4037,8 +4050,8 @@ impl Store {
 
     /// Lazily populate `members` when the composer enters @mention context.
     pub fn maybe_load_members(&self) {
-        if Self::mention_token(&self.composer.get()).is_some()
-            && self.members.get().is_empty()
+        if Self::mention_token(&self.composer.snapshot()).is_some()
+            && self.members.snapshot().is_empty()
         {
             self.load_members();
         }
@@ -4224,7 +4237,7 @@ impl Store {
         match tab {
             1 => self.load_stickers(),
             2 => {
-                let q = self.sticker_query.get().to_string();
+                let q = self.sticker_query.snapshot().to_string();
                 self.search_gifs_by(q);
             }
             _ => {}
@@ -4234,7 +4247,7 @@ impl Store {
     /// Toggle the sticker/GIF picker; loads recent stickers + saved GIFs
     /// on first open.
     pub fn toggle_stickers(&self) {
-        let open = !self.stickers_open.get();
+        let open = !self.stickers_open.snapshot();
         self.stickers_open.set(open);
         if open {
             self.load_stickers();
@@ -4455,9 +4468,9 @@ impl Store {
     /// Import the new-contact form fields as a contact, then refresh the
     /// contacts list.
     pub fn add_contact(&self) {
-        let phone = self.nc_phone.get().to_string();
-        let first = self.nc_first.get().to_string();
-        let last = self.nc_last.get().to_string();
+        let phone = self.nc_phone.snapshot().to_string();
+        let first = self.nc_first.snapshot().to_string();
+        let last = self.nc_last.snapshot().to_string();
         let client = self.client_id.get();
         if client == 0 || phone.trim().is_empty() || first.trim().is_empty() {
             return;
@@ -4571,7 +4584,7 @@ impl Store {
     fn persist_accounts(&self) {
         let labels: Vec<String> = self
             .accounts
-            .get()
+            .snapshot()
             .iter()
             .map(|a| a.label.to_string())
             .collect();
@@ -4627,7 +4640,7 @@ impl Store {
                     .trim()
                     .to_string();
                 if !name.is_empty() {
-                    let mut rows = store.accounts.get();
+                    let mut rows = store.accounts.snapshot();
                     if let Some(row) = rows.iter_mut().find(|r| r.id == client) {
                         row.label = name.into();
                         store.accounts.set(rows);
@@ -4643,7 +4656,7 @@ impl Store {
     pub fn add_account(&self) {
         let id = tdlib_rs::create_client();
         self.accounts_open.set(false);
-        let mut rows = self.accounts.get();
+        let mut rows = self.accounts.snapshot();
         rows.push(AccountRow {
             id,
             label: "New account".into(),
@@ -4753,7 +4766,7 @@ impl Store {
         } else {
             let name = self
                 .folders
-                .get()
+                .snapshot()
                 .iter()
                 .find(|f| f.id == id)
                 .map(|f| f.title.clone())
@@ -4766,7 +4779,7 @@ impl Store {
     /// Create or rename a chat folder from the editor form.
     pub fn save_folder(&self) {
         let client = self.client_id.get();
-        let name = self.folder_name.get().to_string();
+        let name = self.folder_name.snapshot().to_string();
         if client == 0 || name.trim().is_empty() {
             return;
         }
@@ -4787,13 +4800,13 @@ impl Store {
             exclude_muted: false,
             exclude_read: false,
             exclude_archived: false,
-            include_contacts: self.folder_contacts.get(),
+            include_contacts: self.folder_contacts.snapshot(),
             include_non_contacts: false,
             include_bots: false,
-            include_groups: self.folder_groups.get(),
-            include_channels: self.folder_channels.get(),
+            include_groups: self.folder_groups.snapshot(),
+            include_channels: self.folder_channels.snapshot(),
         };
-        let id = self.editing_folder.get();
+        let id = self.editing_folder.snapshot();
         let store = self.clone();
         spawn_local(async move {
             let ok = if id == 0 {
@@ -4819,7 +4832,7 @@ impl Store {
         let store = self.clone();
         spawn_local(async move {
             let _ = functions::delete_chat_folder(id, Vec::new(), client).await;
-            if store.active_folder.get() == id {
+            if store.active_folder.snapshot() == id {
                 store.set_list(0);
             }
         })
@@ -4829,7 +4842,7 @@ impl Store {
     /// Search stickers by emoji text and show results in the picker.
     pub fn search_stickers_by(&self) {
         let client = self.client_id.get();
-        let emoji = self.sticker_query.get().to_string();
+        let emoji = self.sticker_query.snapshot().to_string();
         if client == 0 {
             return;
         }
@@ -4923,7 +4936,7 @@ impl Store {
     pub fn set_chat_avatar(&self) {
         let client = self.client_id.get();
         let chat_id = self.open_chat.get();
-        let urls = self.chat_avatar_pick.get();
+        let urls = self.chat_avatar_pick.snapshot();
         let Some(url) = urls.first() else { return };
         let path = url.path().to_string();
         if client == 0 || chat_id == 0 || path.is_empty() {
@@ -4988,7 +5001,7 @@ impl Store {
     /// Upload the picked Settings file as the account's profile photo.
     pub fn set_avatar(&self) {
         let client = self.client_id.get();
-        let urls = self.avatar_pick.get();
+        let urls = self.avatar_pick.snapshot();
         let Some(url) = urls.first() else { return };
         if client == 0 {
             return;
@@ -5022,7 +5035,7 @@ impl Store {
         if chat_id == 0 {
             return;
         }
-        let mut list = self.messages.get();
+        let mut list = self.messages.snapshot();
         if let Some(r) = list.iter_mut().find(|r| r.id == message_id) {
             r.failed = false;
             r.pending = true;
@@ -5047,15 +5060,15 @@ impl Store {
     /// TDLib computes the SRP exchange internally — the client only sends
     /// the plaintext over the encrypted MTProto channel.
     pub fn save_twofa(&self) {
-        let old = self.twofa_old.get().expose().to_string();
-        let new = self.twofa_new.get().expose().to_string();
+        let old = self.twofa_old.snapshot().expose().to_string();
+        let new = self.twofa_new.snapshot().expose().to_string();
         if old.is_empty() && new.is_empty() {
             self.twofa_note
                 .set_from("Enter your current password to disable 2FA");
             return;
         }
-        let hint = self.twofa_hint_in.get().to_string();
-        let email = self.twofa_email.get().to_string();
+        let hint = self.twofa_hint_in.snapshot().to_string();
+        let email = self.twofa_email.snapshot().to_string();
         let client = self.client_id.get();
         if client == 0 {
             return;
@@ -5290,7 +5303,7 @@ impl Store {
             };
             out.clone()
         };
-        match self.lang_strings.get().get(key) {
+        match self.lang_strings.snapshot().get(key) {
             Some(V::Ordinary(o)) => Str::from(o.value.clone()),
             Some(V::Pluralized(p)) => Str::from(pick(p)),
             _ => Str::from(fallback.to_string()),
@@ -5348,7 +5361,7 @@ impl Store {
         }
         let store = self.clone();
         spawn_local(async move {
-            let mut current = store.lang_id.get().to_string();
+            let mut current = store.lang_id.snapshot().to_string();
             if let Ok(enums::OptionValue::String(s)) =
                 functions::get_option("language_pack_id".into(), client).await
             {
@@ -5394,7 +5407,7 @@ impl Store {
                 .await;
             }
             store.refresh_language(&id, client).await;
-            let mut packs = store.lang_packs.get();
+            let mut packs = store.lang_packs.snapshot();
             for p in packs.iter_mut() {
                 p.active = p.id.as_str() == id;
             }
@@ -5405,10 +5418,10 @@ impl Store {
 
     /// Merge pushed `Update::LanguagePackStrings` for the applied pack.
     fn merge_language_strings(&self, u: &types::UpdateLanguagePackStrings) {
-        if u.language_pack_id != self.lang_id.get().as_str() {
+        if u.language_pack_id != self.lang_id.snapshot().as_str() {
             return;
         }
-        let mut map = self.lang_strings.get();
+        let mut map = self.lang_strings.snapshot();
         for s in &u.strings {
             match &s.value {
                 Some(v) => {
@@ -5426,10 +5439,10 @@ impl Store {
     pub fn save_profile(&self) {
         let client = self.client_id.get();
         let (first, last, bio, uname) = (
-            self.edit_first.get().to_string(),
-            self.edit_last.get().to_string(),
-            self.edit_bio.get().to_string(),
-            self.edit_username.get().to_string(),
+            self.edit_first.snapshot().to_string(),
+            self.edit_last.snapshot().to_string(),
+            self.edit_bio.snapshot().to_string(),
+            self.edit_username.snapshot().to_string(),
         );
         let store = self.clone();
         spawn_local(async move {
@@ -5447,7 +5460,7 @@ impl Store {
             {
                 note = "Failed to update username";
             } else {
-                let mut me = store.me.get();
+                let mut me = store.me.snapshot();
                 me.name = format!("{first} {last}").trim().to_string().into();
                 me.username = uname.into();
                 store.me.set(me);
@@ -5460,7 +5473,7 @@ impl Store {
     /// Rename the open group/channel (admin).
     pub fn rename_chat(&self) {
         let chat_id = self.open_chat.get();
-        let title = self.admin_title.get().to_string();
+        let title = self.admin_title.snapshot().to_string();
         if chat_id == 0 || title.is_empty() {
             return;
         }
@@ -5474,7 +5487,7 @@ impl Store {
     /// Set the open group/channel's description (admin).
     pub fn set_chat_desc(&self) {
         let chat_id = self.open_chat.get();
-        let desc = self.admin_desc.get().to_string();
+        let desc = self.admin_desc.snapshot().to_string();
         if chat_id == 0 {
             return;
         }
@@ -5567,7 +5580,7 @@ impl Store {
     }
 
     fn upsert_result_row(&self, chat: types::Chat) {
-        if self.chats.get().iter().any(|r| r.id == chat.id) {
+        if self.chats.snapshot().iter().any(|r| r.id == chat.id) {
             return;
         }
         self.chat_objs.borrow_mut().insert(chat.id, chat.clone());
@@ -5581,6 +5594,7 @@ impl Store {
             draft: "".into(),
             order: 0,
             unread: 0,
+            unread_mentions: 0,
             pinned: false,
             muted: false,
             marked_unread: false,
@@ -5591,7 +5605,7 @@ impl Store {
             online: false,
             kind_icon: "person".into(),
         };
-        let mut list = self.server_results.get();
+        let mut list = self.server_results.snapshot();
         if !list.iter().any(|r| r.id == row.id) {
             list.push(row);
             self.server_results.set(list);
@@ -5601,8 +5615,8 @@ impl Store {
     /// Create (or open) a chat from the New Chat page. `kind`: 0 private
     /// (input = @username or user id), 1 group (title), 2 channel (title).
     pub fn create_chat(&self) {
-        let input = self.new_chat_input.get().to_string();
-        let kind = self.new_chat_kind.get();
+        let input = self.new_chat_input.snapshot().to_string();
+        let kind = self.new_chat_kind.snapshot();
         if input.trim().is_empty() {
             return;
         }
