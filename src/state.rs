@@ -1140,6 +1140,28 @@ impl Store {
         // verification: m22 quotes m21.
         msgs[12].reply_excerpt = Str::from("single reaction on text");
         msgs[12].reply_to_id = 21;
+        // A quote whose original is scrolled well out of view (r25-2):
+        // m23 quotes the first demo message — tapping it must scroll the
+        // list up to m10, not just highlight an on-screen row.
+        msgs[13].reply_excerpt = Str::from("morning! did the camera filters example work?");
+        msgs[13].reply_to_id = 10;
+        // A quote whose original is NOT in the loaded window — tapping it
+        // exercises the getChatHistory fetch path (r25-2).
+        msgs[15].reply_excerpt = Str::from("earlier history, not loaded");
+        msgs[15].reply_to_id = 9;
+        // Chosen states in both chip placements (r25-1 verification):
+        // inside an incoming bubble (m21) and on an emoji-only row (m24).
+        if let Some(chip) = msgs[11].reaction_chips.first_mut() {
+            chip.chosen = true;
+        }
+        // Chosen inside an outgoing bubble (m14) — the container-tint
+        // variant that stays readable on the accent fill.
+        if let Some(chip) = msgs[4].reaction_chips.first_mut() {
+            chip.chosen = true;
+        }
+        if let Some(chip) = msgs[14].reaction_chips.first_mut() {
+            chip.chosen = true;
+        }
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
             r.day = today;

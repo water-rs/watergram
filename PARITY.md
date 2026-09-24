@@ -49,7 +49,7 @@
 | 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
 | 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + `List` `ScrollController<usize>` 按索引精确滚动 + 气泡高亮 | — |
 | 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
-| Reactions 展示 | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
+| Reactions 展示（统一 pill 组件：气泡内气泡色派生 tint、已选 accent） | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
 | 发送中/失败状态 | ✅ | `updateMessageSendSucceeded`/`Failed` 行内图标；点 ✗ → `resendMessages` | `resend_failed_marks_pending` |
 | 定时消息 / 静默发送 | ✅ | `sendMessage(MessageSendOptions{disable_notification,scheduling_state=SendAtDate})` — 发送按钮右键 | — (send_opt 路径） |
@@ -68,7 +68,7 @@
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
 | 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
-| 消息分组（同发送者连发折叠 + 头像列） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母圆）；组间间距大于组内 | `set_messages_groups_runs` |
+| 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母圆）；组末气泡底角画 Path 尾巴（预留 8pt 槽不位移气泡）；组间间距大于组内 | `set_messages_groups_runs` |
 
 ## 4. 媒体与附件
 

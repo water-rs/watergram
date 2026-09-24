@@ -23,7 +23,7 @@ use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
-use waterui::shape::{Circle, RoundedRectangle, ShapeExt};
+use waterui::shape::{Circle, Path, RoundedRectangle, ShapeExt};
 use waterui::graphics::color::{BorderColor, Srgb, WithOpacity};
 use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Error, Foreground,
@@ -45,7 +45,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{AccountRow, ChatRow, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{AccountRow, ChatRow, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use mdi::folder_plus;
 use mdi::account_group;
 use mdi::alert_circle;
@@ -1459,6 +1459,88 @@ pub(crate) fn emoji_count(s: &str) -> usize {
 }
 
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
+/// Surface a reaction pill is drawn on — the unchosen tint is derived
+/// from it (r25-1): the same component on the page background, inside an
+/// incoming bubble, and inside an outgoing accent bubble.
+#[derive(Clone, Copy)]
+enum ChipSurface {
+    /// Emoji-only row — the pill sits on the page background.
+    Page,
+    /// Inside an incoming or highlighted bubble.
+    Incoming,
+    /// Inside an outgoing (accent) bubble.
+    Outgoing,
+}
+
+/// One reaction pill: tap toggles it, the chosen state is accented in
+/// every placement (r25-1 — on the accent bubble the container tint
+/// keeps it readable where an accent-on-accent pill would vanish).
+fn reaction_chip(row: &MessageRow, c: &ReactionChip, surface: ChipSurface) -> AnyView {
+    let emoji = c.emoji.clone();
+    let e2 = emoji.to_string();
+    let label = format!("{} {}", emoji, c.count);
+    let r = row.clone();
+    let pill = text(label)
+        .caption()
+        .padding_with((1.0, 6.0))
+        .on_tap(move |store: Store| store.toggle_reaction(&r, &e2))
+        .a11y_role(AccessibilityRole::Button)
+        .a11y_label(format!(
+            "React with {}, {} {}",
+            emoji,
+            c.count,
+            if c.count == 1 { "reaction" } else { "reactions" }
+        ));
+    match (surface, c.chosen) {
+        (ChipSurface::Outgoing, true) => pill
+            .foreground(Accent)
+            .background(RoundedRectangle::new(0.5).fill(AccentContainer))
+            .anyview(),
+        (ChipSurface::Outgoing, false) => pill
+            .foreground(AccentForeground)
+            .background(
+                RoundedRectangle::new(0.5).fill(WithOpacity::new(AccentForeground, 0.18)),
+            )
+            .anyview(),
+        (_, true) => pill
+            .foreground(AccentForeground)
+            .background(RoundedRectangle::new(0.5).fill(Accent))
+            .anyview(),
+        (ChipSurface::Page, false) => pill
+            .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+            .anyview(),
+        (ChipSurface::Incoming, false) => pill
+            .background(RoundedRectangle::new(0.5).fill(Surface))
+            .anyview(),
+    }
+}
+
+/// Bubble tail: a small hook drawn at the bottom outer corner of a
+/// run's last bubble, pointing toward the sender's avatar (incoming)
+/// or the screen edge (outgoing) — Telegram Desktop's tail. The inner
+/// edge is flush with the bubble; the quad's control point pulls the
+/// outer edge into a concave hook tapering to the tip (r25-3). It sits
+/// in an 8 pt gutter that is reserved on every row so bubble edges stay
+/// aligned regardless of tails.
+fn bubble_tail(outgoing: bool, fill: Color) -> AnyView {
+    const W: f32 = 8.0;
+    const H: f32 = 10.0;
+    let path = if outgoing {
+        Path::new()
+            .move_to(0.0, 0.0)
+            .quad_to(3.0, 4.5, W, H)
+            .line_to(0.0, H)
+            .close()
+    } else {
+        Path::new()
+            .move_to(W, 0.0)
+            .quad_to(5.0, 4.5, 0.0, H)
+            .line_to(W, H)
+            .close()
+    };
+    path.fill(fill).size(W, H).anyview()
+}
+
 pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let reply_excerpt = row.reply_excerpt.clone();
     let has_reply = !reply_excerpt.is_empty();
@@ -1592,35 +1674,21 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         .leading()
         .padding_with([10.0, 10.0 + meta_band + chips_band, 10.0, 10.0]);
 
-    // Reaction strip: one pill per emoji — tap toggles it (Desktop parity);
-    // the chosen pill gets the accent fill.
+    // Reaction strip: one pill component everywhere (r25-1). The
+    // unchosen tint derives from the surface under the chip exactly as
+    // Desktop derives it from the bubble colour; the chosen pill is
+    // accented in every placement (the accent-bubble variant uses the
+    // container tint so it stays readable on the accent fill).
+    let chip_surface = if row.outgoing && !(emoji_n > 0 && !row.highlighted) {
+        ChipSurface::Outgoing
+    } else if emoji_n > 0 && !row.highlighted {
+        ChipSurface::Page
+    } else {
+        ChipSurface::Incoming
+    };
     let chip_views: Vec<AnyView> = chips
         .iter()
-        .map(|c| {
-            let emoji = c.emoji.clone();
-            let e2 = emoji.to_string();
-            let label = format!("{} {}", emoji, c.count);
-            let r = row.clone();
-            let pill = text(label)
-                .caption()
-                .padding_with((1.0, 6.0))
-                .on_tap(move |store: Store| store.toggle_reaction(&r, &e2))
-                .a11y_role(AccessibilityRole::Button)
-                .a11y_label(format!(
-                    "React with {}, {} {}",
-                    emoji,
-                    c.count,
-                    if c.count == 1 { "reaction" } else { "reactions" }
-                ));
-            if c.chosen {
-                pill.foreground(AccentForeground)
-                    .background(RoundedRectangle::new(0.5).fill(Accent))
-                    .anyview()
-            } else {
-                pill.background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
-                    .anyview()
-            }
-        })
+        .map(|c| reaction_chip(&row, c, chip_surface))
         .collect();
     // Bottom-anchored with the meta band reserved beneath: the chips occupy
     // the zone between the content and the meta line.
@@ -1673,6 +1741,14 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         meta_overlay,
     ))
     .alignment(BottomTrailing);
+    // The tail reuses the bubble's fill so the hook reads as part of it.
+    let bubble_fill = if row.highlighted {
+        Color::from(AccentContainer)
+    } else if row.outgoing {
+        Color::from(Accent)
+    } else {
+        Color::from(SurfaceVariant)
+    };
     let bubble: AnyView = if emoji_n > 0 && !row.highlighted {
         // No fill: the emoji itself is the content (Telegram Desktop).
         Frame::new(bubble_inner)
@@ -1735,8 +1811,27 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         "Delete".action(move |store: Store| store.delete_message(r5)),
     ));
 
+    // The tail hooks a run's last bubble toward the sender's avatar /
+    // the screen edge (Desktop); bubble-less emoji-only rows get none.
+    // The 8 pt gutter is reserved on every row so bubble edges stay
+    // aligned whether or not a tail is drawn (r25-3).
+    let tail_on = row.group_last && !(emoji_n > 0 && !row.highlighted);
+    let tail_slot = move |show: bool, outgoing: bool| -> AnyView {
+        let shape = if show {
+            bubble_tail(outgoing, bubble_fill)
+        } else {
+            // An empty box keeps the gutter width constant on tail-less
+            // rows — the tail must never shift the bubble's edge.
+            Color::from(Surface).size(8.0, 10.0).anyview()
+        };
+        vstack((spacer(), shape)).spacing(0.0).anyview()
+    };
     let placed = if row.outgoing {
-        hstack((spacer(), bubble)).anyview()
+        hstack((
+            spacer(),
+            hstack((bubble, tail_slot(tail_on, true))).spacing(0.0),
+        ))
+        .anyview()
     } else if row.avatar_col {
         // Groups/channels reserve a leading avatar column on incoming rows
         // so a run's bubbles stay aligned; the avatar itself shows only on
@@ -1746,11 +1841,19 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         } else {
             Color::from(Surface).size(32.0, 32.0).anyview()
         };
-        hstack((vstack((spacer(), slot)).spacing(0.0), bubble, spacer()))
-            .spacing(4.0)
-            .anyview()
+        hstack((
+            vstack((spacer(), slot)).spacing(0.0),
+            hstack((tail_slot(tail_on, false), bubble)).spacing(0.0),
+            spacer(),
+        ))
+        .spacing(4.0)
+        .anyview()
     } else {
-        hstack((bubble, spacer())).anyview()
+        hstack((
+            hstack((tail_slot(tail_on, false), bubble)).spacing(0.0),
+            spacer(),
+        ))
+        .anyview()
     };
     let placed = if row.unread_divider {
         vstack((

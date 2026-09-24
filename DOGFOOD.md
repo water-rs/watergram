@@ -1508,3 +1508,71 @@ mid-glyph, `r24/chat1400.png` x≈243), cli#181 (artifact staleness —
 this round's launched artifact:
 `$MB/dist/linux/debug/watergram-hydrolysis`, mtime 2026-09-24 21:46 UTC,
 171,111,976 bytes), hydrolysis#130, waterui#1214, nami#23.
+
+## r25-1: reaction chips rendered bare inside bubbles — APP BUG (fixed)
+
+**Report:** on `r24/chat1400.png` chips under the emoji-only rows drew as
+pills but the SAME chips inside text bubbles drew as bare "👍 1" text.
+
+**Root cause:** the unchosen pill filled `SurfaceVariant` — identical to
+the incoming bubble's fill (`views.rs` bubble background), so the pill
+was present but invisible inside a bubble. One chip component already
+served both placements; the tint just didn't account for the surface.
+
+**Fix (`reaction_chip` + `ChipSurface` in `src/views.rs`):** one
+component for all three surfaces — `Page` (emoji-only rows) keeps
+`SurfaceVariant`; `Incoming` uses `Surface` (page tint shows through the
+variant bubble — Desktop derives the pill tint from the bubble colour);
+`Outgoing` uses translucent on-accent `WithOpacity(AccentForeground,
+0.18)` + `AccentForeground` text. Chosen is accented in every placement
+(`Accent`/`AccentForeground`; on the accent bubble `AccentContainer` +
+`Accent` text, since accent-on-accent would vanish). Demo seeds a
+chosen chip in each placement (m14 outgoing, m21 incoming, m24 page).
+
+**Verified:** `r25/chat1400.png` — "👍 1" reads as an accent pill inside
+m21's bubble, variant pills on m22/m23, chosen accent "👍 1" + variant
+pills under 🚀🚀, chosen `AccentContainer` "👍 3" on m14's accent
+bubble (`r25/jump_far.png`). Same at 800 and 600.
+
+## r25-2: reply-jump verified with an out-of-view target + fetch path
+
+**Requirement:** r24's verification only showed a same-screen
+highlight. Now: m23's quote targets m10, ~9 rows above the viewport.
+Before: `r25/chat1400.png` (m21–m25 visible, m10 offscreen). Tap → the
+list scrolled m10 to the top AND flashed it — `r25/jump_far.png` shows
+m10 highlighted at the top under the "Yesterday" pill. The
+`ScrollController<usize>` index path works end to end on the real
+renderer.
+
+**Unloaded target:** m25's quote targets id 9, not in the loaded
+window. Tap → the async path ran `getChatHistory(chat, 9, -20, 40)` on
+client 0, which fails (demo has no TDLib client) → no-op: list
+unchanged (`r25/jump_fetch.png` identical to the pre-tap frame). On a
+live client the same code merges the 40-message window, sorts,
+highlights, and scrolls — the merge/sort/scroll tail is identical to
+the verified fast path, only the fetch result differs. Honest result:
+the fetch path is wired correctly but unreachable in demo; real-login
+e2e remains blocked on api_id/api_hash + test account.
+
+## r25-3: bubble tails on a run's last row (pick)
+
+Desktop hooks the bubble's bottom outer corner toward the sender's
+avatar (incoming) or the screen edge (outgoing) — the most distinctive
+missing chat shape. `bubble_tail` draws it as a `Path` (inner edge
+flush with the bubble, `quad_to` concave outer edge tapering to the
+tip) in the bubble's own fill, only when `group_last` and a bubble
+exists. The 8 pt gutter is reserved on EVERY row (invisible box when
+tail-less) — any element in an hstack contributes width, and a
+permanent reservation keeps bubble edges aligned across a group, the
+same trade the avatar column already makes.
+
+**Verified:** `r25/jump_far.png` — incoming tails bottom-left toward
+the avatar on m10/m12/m14, outgoing tails bottom-right on m11/m13/m15;
+`r25/chat1400.png` — tail on m23; none on the emoji-only rows. Same at
+800 and 600.
+
+**Still open — cites:** hydrolysis#182 ("Archiv" chip still clips
+mid-glyph, `r25/chat1400.png` x≈220), cli#181 (artifact staleness —
+this round's launched artifact:
+`$MB/dist/linux/debug/watergram-hydrolysis`, mtime 2026-09-24 22:45 UTC,
+171,138,192 bytes), hydrolysis#130, waterui#1214, nami#23.
