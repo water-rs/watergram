@@ -594,8 +594,7 @@ mod tests {
         app.query().label("Two-step verification").assert_exists();
         app.query().label("Active sessions").assert_exists();
         app.query().label("Telegram Desktop 5.0 · PC").assert_exists();
-        // The trailing metadata is one merged line ("… · current").
-        app.query().label_contains("· current").assert_exists();
+        app.query().label("current").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]

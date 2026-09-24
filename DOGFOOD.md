@@ -1049,8 +1049,76 @@ Verified trigger matrix (same page, same 308 proposal):
 
 Expected: an item must never answer a width above the cross-axis
 proposal it was measured under; `LazyStackNode` should also clamp
-`sample.width` to `cross` when reporting its cross extent. App fix: the
-session row was reshaped to `hstack((text(title).bold(), spacer(),
-text(subtitle + optional " · current" accent)))` — three single-line
-children — which measures correctly; the two-line variant stays here as
-the repro.
+`sample.width` to `cross` when reporting its cross extent. r16's app-side
+workaround (a flat single-line row) was reverted in r17 — the honest
+two-line row is restored and stays in the app as the repro; the defect
+is being filed upstream.
+
+## r17-2: the 72×40 "menu pill" in r16 screenshots was a stale-binary artifact — the generated managed-backend crate carries its own `[patch]` table (water-rs/cli#178)
+
+r16chat1400/r16info800 showed the top-left navigation item as a filled
+pill ≈72×40 while offscreen probes at the same rev measured the sidebar
+`Menu` at `(4,8,48,48)` with a centred 40 dp circle — the hydrolysis#149
+contract. The pill was the **pre-#149 Menu trigger drawn by an old
+binary**: `water run`'s generated crate at
+`~/.water/build_cache/.../managed_backends/hydrolysis/Cargo.toml` has its
+own `[patch.crates-io]` table that `water run` does not refresh from the
+app's `[patch]` (cli#178) — it still pinned the r14 revs (hydrolysis
+e676ca88 + waterui a3e2818c, both pre-#149) while the app's `[patch]`
+had moved on. So every real-renderer capture since ran hydrolysis older
+than the app's pins.
+
+App side is correct: `Menu::new(label("Menu").icon(icon).icon_only())`
+→ `icon_only` → `icon_button_metrics` = `ButtonMetrics(0,0,48,48)`,
+`draw_chrome` 40 dp primary circle (hydrolysis-m3 `src/icon_button.rs:88-160`,
+`src/lib.rs:480-510`; trigger path hydrolysis `src/widgets/button.rs:276-330,
+835-870,955`). After repinning the generated crate by hand, the real
+renderer draws the 48×48 circle. Lesson: the managed-backend patch table
+must be kept in sync manually until cli#178 lands — kept out of the repo.
+
+## r17-3: chips row clipping "Archive" → "Archiv" is the scroll viewport, not a truncation defect
+
+The sidebar chat-filter row is `hstack((scroll_horizontal(chips),
+button("New folder")))` — a horizontal scroller by design (Telegram
+Desktop scrolls folder chips too). At a 340 px sidebar the probe shows
+chips All (34.4) / Work / Personal / Archive (59.7) ≈ 296 px of content
+vs a ~236 px scroll viewport → ~55 px genuine overflow. "Archive"'s
+button bounds `(186.9,133.5,59.7,20.1)` extend past the viewport edge
+(x≈244), so the scroll clip cuts mid-glyph → "Archiv". This is correct
+scrolling behaviour: the waterui#141 ellipsis fix governs label
+truncation inside a text view, not scroll clipping — pinning it will not
+change this row. No app or framework fault. (A trailing fade affordance
+at the scroller edge would be a nicety, not a defect.)
+
+## r17-4: "5 members" flush to the info-panel edge — resolved by the 8ae78f4 / ab98d5fb repin
+
+The members-section header row has had `.padding_with((4.0, 14.0))` all
+along, yet r16info800 showed the trailing "5 members" at the panel's
+right edge — a trailing-allocation defect of the same family the
+rule-D stack allocation (#1224) / layout conformance (#1231) fixes
+address. On the new pins the label measures `(1325.5,132,60.5,14)` inside
+a panel ending at x=1400 → text ends exactly 14 px before the edge, and
+the 800 px overlay capture shows the same inset. App was never at
+fault; no DOGFOOD repro needed — resolved upstream.
+
+## r17-5: geometry that moved on waterui 8ae78f4 + hydrolysis ab98d5fb
+
+- **The composer is back** on the chat page at 1400 and 800 — the
+  NavigationSplit intrinsic-measure defect (r15-1, hydrolysis#153) no
+  longer pushes it below the viewport.
+- All icon buttons render at the 48 dp touch target with the centred
+  40 dp state-layer circle (menu ☰, chat-header search/members/
+  scheduled/info, composer 📎, mic/camera).
+- Chat-list previews now end in a real ellipsis ("…") where clipped —
+  the #141 truncation fix is in this build.
+- Info-panel member rows render avatar circle + two-line name/status —
+  the phantom indent is gone.
+- Member count trailing padding restored (r17-4).
+- Colour emoji glyphs now render (🚀 etc.); DejaVu fallback for
+  default-emoji codepoints is improved.
+- A scrollbar now draws on the message list.
+- Settings "Set avatar"/"Save"/"Log out" render filled pill buttons;
+  notification toggles render M3 switches with the check thumb.
+- Unchanged: chips row still shows "Archiv" by scroll design (r17-3);
+  "Watergram" title still sits flush after the 48 dp leading item per
+  `NAVIGATION_BAR_ITEM_SPACING` = 0 (r16-1 verdict — spec-correct).

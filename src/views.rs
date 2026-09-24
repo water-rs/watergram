@@ -21,7 +21,6 @@ use waterui::navigation::{
 };
 use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
-use waterui::text::styled::{Style, StyledStr};
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
 use waterui::shape::{Circle, RoundedRectangle, ShapeExt};
@@ -1882,6 +1881,26 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 .action(|store: Store| store.terminate_all_sessions())
                 ,
             )),
+            VStack::for_each(
+                SignalCollection::new(store.sessions.clone()),
+                move |row: SessionRow| {
+                    let is_current = row.current;
+                    hstack((
+                        vstack((
+                            text(row.title.clone()).bold(),
+                            text(row.subtitle.clone()).muted(),
+                        ))
+                        .spacing(2.0)
+                        .leading(),
+                        spacer(),
+                        when(is_current, || text("current").foreground(Accent)),
+                    ))
+                    .padding_with((4.0, 0.0))
+                    .context_menu(("Terminate".action(move |store: Store| {
+                        store.terminate_session_by_id(row.id)
+                    }),))
+                },
+            ),
             vstack((
                 text(store.tr("BlockedUsers", 0, "Blocked users"))
                     .caption()
@@ -1907,28 +1926,6 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             ))
             .spacing(4.0)
             .leading(),
-            VStack::for_each(
-                SignalCollection::new(store.sessions.clone()),
-                move |row: SessionRow| {
-                    let mut trailing = StyledStr::empty();
-                    trailing.push(
-                        row.subtitle.clone(),
-                        Style::new().foreground(MutedForeground),
-                    );
-                    if row.current {
-                        trailing.push(" · current", Style::new().foreground(Accent));
-                    }
-                    hstack((
-                        text(row.title.clone()).bold(),
-                        spacer(),
-                        text(trailing),
-                    ))
-                    .padding_with((4.0, 0.0))
-                    .context_menu(("Terminate".action(move |store: Store| {
-                        store.terminate_session_by_id(row.id)
-                    }),))
-                },
-            ),
         ))
         .spacing(10.0)
         .leading(),
