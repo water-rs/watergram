@@ -180,7 +180,7 @@ pub fn app(mut env: Environment) -> App {
 #[cfg(test)]
 mod tests {
     use chrono::Datelike;
-    use crate::state::{ChatRow, FolderRow, MessageRow, Screen, SharedMediaRow, Store};
+    use crate::state::{ChatRow, FolderRow, MessageRow, ReactionChip, Screen, SharedMediaRow, Store};
     use crate::views;
     use waterui::accessibility::AccessibilityRole;
     use waterui::layout::frame::Frame;
@@ -222,6 +222,7 @@ mod tests {
             outgoing,
             can_edit: outgoing,
             reply_excerpt: "".into(),
+            reply_to_id: 0,
             media_file: 0,
             play_file: 0,
             media_label: "".into(),
@@ -792,15 +793,91 @@ mod tests {
         assert!(first.group_first && !first.show_avatar);
         assert!(!mid.group_first && !mid.show_avatar);
         assert!(!last.group_first && last.group_last && last.show_avatar);
-        // A one-message run gets both marks.
-        let fire = find(20);
-        assert!(fire.group_first && fire.group_last && fire.show_avatar);
+        // The Alice m20-m23 run carries the avatar on its last row (m23);
+        // m24 breaks it (outgoing) so m25 is a one-message run with both marks.
+        let (run_first, run_last, solo) = (find(20), find(23), find(25));
+        assert!(run_first.group_first && !run_last.group_first && run_last.group_last && run_last.show_avatar);
+        assert!(solo.group_first && solo.group_last && solo.show_avatar);
         // Outgoing rows never get the avatar column.
         assert!(rows.iter().filter(|r| r.outgoing).all(|r| !r.avatar_col));
         // A private chat shows no avatar column at all.
         store.open_chat.set(2);
         store.set_messages(Store::demo_conversation());
         assert!(store.messages.snapshot().iter().all(|r| !r.avatar_col));
+    }
+
+    fn chips(spec: &str) -> Vec<ReactionChip> {
+        spec.split(' ')
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let split = t.find(char::is_numeric).unwrap_or(t.len());
+                ReactionChip {
+                    emoji: Str::from(t[..split].to_string()),
+                    count: t[split..].trim().parse().unwrap_or(0),
+                    chosen: false,
+                }
+            })
+            .collect()
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn reactions_band_never_overlaps_meta(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // r24-1: reaction chips and the meta row share one hstack band, so
+        // their spans are disjoint at every chip count — 1/3/6 chips on a
+        // text row and on an emoji-only row, at a narrow 600-pt viewport.
+        for spec in ["👍1", "👍1 ❤️1 🔥1", "👍4 🔥2 🎉1 👀1 🚀1 ❤️1"] {
+            for body in ["six distinct reactions", "👀"] {
+                let mut row = msg(1, body, false);
+                row.reaction_chips = chips(spec);
+                let expected = spec.split(' ').count();
+                let store = store();
+                let mut app = ui.clone().viewport(600, 400).mount_offscreen(move || {
+                    views::message_bubble(store.clone(), row.clone())
+                        .padding_with((2.0, 12.0))
+                });
+                app.semantic_mut().settle();
+                let nodes = app.resolve_elements(&waterui_testing::Selector::default());
+                let meta = nodes
+                    .iter()
+                    .find(|el| el.node().label().unwrap_or("") == "12:00")
+                    .and_then(|el| el.node().bounds())
+                    .expect("meta time node");
+                let mut chip_bounds = 0usize;
+                for el in nodes.iter() {
+                    let n = el.node();
+                    if !n.label().unwrap_or("").starts_with("React with") {
+                        continue;
+                    }
+                    if let Some(b) = n.bounds() {
+                        chip_bounds += 1;
+                        let overlaps = b.x() < meta.x() + meta.width()
+                            && meta.x() < b.x() + b.width()
+                            && b.y() < meta.y() + meta.height()
+                            && meta.y() < b.y() + b.height();
+                        assert!(
+                            !overlaps,
+                            "{body}/{spec}: chip {b:?} overlaps meta {meta:?}"
+                        );
+                    }
+                }
+                assert_eq!(chip_bounds, expected, "{body}/{spec}: chip count");
+            }
+        }
+    }
+
+    #[test]
+    fn reply_quote_jumps_to_loaded_message() {
+        // r24-2: a reply quote carries the source id; jumping to a message
+        // already in the window highlights and scrolls without a fetch.
+        let store = store();
+        store.open_chat.set(1);
+        store.set_messages(Store::demo_conversation());
+        let m11 = store.messages.snapshot()[1].clone();
+        assert_eq!(m11.reply_to_id, 10, "m11 replies to m10");
+        store.jump_to_message(10);
+        assert_eq!(store.highlight_msg.snapshot(), 10);
+        assert!(store.messages.snapshot().iter().find(|r| r.id == 10).unwrap().highlighted);
+        assert!(store.messages.snapshot().iter().filter(|r| r.highlighted).count() == 1);
     }
 
     #[test]

@@ -1508,12 +1508,34 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         ));
     }
     if has_reply {
-        parts.push(muted_parts(
-            text(reply_excerpt.clone())
-                .caption()
-                .line_limit(TWO)
-                .anyview(),
-        ));
+        // Desktop's quote block: accent bar + excerpt; tapping it jumps to
+        // the replied message (scroll + flash-highlight via jump_to_message).
+        let rid = row.reply_to_id;
+        let bar_color = if row.outgoing {
+            Color::from(AccentForeground)
+        } else {
+            Color::from(Accent)
+        };
+        parts.push(
+            hstack((
+                bar_color.width(2.0),
+                muted_parts(
+                    text(reply_excerpt.clone())
+                        .caption()
+                        .line_limit(TWO)
+                        .anyview(),
+                ),
+            ))
+            .spacing(6.0)
+            .on_tap(move |store: Store| {
+                if rid != 0 {
+                    store.jump_to_message(rid);
+                }
+            })
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_label("Jump to replied message")
+            .anyview(),
+        );
     }
     if row.group_first && !row.outgoing && !sender.is_empty() {
         parts.push(
@@ -1555,16 +1577,20 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             text(webpage.clone()).caption().line_limit(TWO).anyview(),
         ));
     }
-    // Timestamp + ticks and reactions overlay the bubble's bottom band in
-    // zstack layers: a `Spacer`-driven meta row would make the bubble greedy
-    // on the cross axis and pin it at max width. Content reserves the band
-    // via its bottom inset; the overlays sit inside it, so the bubble hugs
-    // the widest real content part.
+    // Reactions and the meta row overlay the bubble's bottom inset on two
+    // separate lines: chips sit on the zone right under the content
+    // (leading), the meta row on the band below (trailing) — the "time drops
+    // below the reactions" arrangement, so they can never overlap at any
+    // chip count (r24-1). A shared-line layout needs a Spacer in the band,
+    // and a flexible member claims the whole main-axis offer in
+    // `measure_stack`, pinning the bubble at its cap — that greedy layout is
+    // what the overlays avoid (the bubble hugs max(content, chips, meta)).
     let meta_band = 20.0;
+    let chips_band = if has_reactions { 26.0 } else { 0.0 };
     let content = vstack(parts)
         .spacing(4.0)
         .leading()
-        .padding_with([10.0, 10.0 + meta_band, 10.0, 10.0]);
+        .padding_with([10.0, 10.0 + meta_band + chips_band, 10.0, 10.0]);
 
     // Reaction strip: one pill per emoji — tap toggles it (Desktop parity);
     // the chosen pill gets the accent fill.
@@ -1596,10 +1622,12 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             }
         })
         .collect();
+    // Bottom-anchored with the meta band reserved beneath: the chips occupy
+    // the zone between the content and the meta line.
     let reactions_overlay: AnyView = if has_reactions {
         hstack(chip_views)
             .spacing(4.0)
-            .padding_with([0.0, 11.0, 10.0, 10.0])
+            .padding_with([0.0, 10.0 + meta_band, 10.0, 10.0])
             .anyview()
     } else {
         AnyView::default()
@@ -1637,11 +1665,9 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let bubble_cap = store
         .win_frame
         .map(|f| ((f.width() - 340.0) * 0.72).clamp(220.0, 480.0));
-    // The meta overlay is a finite zstack child: `ZStackLayout` reports the
-    // envelope of its layers, so the bubble hugs max(content, meta) and the
-    // shared `BottomTrailing` alignment anchors the meta row at the content
-    // run's trailing edge (an infinite-width Frame child would inflate the
-    // stack to the bubble cap instead — r23-1).
+    // Finite zstack layers: `ZStackLayout` reports the envelope of its
+    // children, so the bubble hugs max(content, chips, meta) — BottomLeading
+    // anchors the chips under the content, BottomTrailing the meta row.
     let bubble_inner = zstack((
         zstack((content, reactions_overlay)).alignment(BottomLeading),
         meta_overlay,

@@ -79,7 +79,7 @@ pollster = "1"
 # table applies, so hydrolysis's own [patch] is replicated here. Drop once a
 # release carries these.
 [patch.crates-io]
-hydrolysis = { git = "https://github.com/water-rs/hydrolysis", rev = "5fd1c37faefe4783f3f9ef57c9b727453da6adc8" }
+hydrolysis = { git = "https://github.com/water-rs/hydrolysis", rev = "9ccf2efe30730ccae9869239b5d546b89596b08c" }
 nami = { git = "https://github.com/water-rs/nami", rev = "5dc2d92e4ee9a236afdf71aaf4ef5b26a6990425" }
 nami-core = { git = "https://github.com/water-rs/nami", rev = "5dc2d92e4ee9a236afdf71aaf4ef5b26a6990425" }
 nami-derive = { git = "https://github.com/water-rs/nami", rev = "5dc2d92e4ee9a236afdf71aaf4ef5b26a6990425" }

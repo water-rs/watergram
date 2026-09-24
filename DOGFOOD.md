@@ -1453,3 +1453,58 @@ round's artifact: `$MB/dist/linux/debug/watergram-hydrolysis`, mtime
 2026-09-24 20:36 UTC, 171,101,608 bytes), hydrolysis#130
 (no-wrap-in-cap), waterui#1214 (`max_width` signal sampled at mount),
 nami#23, water-rs/cli#178 (verified fixed).
+
+## r24-1: reaction chips and the meta row collided on one line — APP BUG (fixed)
+
+**Report:** on `r23/chat1400.png` the 🔥 row drew "❤ 1" at x≈415–440 and
+"09:50" on top of it at x≈436–470 on the same baseline (same at 600).
+r23's fix anchored chips `BottomLeading` and meta `BottomTrailing` in the
+SAME ~20 pt reserved zone — disjoint anchors, shared line → collision
+whenever the chips row ran long enough to reach the meta's trailing x.
+
+**Fix:** the two overlays now reserve two SEPARATE lines inside the
+bubble's bottom inset: chips occupy the zone directly under the content
+(`BottomLeading`, padded up by `meta_band`), the meta row the band below
+(`BottomTrailing`) — Desktop's "time drops below the reactions"
+arrangement for every chip count. Overlap is impossible by construction;
+the bubble hugs `max(content, chips, meta)` exactly as before.
+
+**Why not a shared hstack `(chips, Spacer, meta)` band — measurement
+evidence:** a `Spacer` (or `StretchAxis::MainAxis` member) inside
+`measure_stack` is handed the WHOLE main-axis offer, not the leftover
+(`waterui components/foundation/layout/src/stack/hstack.rs` +
+`stack/distribute.rs`, confirmed empirically): with the shared band the
+bubble measured at its ~480 pt `max_width` cap on every row — all
+bubbles stretched to uniform width and the meta detached again. The
+greedy member is consistent with what it reports (it answers the offer),
+so this is recorded as framework behaviour to design around, not an
+inconsistency bug; a `space_between`/flow layout primitive does not
+exist in waterui.
+
+**Verified:** `reactions_band_never_overlaps_meta` mounts the bubble at
+600 pt for 1/3/6 chips × text/emoji-only bodies and asserts every chip's
+bounds are disjoint from the meta rect and equal to the laid-out chip
+bounds. Captures `r24/chat1400.png`, `r24/chat800.png`,
+`r24/chat600.png` — chips line under the content, "09:5x" on its own
+line below, at every width. At 600 the six-chip row compresses (count
+wraps under the glyph) rather than clipping — accepted.
+
+## r24-2: tap a reply quote to jump to the original (pick)
+
+Desktop scrolls to and flashes the original message when a reply quote
+is tapped. `MessageRow` gained `reply_to_id` (from
+`MessageReplyToMessage.message_id`); the quote block is now an accent
+bar + excerpt with `on_tap` → `Store::jump_to_message`, which takes a
+new local fast path — highlight + `scroll_to` without a fetch when the
+target is already in `messages` (the async `getChatHistory` path stays
+for unloaded targets). Demo: m22 quotes m21 inside the visible window.
+
+**Verified:** `reply_quote_jumps_to_loaded_message`; live on the real
+renderer — tapping m22's quote flashed m21's bubble
+(`r24/replyjump.png`, highlight vs `r24/chat1400.png`).
+
+**Still open — cites:** hydrolysis#182 ("Archiv" chip still clips
+mid-glyph, `r24/chat1400.png` x≈243), cli#181 (artifact staleness —
+this round's launched artifact:
+`$MB/dist/linux/debug/watergram-hydrolysis`, mtime 2026-09-24 21:46 UTC,
+171,111,976 bytes), hydrolysis#130, waterui#1214, nami#23.

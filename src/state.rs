@@ -166,6 +166,8 @@ pub struct MessageRow {
     pub read_out: bool,
     pub can_edit: bool,
     pub reply_excerpt: Str,
+    /// Id of the message this row replies to (0 = none); the quote taps jump to it.
+    pub reply_to_id: i64,
     pub media_file: i32,
     /// Playable media file id (video/voice/audio/animation payload, as
     /// opposed to `media_file` which may hold a thumbnail).
@@ -1068,6 +1070,7 @@ impl Store {
             read_out,
             can_edit: outgoing,
             reply_excerpt: Str::from(reply.to_string()),
+            reply_to_id: 0,
             media_file: 0,
             play_file: 0,
             media_label: Str::from(media.to_string()),
@@ -1101,6 +1104,7 @@ impl Store {
         // real rows carry plain text alongside the styled body
         msgs[3].text = Str::from("check https://waterui.dev for the docs");
         msgs[3].edited = true;
+        msgs[1].reply_to_id = 10;
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
         msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
         msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
@@ -1125,6 +1129,17 @@ impl Store {
         // Emoji-only messages render large on no bubble (Telegram Desktop).
         msgs.push(m(19, "", "🎉🎉🎉", "09:49", true, true, "", "", "", ""));
         msgs.push(m(20, "Alice", "🔥", "09:50", false, false, "", "❤️1", "", ""));
+        // 1/3/6-chip reaction bands on text and emoji-only rows — the r24
+        // no-overlap layout matrix in demo form.
+        msgs.push(m(21, "Alice", "single reaction on text", "09:51", false, false, "", "👍1", "", ""));
+        msgs.push(m(22, "Alice", "three reactions on this one", "09:52", false, false, "", "👍1 ❤️1 🔥1", "", ""));
+        msgs.push(m(23, "Alice", "six distinct reactions", "09:53", false, false, "", "👍4 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
+        msgs.push(m(24, "", "🚀🚀", "09:54", true, true, "", "👍1 ❤️1 🔥1", "", ""));
+        msgs.push(m(25, "Alice", "👀", "09:55", false, false, "", "👍2 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
+        // A reply quote inside the visible window for live tap-to-jump
+        // verification: m22 quotes m21.
+        msgs[12].reply_excerpt = Str::from("single reaction on text");
+        msgs[12].reply_to_id = 21;
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
             r.day = today;
@@ -1538,21 +1553,23 @@ impl Store {
         if play_file != 0 {
             self.want_file_id(play_file);
         }
-        let reply_excerpt = match &m.reply_to {
-            Some(enums::MessageReplyTo::Message(r)) => r
-                .content
-                .as_ref()
-                .map(|c| {
-                    let (t, _, l, _) = Self::content_preview(c);
-                    if t.is_empty() {
-                        l
-                    } else {
-                        t
-                    }
-                })
-                .unwrap_or_else(|| "Reply".into()),
-            Some(enums::MessageReplyTo::Story(_)) => "Story".into(),
-            None => Str::from(""),
+        let (reply_excerpt, reply_to_id) = match &m.reply_to {
+            Some(enums::MessageReplyTo::Message(r)) => (
+                r.content
+                    .as_ref()
+                    .map(|c| {
+                        let (t, _, l, _) = Self::content_preview(c);
+                        if t.is_empty() {
+                            l
+                        } else {
+                            t
+                        }
+                    })
+                    .unwrap_or_else(|| "Reply".into()),
+                r.message_id,
+            ),
+            Some(enums::MessageReplyTo::Story(_)) => (Str::from("Story"), 0),
+            None => (Str::from(""), 0),
         };
         let (pending, failed) = match &m.sending_state {
             Some(enums::MessageSendingState::Pending(_)) => (true, false),
@@ -1647,6 +1664,7 @@ impl Store {
             forwarded_from,
             can_edit: m.is_outgoing,
             reply_excerpt,
+            reply_to_id,
             media_file,
             play_file,
             media_label,
@@ -2880,6 +2898,18 @@ impl Store {
     pub fn jump_to_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
         if chat_id == 0 {
+            return;
+        }
+        // Fast path — the target is already in the loaded window (the common
+        // case for a reply quote): highlight + scroll without a fetch.
+        let mut list = self.messages.snapshot();
+        if let Some(pos) = list.iter().position(|r| r.id == message_id) {
+            for (i, r) in list.iter_mut().enumerate() {
+                r.highlighted = Some(i) == Some(pos);
+            }
+            self.set_messages(list);
+            self.highlight_msg.set(message_id);
+            self.scroll.scroll_to(pos);
             return;
         }
         let store = self.clone();

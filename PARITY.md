@@ -43,7 +43,7 @@
 | 编辑消息 | ✅ | `editMessageText`；`message.edit_date` → 气泡内 "edited" 标记 | — |
 | 删除消息 | ✅ | `deleteMessages` | — |
 | 转发 | ✅ | `forwardMessages` | — |
-| 回复 / 引用 | ✅ | `inputMessageReplyTo` | `reply_banner_shows` |
+| 回复 / 引用（含点击引用跳转原消息） | ✅ | `inputMessageReplyTo` + `jump_to_message`（本地命中直接高亮+滚动，未加载走 `getMessage`+历史） | `reply_banner_shows` / `reply_quote_jumps_to_loaded_message` |
 | 复制文本 | ✅ | `getMessage` + 剪贴板 | — |
 | 已读标记（拉取后回执） | ✅ | `viewMessages` | — |
 | 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
@@ -133,5 +133,5 @@
 ## 覆盖情况汇总
 
 - 已实现 ✅：85 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
-- 现有测试：18 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
+- 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。
