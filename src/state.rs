@@ -143,6 +143,15 @@ impl Ord for ChatRow {
     }
 }
 
+/// One emoji on a message's reaction strip — emoji, total count, and
+/// whether the current user chose it (Desktop highlights the chosen pill).
+#[derive(Clone)]
+pub struct ReactionChip {
+    pub emoji: Str,
+    pub count: i32,
+    pub chosen: bool,
+}
+
 #[derive(Clone, Identifiable)]
 pub struct MessageRow {
     #[id]
@@ -160,7 +169,7 @@ pub struct MessageRow {
     /// opposed to `media_file` which may hold a thumbnail).
     pub play_file: i32,
     pub media_label: Str,
-    pub reactions: Str,
+    pub reaction_chips: Vec<ReactionChip>,
     /// Emoji the current user has chosen on this message, if any.
     pub my_reaction: Str,
     /// Rich-text body; empty when the message has no formatting entities.
@@ -1046,7 +1055,7 @@ impl Store {
             media_file: 0,
             play_file: 0,
             media_label: Str::from(media.to_string()),
-            reactions: Str::from(reactions.to_string()),
+            reaction_chips: Self::demo_chips(reactions),
             failed: false,
             pending: false,
             highlighted: false,
@@ -1071,7 +1080,7 @@ impl Store {
         // real rows carry plain text alongside the styled body
         msgs[3].text = Str::from("check https://waterui.dev for the docs");
         msgs[3].edited = true;
-        msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "", "", ""));
+        msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
         msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
         msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
         msgs[2].unread_divider = true;
@@ -1413,17 +1422,30 @@ impl Store {
         }
     }
 
-    /// (display string, emoji chosen by the current user)
-    fn reactions_info(m: &types::Message) -> (Str, Str) {
-        let Some(reactions) = m
-            .interaction_info
-            .as_ref()
-            .and_then(|i| i.reactions.as_ref())
-        else {
-            return (Str::from(""), Str::from(""));
-        };
+    /// Demo seed helper: parse "👍2 ❤️1" into structured chips
+    /// (each token is `<emoji><count>`).
+    fn demo_chips(display: &str) -> Vec<ReactionChip> {
+        display
+            .split(' ')
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let split = t.find(char::is_numeric).unwrap_or(t.len());
+                ReactionChip {
+                    emoji: Str::from(t[..split].to_string()),
+                    count: t[split..].trim().parse().unwrap_or(0),
+                    chosen: false,
+                }
+            })
+            .collect()
+    }
+
+    /// Build reaction chips + the chosen-emoji string from TDLib's
+    /// `messageInteractionInfo.reactions`.
+    fn chips_from_td(
+        reactions: &types::MessageReactions,
+    ) -> (Vec<ReactionChip>, Str) {
         let mut mine = String::new();
-        let display = reactions
+        let chips = reactions
             .reactions
             .iter()
             .map(|mr| {
@@ -1434,11 +1456,25 @@ impl Store {
                 if mr.is_chosen {
                     mine = emoji.clone();
                 }
-                format!("{emoji} {}", mr.total_count)
+                ReactionChip {
+                    emoji: Str::from(emoji),
+                    count: mr.total_count,
+                    chosen: mr.is_chosen,
+                }
             })
-            .collect::<Vec<_>>()
-            .join("  ");
-        (display.into(), mine.into())
+            .collect();
+        (chips, mine.into())
+    }
+
+    fn reactions_info(m: &types::Message) -> (Vec<ReactionChip>, Str) {
+        match m
+            .interaction_info
+            .as_ref()
+            .and_then(|i| i.reactions.as_ref())
+        {
+            Some(reactions) => Self::chips_from_td(reactions),
+            None => (Vec::new(), Str::from("")),
+        }
     }
 
     /// Build a `MessageRow` from a TDLib message. Runs on the UI thread, so it
@@ -1562,7 +1598,7 @@ impl Store {
             media_file,
             play_file,
             media_label,
-            reactions,
+            reaction_chips: reactions,
             my_reaction,
             failed,
             pending,
@@ -1834,33 +1870,15 @@ impl Store {
             }
             enums::Update::MessageInteractionInfo(u) => {
                 if u.chat_id == self.open_chat.get() {
-                    let (display, mine) = u
+                    let (chips, mine) = u
                         .interaction_info
                         .as_ref()
                         .and_then(|i| i.reactions.as_ref())
-                        .map(|reactions| {
-                            let mut mine = String::new();
-                            let display = reactions
-                                .reactions
-                                .iter()
-                                .map(|mr| {
-                                    let emoji = match &mr.r#type {
-                                        enums::ReactionType::Emoji(e) => e.emoji.clone(),
-                                        _ => "★".to_string(),
-                                    };
-                                    if mr.is_chosen {
-                                        mine = emoji.clone();
-                                    }
-                                    format!("{emoji} {}", mr.total_count)
-                                })
-                                .collect::<Vec<_>>()
-                                .join("  ");
-                            (display, mine)
-                        })
+                        .map(Self::chips_from_td)
                         .unwrap_or_default();
                     self.update_message_row(u.message_id, |r| {
-                        r.reactions = display.clone().into();
-                        r.my_reaction = mine.clone().into();
+                        r.reaction_chips = chips.clone();
+                        r.my_reaction = mine.clone();
                     });
                 }
             }
@@ -2648,7 +2666,38 @@ impl Store {
     /// already chosen, otherwise adds it.
     pub fn toggle_reaction(&self, row: &MessageRow, emoji: &str) {
         let chat_id = self.open_chat.get();
-        if chat_id == 0 {
+        if chat_id == 0 || self.client_id.get() == 0 {
+            // Demo mode: apply the toggle locally so the strip updates —
+            // chosen chips highlight and count, unchosen at 0 drop out.
+            let emoji_s = emoji.to_string();
+            self.update_message_row(row.id, move |r| {
+                if let Some(pos) = r
+                    .reaction_chips
+                    .iter()
+                    .position(|c| c.emoji.as_str() == emoji_s)
+                {
+                    let chip = &mut r.reaction_chips[pos];
+                    if chip.chosen {
+                        chip.chosen = false;
+                        chip.count -= 1;
+                        r.my_reaction = Str::from("");
+                    } else {
+                        chip.chosen = true;
+                        chip.count += 1;
+                        r.my_reaction = Str::from(emoji_s.clone());
+                    }
+                    if r.reaction_chips[pos].count <= 0 {
+                        r.reaction_chips.remove(pos);
+                    }
+                } else {
+                    r.reaction_chips.push(ReactionChip {
+                        emoji: Str::from(emoji_s.clone()),
+                        count: 1,
+                        chosen: true,
+                    });
+                    r.my_reaction = Str::from(emoji_s.clone());
+                }
+            });
             return;
         }
         let (client, mid) = (self.client_id.get(), row.id);

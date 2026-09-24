@@ -1431,8 +1431,8 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let fwd = row.forwarded_from.clone();
     let has_fwd = !fwd.is_empty();
     let has_text = !body_text.is_empty();
-    let reactions = row.reactions.clone();
-    let has_reactions = !reactions.is_empty();
+    let chips = row.reaction_chips.clone();
+    let has_reactions = !chips.is_empty();
     let time = row.time.clone();
     let media = media_slot(&store, &row);
     let sender = row.sender.clone();
@@ -1512,9 +1512,39 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         .leading()
         .padding_with([10.0, 10.0 + meta_band, 10.0, 10.0]);
 
+    // Reaction strip: one pill per emoji — tap toggles it (Desktop parity);
+    // the chosen pill gets the accent fill.
+    let chip_views: Vec<AnyView> = chips
+        .iter()
+        .map(|c| {
+            let emoji = c.emoji.clone();
+            let e2 = emoji.to_string();
+            let label = format!("{} {}", emoji, c.count);
+            let r = row.clone();
+            let pill = text(label)
+                .caption()
+                .padding_with((1.0, 6.0))
+                .on_tap(move |store: Store| store.toggle_reaction(&r, &e2))
+                .a11y_role(AccessibilityRole::Button)
+                .a11y_label(format!(
+                    "React with {}, {} {}",
+                    emoji,
+                    c.count,
+                    if c.count == 1 { "reaction" } else { "reactions" }
+                ));
+            if c.chosen {
+                pill.foreground(AccentForeground)
+                    .background(RoundedRectangle::new(0.5).fill(Accent))
+                    .anyview()
+            } else {
+                pill.background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+                    .anyview()
+            }
+        })
+        .collect();
     let reactions_overlay: AnyView = if has_reactions {
-        text(reactions.clone())
-            .caption()
+        hstack(chip_views)
+            .spacing(4.0)
             .padding_with([0.0, 11.0, 10.0, 10.0])
             .anyview()
     } else {
@@ -1781,6 +1811,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
     store.start_notification_watchers();
     let me = store.me.clone();
     let dark = store.dark.clone();
+    let note = store.profile_note.clone();
 
     let content = scroll(vstack((
         text("Account").caption().muted(),
@@ -1813,9 +1844,11 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             field("Bio", &store.edit_bio).prompt("a few words about you"),
             field("Username", &store.edit_username).prompt("username (no @)"),
             hstack((
-                text!("{profile_note}", profile_note = store.profile_note.clone())
-                    .caption()
-                    .muted(),
+                when(note.clone().map(|s| !s.as_str().is_empty()), move || {
+                    text!("{profile_note}", profile_note = note.clone())
+                        .caption()
+                        .muted()
+                }),
                 spacer(),
                 button("Save").action(|store: Store| store.save_profile()),
             )),

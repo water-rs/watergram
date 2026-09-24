@@ -221,7 +221,7 @@ mod tests {
             media_file: 0,
             play_file: 0,
             media_label: "".into(),
-            reactions: "".into(),
+            reaction_chips: Vec::new(),
             failed: false,
             pending: false,
             highlighted: false,
@@ -594,10 +594,43 @@ mod tests {
         let store = store();
         store.open_chat.set(7);
         let mut m = msg(1, "liked", false);
-        m.reactions = "👍 3".into();
+        m.reaction_chips = vec![crate::state::ReactionChip {
+            emoji: "👍".into(),
+            count: 3,
+            chosen: false,
+        }];
         store.messages.set(vec![m]);
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label_contains("👍 3").assert_exists();
+    }
+
+    /// Tap a reaction pill: demo path toggles the chip locally — count
+    /// +1, chosen, pill keeps rendering.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn reaction_chip_tap_toggles(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        let mut m = msg(1, "liked", false);
+        m.reaction_chips = vec![crate::state::ReactionChip {
+            emoji: "👍".into(),
+            count: 2,
+            chosen: false,
+        }];
+        store.messages.set(vec![m]);
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        app.query().label_contains("React with 👍").assert_exists();
+        app.query().label_contains("React with 👍").tap();
+        let chips = &store.messages.get()[0].reaction_chips;
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].count, 3);
+        assert!(chips[0].chosen);
+        assert_eq!(store.messages.get()[0].my_reaction.as_str(), "👍");
+        // second tap removes it — count back to 2, unchosen
+        app.query().label_contains("React with 👍").tap();
+        let chips = &store.messages.get()[0].reaction_chips;
+        assert_eq!(chips[0].count, 2);
+        assert!(!chips[0].chosen);
+        assert_eq!(store.messages.get()[0].my_reaction.as_str(), "");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -2294,9 +2327,14 @@ mod tests {
                     id = el.id().as_u64()
                 ));
             }
+            // DOGFOOD r20-3: the nav-bar subtitle slot materializes as an
+            // empty Label with no bounds on pages that bind no subtitle —
+            // skip unlaid-out nodes (framework placeholder), still flag
+            // laid-out empty labels.
             if (role == Role::LABEL || role == Role::IMAGE)
                 && label.is_empty()
                 && n.children().is_empty()
+                && bounds.is_some()
             {
                 violations.push(format!(
                     "{page}: empty {role:?} #{id} at {bounds:?}",
@@ -2585,5 +2623,8 @@ mod tests {
         .unwrap();
         assert!(closed.get(), "Escape did not reach the modal scope");
     }
+
+
+
 
 }

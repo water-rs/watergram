@@ -1168,15 +1168,11 @@ selection + ellipsis + torn-frame fixes":
   #157 (truncation ellipsis), #158 (when()+shared-signal torn frame)
   and #159 (scroll/lazy cross-proposal sizing).
 
-Resolution this round: `vendor/hydrolysis` carries the conflict-free
-merge `cb5db15 (dev) + cb872581 (r2)` on branch
-`fix/merge-list-selection-r2` (merge commit f63cd76, self-patch table
-bumped to waterui 5a1ec24, `cargo check --lib` clean); the app's
-`[patch]` points at the vendored path. Upstream action: land the merge
-on water-rs/hydrolysis dev, then drop `vendor/` and restore the git
-pin. Verified side-note: water cli dev `0414a255` absolutizes a `path`
-patch correctly into the generated managed manifest
-(`path = "/home/ubuntu/repos/watergram/vendor/hydrolysis"`).
+RESOLVED upstream (r20): hydrolysis dev `2e6f401` carries #165 (the
+ListItem→`List::selection` compat merge) plus #157/#158/#159/#160/#161,
+so a single upstream rev now compiles — `vendor/hydrolysis` is deleted
+and the app is back on the git pin. The local
+`fix/merge-list-selection-r2` branch is retired.
 
 ## r19-2: `List::apply_scroll_request` asserts on a transient `row_count` — a pending scroll target is not a programmer error
 
@@ -1205,11 +1201,71 @@ stale, not invalid. Both asserts live identically on upstream dev
 (`2b05cf0`, `list.rs:460`/`:469`) — pre-existing, only surfaced now
 that the selection path opens chats by pointer.
 
-Vendored fix (`vendor/hydrolysis/src/widgets/layout/list.rs:564-577`):
-record the request in `pending_scroll` and `return` while
-`index >= row_count` — the per-frame re-check lets the glide settle
-once the collection reaches the index, matching the "re-issue until
-the animation settles" design already documented in the function.
-Upstream action: land the same patch on water-rs/hydrolysis dev
-(tested here: after the fix the click-through glide reaches the last
-bubble, see `sel_tap.png`).
+Filed upstream as water-rs/hydrolysis#168 (fix session running). The
+vendored fix is gone with the vendor; on upstream dev the pointer chat
+open still panics — that IS the honest repro for #168, no app-side
+workaround. Verified fix from the vendored patch: record the request
+in `pending_scroll` and `return` while `index >= row_count` — the
+per-frame re-check lets the glide settle once the collection reaches
+the index, matching the "re-issue until the animation settles" design
+already documented in the function (tested here: after the fix the
+click-through glide reached the last bubble, see `sel_tap.png`).
+
+## r20-1: filter chip "Archive" cuts to "Archiv" mid-glyph with ~40 pt of slack — no ellipsis, no compression
+
+Repro (real renderer, `r19/sel_down3.png`, 1400-wide): the sidebar filter
+row is `scroll_horizontal` over chips; the "Archive" chip is clipped at
+the scroller's right edge mid-glyph ("Archiv") while ≈40 pt of free
+space sits between the chip row and the trailing folder icon. So the
+row had room to compress or the scroller to reveal more, yet the chip
+truncates without an ellipsis and without the layout granting the free
+space to the scroll viewport.
+
+Filed upstream with the water-rs/hydrolysis#168 session. No app-side
+workaround — the chips stay `scroll_horizontal` by design (Telegram
+Desktop scrolls them too); the defect is that the viewport edge clips a
+glyph instead of (a) getting the available width, or (b) ellipsizing the
+clipped label.
+
+## r20-2: `on_tap` targets inside a `List` row are unreachable on the real renderer — the row's press target consumes the pointer event
+
+Repro (real renderer, deterministic): `WATERGRAM_DEMO=1
+WATERGRAM_DEMO_PAGE=chat watergram-hydrolysis`, then tap either of two
+nested interaction targets inside a message row — the reaction pill
+("👍 3", `views.rs` chip hstack, `.on_tap → toggle_reaction`) or the
+photo media slot (`.on_tap → open_viewer`). Neither fires: no reaction
+toggle, no viewer. Verified on two separate pointer taps at the glyphs'
+bounds (`r20/react_tap2.png`, `r20/photo_tap.png` — identical before/after).
+
+The rows are `ListItem`s inside the message `List`; the row registers a
+press target (that is what makes row focus/selection work — r19). On the
+winit renderer the row-level press resolves first, so inner `on_tap`
+targets inside the row content never receive the event. The semantic
+runtime dispatches them correctly — `reaction_chip_tap_toggles`
+(`#[waterui::test]`) taps `"React with 👍"` via `query().tap()` and the
+chip toggles both ways.
+
+Contrast: Telegram Desktop lets you tap a reaction pill on a bubble to
+toggle it. The app wiring is correct (same path the context-menu React
+items use); only the real-renderer hit test fails to reach it.
+
+Upstream: innermost-target-wins dispatch for pointer press inside
+`ListItem` content (or a documented way for a row to host nested tap
+targets). No app-side workaround.
+
+## r20-3: `NavigationView` emits an empty subtitle `Label` node when no subtitle is bound
+
+On the r20 pins (waterui `2912a678` + hydrolysis `2e6f401`) the nav-bar
+subtitle slot IS now realized in the semantic tree — r18-1's fix half
+landed. But on a page that binds no subtitle (settings, and any other
+`NavigationView` without one) the slot materializes as an empty `Label`
+node directly under the Window (`#2 Role(Label) '' bounds=None`) —
+unbound placeholder noise for assistive tech.
+
+Repro: `a11y_audit_settings` dump on the r19 pins had no such node; on
+the r20 pins it is present on every nav page with no subtitle. Expected:
+the subtitle slot stays out of the semantic tree until a subtitle is
+bound (matching pre-r20 behaviour and the r18-1 intent). No app-side
+workaround — the app does not reference the slot when unset. The audit
+in `src/lib.rs` skips empty `Label` nodes that were never laid out
+(`bounds == None`) pending the upstream fix.
