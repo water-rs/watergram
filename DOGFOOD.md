@@ -1145,3 +1145,71 @@ Title is realized, subtitle is silently absent, so subtitle content is
 untestable via `#[waterui::test]` queries. Sibling of waterui#1213:
 the semantic runtime realizes only part of the navigation chrome.
 
+Filed upstream as a hydrolysis issue (the nav-bar subtitle is not realized
+in the semantic tree); the signal-level `chat_header_subtitle` test stays
+until it lands.
+
+## r19-1: hydrolysis dev never merged the List::selection r2 head — dev + r2 is a needed upstream merge
+
+waterui#1233 removed `ListItem.selected` (selection moved to
+`List::selection(&Binding<Option<Id>>)`), but hydrolysis dev head
+`cb5db15` still reads `item.selected` at
+`src/widgets/layout/list.rs:795` and `:1125` — the adaptation lives on
+the unmerged r2 head `cb872581` (feat(list): render the
+framework-owned row selection, `5df4599` + semantic held-modifier
+tracking `cb872581`), which predates dev's #157/#158/#159. So no
+single upstream rev satisfies "waterui ≥ 1ece08f0 AND hydrolysis with
+selection + ellipsis + torn-frame fixes":
+
+- `hydrolysis = rev 2b05cf0` + `waterui* = rev 5a1ec24b` fails to
+  compile: `error[E0609]: no field 'selected' on type ListItem`
+  (`hydrolysis/src/widgets/layout/list.rs:795`, `:1125`).
+- `hydrolysis = rev cb872581` compiles the selection API but drops
+  #157 (truncation ellipsis), #158 (when()+shared-signal torn frame)
+  and #159 (scroll/lazy cross-proposal sizing).
+
+Resolution this round: `vendor/hydrolysis` carries the conflict-free
+merge `cb5db15 (dev) + cb872581 (r2)` on branch
+`fix/merge-list-selection-r2` (merge commit f63cd76, self-patch table
+bumped to waterui 5a1ec24, `cargo check --lib` clean); the app's
+`[patch]` points at the vendored path. Upstream action: land the merge
+on water-rs/hydrolysis dev, then drop `vendor/` and restore the git
+pin. Verified side-note: water cli dev `0414a255` absolutizes a `path`
+patch correctly into the generated managed manifest
+(`path = "/home/ubuntu/repos/watergram/vendor/hydrolysis"`).
+
+## r19-2: `List::apply_scroll_request` asserts on a transient `row_count` — a pending scroll target is not a programmer error
+
+Repro (real renderer, deterministic): `WATERGRAM_DEMO=1
+WATERGRAM_DEMO_PAGE=list watergram-hydrolysis`, then click any chat
+row → panic:
+
+```
+thread 'main' panicked at hydrolysis/src/widgets/layout/list.rs:565:13:
+List scroll target 8 exceeds collection length 0
+```
+
+backtrace: `apply_scroll_request` ← `list_accessibility` ←
+`render_list_node` ← `RenderNode::flush` (the a11y flush applies the
+scroll request before the collection catches up).
+
+Why it fires: `row_count` is read from the list's contents signal
+(`list.rs:741-742`), and a scroll target lives in
+`ScrollController.target` until consumed. Watergram opens a chat by
+clearing `messages` and re-seeding — the message `List` materializes
+mid-flush with `row_count == 0` while a stale target (`scroll_to(8)`
+from the seed) is still pending → `assert!(index < row_count)` panics
+on a state the app cannot avoid: contents is signal-driven, so 0 is a
+*transient* length, and a target written before a shrinking update is
+stale, not invalid. Both asserts live identically on upstream dev
+(`2b05cf0`, `list.rs:460`/`:469`) — pre-existing, only surfaced now
+that the selection path opens chats by pointer.
+
+Vendored fix (`vendor/hydrolysis/src/widgets/layout/list.rs:564-577`):
+record the request in `pending_scroll` and `return` while
+`index >= row_count` — the per-frame re-check lets the glide settle
+once the collection reaches the index, matching the "re-issue until
+the animation settles" design already documented in the function.
+Upstream action: land the same patch on water-rs/hydrolysis dev
+(tested here: after the fix the click-through glide reaches the last
+bubble, see `sel_tap.png`).

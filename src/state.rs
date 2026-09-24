@@ -109,6 +109,9 @@ pub struct ChatRow {
     pub id: i64,
     pub title: Str,
     pub preview: Str,
+    /// Unsent draft text kept in `drafts` (empty = no draft); the row shows
+    /// "Draft: <text>" like Telegram Desktop instead of the last message.
+    pub draft: Str,
     pub order: i64,
     pub unread: i32,
     pub pinned: bool,
@@ -284,6 +287,14 @@ pub struct Store {
     pub server_results: Binding<Vec<ChatRow>>,
     pub search: Binding<Str>,
     pub selected: Binding<Option<i64>>,
+    /// Selection the `List` owns (waterui#1233): pointer taps and arrow-key
+    /// navigation write this binding; `on_change` routes writes through
+    /// `select_chat` so opening a chat keeps its side effects, and it is
+    /// snapped back in forwarding mode.
+    pub list_selection: Binding<Option<i64>>,
+    /// Guards the `list_selection` snap-back write inside `select_chat` so
+    /// the `on_change` watcher does not re-enter it.
+    pub syncing_selection: Cell<bool>,
     pub messages: Binding<Vec<MessageRow>>,
     pub scroll: ScrollController<usize>,
     pub composer: Binding<Str>,
@@ -792,6 +803,8 @@ impl Store {
             server_results: Binding::<Vec<ChatRow>>::default(),
             search: Binding::container(Str::from("")),
             selected: Binding::default(),
+            list_selection: Binding::default(),
+            syncing_selection: Cell::new(false),
             messages: Binding::<Vec<MessageRow>>::default(),
             scroll: ScrollController::<usize>::new(0),
             composer: Binding::container(Str::from("")),
@@ -942,6 +955,7 @@ impl Store {
                 id,
                 title: Str::from(title.to_string()),
                 preview: Str::from(preview.to_string()),
+                draft: "".into(),
                 order,
                 unread,
                 pinned,
@@ -969,12 +983,49 @@ impl Store {
             mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "channel"),
             mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, "person"),
         ]);
+        // Demo draft on a visible row (Telegram Desktop shows "Draft: …").
+        self.set_draft(3, Some("release notes proofread".into()));
         // Mirrors TDLib `chatFolders`: only user-created folders — the
         // built-in All/Archive lists are synthesized by the sidebar itself.
         self.folders.set(vec![
             FolderRow { id: 2, title: "Work".into(), active: false },
             FolderRow { id: 3, title: "Personal".into(), active: false },
         ]);
+        self.set_messages(Self::demo_conversation());
+        self.pinned_label.set_from("Alice: shipping it 🚀");
+        self.sessions.set(vec![
+            SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
+            SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
+        ]);
+        self.privacy_rows.set(vec![
+            PrivacyRow { setting: "Phone number".into(), audience: "My contacts".into(), key: enums::UserPrivacySetting::ShowPhoneNumber },
+            PrivacyRow { setting: "Last seen & online".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowStatus },
+            PrivacyRow { setting: "Profile photos".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowProfilePhoto },
+        ]);
+        self.contacts.set(vec![
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
+        ]);
+        // Chat 1 (WaterUI devs) is a group — the info panel's member list.
+        self.members.set(vec![
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
+            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into(), photo: 0 },
+            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into(), photo: 0 },
+            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into(), photo: 0 },
+        ]);
+        self.members_count.set_from("5 members");
+        self.twofa.set_from("enabled");
+        self.sticker_packs.set(vec![
+            PackRow { id: 1, title: "Hot Cherry".into() },
+        ]);
+        self.accounts.set(vec![AccountRow { id: 1, label: "Lexo · current".into() }]);
+    }
+
+    /// The seeded conversation `seed_demo` installs and `select_chat`
+    /// reinstalls for a demo store (`client_id == 0`) — there is no TDLib
+    /// history to load, so clicking chats would otherwise empty the pane.
+    pub(crate) fn demo_conversation() -> Vec<MessageRow> {
         let styled = styled_from_formatted(&types::FormattedText {
             text: "check https://waterui.dev for the docs".into(),
             entities: vec![types::TextEntity {
@@ -1046,35 +1097,7 @@ impl Store {
         if let Some(first) = msgs.first_mut() {
             first.day = today - 1;
         }
-        self.set_messages(msgs);
-        self.pinned_label.set_from("Alice: shipping it 🚀");
-        self.sessions.set(vec![
-            SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
-            SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
-        ]);
-        self.privacy_rows.set(vec![
-            PrivacyRow { setting: "Phone number".into(), audience: "My contacts".into(), key: enums::UserPrivacySetting::ShowPhoneNumber },
-            PrivacyRow { setting: "Last seen & online".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowStatus },
-            PrivacyRow { setting: "Profile photos".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowProfilePhoto },
-        ]);
-        self.contacts.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
-        ]);
-        // Chat 1 (WaterUI devs) is a group — the info panel's member list.
-        self.members.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
-            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into(), photo: 0 },
-            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into(), photo: 0 },
-            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into(), photo: 0 },
-        ]);
-        self.members_count.set_from("5 members");
-        self.twofa.set_from("enabled");
-        self.sticker_packs.set(vec![
-            PackRow { id: 1, title: "Hot Cherry".into() },
-        ]);
-        self.accounts.set(vec![AccountRow { id: 1, label: "Lexo · current".into() }]);
+        msgs
     }
 
     /// Kick off the authorization flow once the view is mounted.
@@ -1617,6 +1640,12 @@ impl Store {
             id: chat.id,
             title: chat.title.clone().into(),
             preview,
+            draft: self
+                .drafts
+                .borrow()
+                .get(&chat.id)
+                .cloned()
+                .unwrap_or_default(),
             order,
             unread: chat.unread_count,
             pinned,
@@ -1986,7 +2015,7 @@ impl Store {
                 if u.chat_id == self.open_chat.get() {
                     self.composer.set_from(text.clone());
                 }
-                self.drafts.borrow_mut().insert(u.chat_id, text.into());
+                self.set_draft(u.chat_id, Some(text.into()));
             }
             enums::Update::File(f) => {
                 self.register_file(&f.file);
@@ -2161,6 +2190,9 @@ impl Store {
         self.drafts.borrow_mut().clear();
         self.open_chat.set(0);
         self.selected.set(None);
+        self.syncing_selection.set(true);
+        self.list_selection.set(None);
+        self.syncing_selection.set(false);
         self.me.set(MeInfo::default());
         self.busy.set(false);
     }
@@ -2302,6 +2334,9 @@ impl Store {
     }
 
     pub fn select_chat(&self, chat_id: i64) {
+        if self.syncing_selection.get() {
+            return;
+        }
         // Forwarding mode: a pending forwarded message (or a selected
         // batch) routes the tap to forwardMessages instead of opening the
         // chat. `send_copy` forwards without author attribution.
@@ -2348,14 +2383,25 @@ impl Store {
                 }
             })
             .detach();
+            // The tap already highlighted the row — restore the highlight to
+            // the still-open chat (forwarding does not open a chat).
+            self.syncing_selection.set(true);
+            self.list_selection.set(self.selected.get());
+            self.syncing_selection.set(false);
             return;
         }
         if self.open_chat.get() == chat_id {
             self.selected.set(Some(chat_id));
+            self.syncing_selection.set(true);
+            self.list_selection.set(Some(chat_id));
+            self.syncing_selection.set(false);
             return;
         }
         let prev = self.open_chat.replace(chat_id);
         self.selected.set(Some(chat_id));
+        self.syncing_selection.set(true);
+        self.list_selection.set(Some(chat_id));
+        self.syncing_selection.set(false);
         self.set_messages(Vec::new());
         self.reply_to.set(None);
         self.editing.set(None);
@@ -2370,11 +2416,7 @@ impl Store {
         self.members.set(Vec::new());
         if prev != 0 {
             let cur = self.composer.get();
-            if cur.is_empty() {
-                self.drafts.borrow_mut().remove(&prev);
-            } else {
-                self.drafts.borrow_mut().insert(prev, cur.clone());
-            }
+            self.set_draft(prev, if cur.is_empty() { None } else { Some(cur.clone()) });
             self.sync_draft(prev, cur);
         }
         if let Some(d) = self.drafts.borrow().get(&chat_id) {
@@ -2391,7 +2433,10 @@ impl Store {
         self.selected_msgs.set(Vec::new());
         self.viewer.set(None);
         if self.client_id.get() == 0 {
-            // Unit-test store: no TDLib client to talk to.
+            // Unit-test/demo store: no TDLib — reinstall the seeded
+            // conversation so clicking chats in the demo isn't an empty pane.
+            self.set_messages(Self::demo_conversation());
+            self.scroll_bottom();
             return;
         }
         let client = self.client_id.get();
@@ -2725,6 +2770,22 @@ impl Store {
 
     /// Sync the composer's draft for `chat_id` to the server so it follows
     /// the account across devices (`setChatDraftMessage`; `None` clears).
+    /// Keep `drafts` and the chat-row `draft` label in sync at every site
+    /// that creates or clears a draft (send, edit, switching chats, server
+    /// `updateDraftMessage`).
+    fn set_draft(&self, chat_id: i64, draft: Option<Str>) {
+        match &draft {
+            Some(d) => {
+                self.drafts.borrow_mut().insert(chat_id, d.clone());
+            }
+            None => {
+                self.drafts.borrow_mut().remove(&chat_id);
+            }
+        }
+        let text = draft.unwrap_or_default();
+        self.update_chat_row(chat_id, |r| r.draft = text.clone());
+    }
+
     fn sync_draft(&self, chat_id: i64, cur: Str) {
         if self.client_id.get() == 0 {
             return;
@@ -3205,7 +3266,7 @@ impl Store {
         if let Some(msg_id) = self.editing.get() {
             self.editing.set(None);
             self.composer.set_from("");
-            self.drafts.borrow_mut().remove(&chat_id);
+            self.set_draft(chat_id, None);
             let client = self.client_id.get();
             spawn_local(async move {
                 let _ = functions::edit_message_text(
@@ -3237,7 +3298,7 @@ impl Store {
         });
         self.reply_to.set(None);
         self.composer.set_from("");
-        self.drafts.borrow_mut().remove(&chat_id);
+        self.set_draft(chat_id, None);
         let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::send_message(
@@ -5468,6 +5529,7 @@ impl Store {
             id: chat.id,
             title: chat.title.clone().into(),
             preview: "".into(),
+            draft: "".into(),
             order: 0,
             unread: 0,
             pinned: false,

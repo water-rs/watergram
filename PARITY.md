@@ -28,7 +28,7 @@
 | 静音 / 通知设置 | ✅ | `setChatNotificationSettings` | — |
 | 头像 + 在线状态点 | ✅ | `chat.photo`/`user.status` + `downloadFile` | `chat_list_rows` |
 | typing/… 指示 | ✅ | `sendChatAction` + `updateChatAction` | — |
-| 草稿显示 | ✅ | `updateChatDraftMessage` | — |
+| 草稿显示 | ✅ | `updateChatDraftMessage`；列表行内红色 "Draft:" 前缀（r19 起，typing 优先） | — |
 | 归档（Archive 文件夹） | ✅ | `addChatToList(Main/Archive)` + `ChatPosition` | `archive_toggle_rebuilds_list` |
 | 聊天文件夹（Chat Folders） | ✅ | `updateChatFolders` + `ChatList::Folder`/`loadChats` 侧栏 tab；`createChatFolder`/`editChatFolder`/`deleteChatFolder`（名称+联系人群组频道开关；不含逐聊包含/排除编辑） | `folder_tabs_render`、`folder_editor_opens` |
 | 已读回执标记 | ✅ | `viewMessages` + `UpdateChatReadOutbox` → ✓/✓✓ | `read_receipt_double_check` |

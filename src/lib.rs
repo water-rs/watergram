@@ -194,6 +194,7 @@ mod tests {
             id,
             title: Str::from(title.to_string()),
             preview: Str::from(preview.to_string()),
+            draft: "".into(),
             order,
             unread: 0,
             pinned: false,
@@ -305,6 +306,38 @@ mod tests {
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
         app.query().label_contains("Alice").assert_exists();
         app.query().label_contains("Bob").assert_not_exists();
+    }
+
+    /// waterui#1233: the chat list's `List::selection` binding is the single
+    /// input path — a pointer tap and ArrowDown both write it, and the
+    /// `on_change` in the sidebar routes it through `select_chat`.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn list_selection_opens_chat(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.screen.set(Screen::Main);
+        store.chats.set(vec![
+            chat(1, "Zelda", "hello", 100),
+            chat(2, "Bob", "hi there", 50),
+            chat(3, "Carol", "yo", 40),
+        ]);
+        let store2 = store.clone();
+        let mut app = ui.mount(move || views::main_screen(store2.clone()).state(&store2));
+        app.query()
+            .role(Role::LIST_ITEM)
+            .label_contains("Zelda")
+            .tap();
+        assert_eq!(store.list_selection.get(), Some(1));
+        assert_eq!(store.open_chat.get(), 1);
+        app.query()
+            .role(Role::LIST_ITEM)
+            .label_contains("Zelda")
+            .focus();
+        app.press_named_key("ArrowDown");
+        assert_eq!(store.list_selection.get(), Some(2));
+        assert_eq!(store.open_chat.get(), 2);
+        app.press_named_key("End");
+        assert_eq!(store.list_selection.get(), Some(3));
+        assert_eq!(store.open_chat.get(), 3);
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1113,6 +1146,7 @@ mod tests {
                     id: 5,
                     title: "Rust China".into(),
                     preview: "anyone tried hydrolysis on wayland? it renders".into(),
+                    draft: "".into(),
                     order: 0,
                     unread: 12,
                     pinned: false,

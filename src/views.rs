@@ -520,12 +520,17 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         {
             let filtered_else = filtered.clone();
             let rows_else = rows_store.clone();
+            let list_sel = store.list_selection.clone();
             when(show_results, move || {
                 let local_store = rows_store.clone();
                 let remote_store = res_store.clone();
                 vstack((
                     List::for_each(filtered.clone(), move |row: ChatRow| {
-                        ListItem::new(chat_row(local_store.clone(), row))
+                        let id = row.id;
+                        ListItem::new(
+                            chat_row(local_store.clone(), row)
+                                .on_tap(move |store: Store| store.select_chat(id)),
+                        )
                     }),
                     Divider,
                     text("Global search results")
@@ -533,20 +538,33 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         .muted()
                         .padding_with((4.0, 12.0)),
                     List::for_each(server_results.clone(), move |row: ChatRow| {
-                        ListItem::new(chat_row(remote_store.clone(), row))
+                        let id = row.id;
+                        ListItem::new(
+                            chat_row(remote_store.clone(), row)
+                                .on_tap(move |store: Store| store.select_chat(id)),
+                        )
                     }),
                 ))
                 .leading()
             })
             .otherwise(move || {
                 let rows_l = rows_else.clone();
+                // Framework-owned selection (waterui#1233): pointer taps and
+                // Up/Down write `list_selection`; `on_change` below routes it
+                // through `select_chat`.
                 List::for_each(filtered_else.clone(), move |row: ChatRow| {
                     ListItem::new(chat_row(rows_l.clone(), row))
                 })
+                .selection(&list_sel)
             })
         },
     ))
     .on_change(&debounced, |q: Str, store: Store| store.run_search(q))
+    .on_change(&store.list_selection, |v: Option<i64>, store: Store| {
+        if let Some(id) = v {
+            store.select_chat(id)
+        }
+    })
 }
 
 // M3 icon button: an icon-only `Label` keeps `name` as the semantic identity
@@ -608,10 +626,21 @@ pub(crate) fn avatar(store: Store, file_id: i32, title: &str, size: f32) -> impl
 pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
     let id = row.id;
     let unread = row.unread;
-    let preview: Str = if row.typing {
-        "typing…".into()
-    } else {
-        row.preview.clone()
+    // Telegram Desktop: a saved draft replaces the last-message preview with
+    // a red "Draft: <text>" line; a live typing indicator still wins.
+    let preview_line: AnyView = match (row.typing, row.draft.is_empty()) {
+        (true, _) => text("typing…").caption().line_limit(ONE).muted().anyview(),
+        (false, false) => hstack((
+            text("Draft: ").caption().foreground(Error),
+            text(row.draft.clone()).caption().line_limit(ONE).muted(),
+        ))
+        .spacing(0.0)
+        .anyview(),
+        _ => text(row.preview.clone())
+            .caption()
+            .line_limit(ONE)
+            .muted()
+            .anyview(),
     };
     let badge: AnyView = if row.pinned {
         pin()
@@ -660,7 +689,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
             ))
             .spacing(4.0),
             hstack((
-                text(preview).caption().line_limit(ONE).muted(),
+                preview_line,
                 spacer(),
                 badge,
             ))
@@ -691,7 +720,6 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         "Clear history".action(move |store: Store| store.clear_history(id)),
         "Leave chat".action(move |store: Store| store.leave(id)),
     ))
-    .on_tap(move |store: Store| store.select_chat(id))
 }
 
 // ---------------------------------------------------------------------------
