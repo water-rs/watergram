@@ -443,8 +443,8 @@ the new pins show `Attach file` `(6,644,48,48)` and `New chat`
 composer/toolbar children inside their panes. **One exception:
 `Menu::new(label(t).icon(i).icon_only(), items)` still measures
 72×40** (`(12,10,72,40)`) — the menu trigger builds its own
-`MENU_TRIGGER_STYLE` path and does not honour `icon_only`. That is a
-framework finding on top of #115.
+`MENU_TRIGGER_STYLE` path and does not honour `icon_only`. Filed as
+**water-rs/hydrolysis#149**.
 
 ### `EdgeInsets` tuple order is `(vertical, horizontal)` — ergonomics trap
 
@@ -551,6 +551,11 @@ face for emoji-presentation codepoints (fc-match `emoji:charset=1F600`
   staging step should refresh, not union-keep-oldest.
 
 ## M3 text field: label/prompt sits high in the 56 dp container (r10)
+
+→ **water-rs/hydrolysis-m3#85**. Field height itself is spec-exact: the
+filled container measures 56 dp on the nose (verified again at 1400×900
+on `e676ca8` — `Search chats` (4,68,332,56)). Not a framework sizing
+bug; the deviation is prompt/label *position*:
 
 Measured on the empty, unfocused fields `Search chats` (bounds
 (4,68,332,56)) and `Message` (bounds (498,640,340,56)) at 1000×700,
@@ -887,7 +892,7 @@ All verified with probe bounds/dumps; app-side fixes (decorative
 `ModalInteraction` escape scopes on every overlay) are in views.rs.
 
 ### Semantic walk never registers `hit_test.modal_interaction` — modal
-### Escape is untestable on `ui.mount`
+### Escape is untestable on `ui.mount` → water-rs/hydrolysis#147
 
 `ModalInteraction` reaches `hit_test.modal_interaction` only inside
 `bind_interaction_target_with_focus` (hit_test.rs:2275), which runs in the
@@ -915,7 +920,7 @@ Workaround for tests: drive modal-Escape tests on `mount_offscreen`.
 (`tests::probe_modal_escape_minimal`, `keyboard_escape_dismisses_*`.)
 
 ### `press_named_key` emits `KeyState::Pressed` only — Enter/Space can
-### never activate on rendered runtimes
+### never activate on rendered runtimes → water-rs/waterui#1222
 
 `key_press_event` (testing/driver.rs:288) is the only key constructor and
 emits `Pressed` — there is no release event. Rendered runtimes
@@ -930,14 +935,15 @@ of the keyboard contract are each testable on only one runtime today
 window the full contract presumably holds but cannot be exercised by the
 testing API. A `key_release_event`/`press_and_release` would close it.
 
-### `ui_focus()` reports text-input focus only
+### `ui_focus()` reports text-input focus only — by design
 
 `ui_focus()` is `focused_text_input_accessibility_node` — it stays `None`
-when keyboard focus sits on a button/list item. The a11y focus that covers
-every focusable node is `app.tree().focus()` (`update.focus`); keyboard
-tests must use it (fixed in `keyboard_tab_cycles_chat`).
+when keyboard focus sits on a button/list item. Confirmed *intended*: a
+dev-side test pins this contract. The a11y focus that covers every
+focusable node is `app.tree().focus()` (`update.focus`); keyboard tests
+must use it (fixed in `keyboard_tab_cycles_chat`).
 
-### Every drawn shape/fill leaks an unnamed `Image` a11y node
+### Every drawn shape/fill leaks an unnamed `Image` a11y node → water-rs/hydrolysis#148
 
 `emit_graphics_image_accessibility` (renderer/tree/nodes.rs:984) emits
 `AccessibilityNodeRole::Image` for every graphics leaf — `.background(fill)`,
@@ -948,23 +954,58 @@ fill becomes an "unnamed IMAGE" violation unless the app marks every such
 view `.a11y_hidden(true)` (done app-side). Arguably anonymous fills should
 not emit a11y nodes at all — a shape has no text content and no action.
 
-### `text().on_tap` gesture targets: no role, no focus, no modal scope
+### `text().on_tap` gesture targets: pointer-only by design; the modal
+### gap is water-rs/hydrolysis#147
 
 Gesture-only `on_tap` targets never call `bind_interaction_target` — they
-get no Button role, no keyboard focus, no focus binding, and crucially no
-`hit_test.modal_interaction` registration. Consequence measured: a `when`
-panel whose only controls are `text().on_tap` rows cannot be dismissed by
-Escape through `ModalInteraction` (the scope never registers) and cannot
-be reached by Tab. App fix: real `button().style(ButtonStyle::Plain)` for
-those rows (panel_tab_chip rewritten; verified Escape now closes the
-emoji panel on the rendered runtime). Whether plain-gesture targets should
-register as focusable/button-like is a framework question — today they are
-pointer-only.
+get no Button role, no keyboard focus, no focus binding — confirmed
+*intended* (pointer-only); `button()` is the keyboard-reachable form.
+The real defect is the modal consequence: a `ModalInteraction` scope
+registers only through a *descendant interaction target*, so a `when`
+panel whose rows are gesture-only `text().on_tap` cannot be dismissed by
+Escape (the scope never registers) — filed as hydrolysis#147. App fix:
+real `button().style(ButtonStyle::Plain)` for those rows (panel_tab_chip
+rewritten; verified Escape now closes the emoji panel on the rendered
+runtime).
 
-### No arrow-key navigation on list rows
+### No arrow-key navigation on list rows → water-rs/waterui#1223
 
 `keyboard_arrows_chat_list` probe: `ArrowDown` on the sidebar `List` does
 not move the selection (tree rows emit no Increment/Decrement/step
 semantics the arrow path can use). Telegram Desktop moves the chat
 selection with Up/Down. App-side this would need the framework to give
 list rows arrow semantics — recorded, not worked around.
+
+## r15-1: dynamically-mounted `NavigationSplitView` detail ignores the proposal — detail overflows the window
+
+`measure_navigation_split_node` (hydrolysis `src/widgets/nav/navigation.rs:910`)
+takes `_proposal: ProposalSize` — **unused** — and measures a
+materialized detail through `measure_owned_navigation_view_intrinsic`
+(intrinsic measure, no proposal bounds). Once a detail exists, any
+re-measure therefore answers with its content's intrinsic size: a lazy
+`List` reports its full content height, the split's answer exceeds the
+pane, and the composer is pushed offscreen (r14chat1400.png: no
+composer, message list runs off the bottom edge). On the real renderer
+the bug appears even though the demo sets the selection before the
+window maps — a post-map resize/re-measure is enough to hit the
+ignored-proposal path.
+
+Watergram repro at 1400×900 offscreen (`tests::probe_root_chat`):
+
+```rust
+NavigationSplitView::new(sidebar, move |id| chat_detail(store, id))
+    .sidebar_width(ColumnWidth::new(260.0, 340.0, 420.0))
+    .placeholder(...)
+// mount, settle — then: selected.set(Some(1)); open_chat.set(1);
+```
+
+Observed (selection set post-mount): chat `List` `(340,150,1060,906.9)`
+— 906.9 ≈ full content height — composer's `Attach file` at `y=1085`,
+below the 900 px window; the sidebar `List` inflates identically
+`(0,241,340,902)` vs `(0,241,340,661)` pre-mount.
+
+Expected — same mount with `selected=Some(1)` set *before* mount
+(`tests::probe_root_chat_pre`): `List` `(340,150,1060,665.9)`,
+composer `(346,844,48,48)` inside the window. The pane rect must be the
+proposal for a dynamically materialized detail exactly as for a static
+one (§7). Not worked around — the app path is the repro.

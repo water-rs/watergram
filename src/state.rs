@@ -891,7 +891,9 @@ impl Store {
             phone: "8613800000000".into(),
             username: "lexoliu".into(),
         });
-        self.connection.set_from("Online");
+        // Ready carries no label — the sidebar only shows a row while
+        // reconnecting, matching the real Update::ConnectionState mapping.
+        self.connection.set_from("");
         self.dark.set(true);
         self.screen.set(Screen::Main);
         let mk = |id: i64, title: &str, preview: &str, order: i64, unread: i32, pinned: bool, muted: bool, typing: bool, online: bool, icon: &str| {
@@ -912,17 +914,19 @@ impl Store {
                 kind_icon: Str::from(icon.to_string()),
             }
         };
+        // kind_icon mirrors the real path's values (state.rs `kind_icon`
+        // mapping): saved/person/group/channel — never an emoji.
         self.chats.set(vec![
-            mk(1, "WaterUI devs", "Lexo: preview lands on GpuSurface now", 100, 3, true, false, false, false, "👥"),
-            mk(2, "Alice", "typing…", 90, 0, false, false, true, true, ""),
-            mk(3, "Saved Messages", "git bundle sha256 a6d3c8…", 80, 0, false, false, false, false, "🔖"),
-            mk(4, "Telegram News", "Stories are now available for…", 70, 0, false, true, false, false, "📢"),
-            mk(5, "Rust China", "anyone tried hydrolysis on wayland?", 60, 12, false, false, false, false, "👥"),
-            mk(6, "Bob", "see you at the rust meetup", 50, 0, false, false, false, false, ""),
-            mk(7, "dogfood crew", "heap corruption is upstream", 40, 0, false, false, false, false, "👥"),
-            mk(8, "Mom", "call me when free", 30, 1, false, false, false, false, ""),
-            mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "📢"),
-            mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, ""),
+            mk(1, "WaterUI devs", "Lexo: preview lands on GpuSurface now", 100, 3, true, false, false, false, "group"),
+            mk(2, "Alice", "typing…", 90, 0, false, false, true, true, "person"),
+            mk(3, "Saved Messages", "git bundle sha256 a6d3c8…", 80, 0, false, false, false, false, "saved"),
+            mk(4, "Telegram News", "Stories are now available for…", 70, 0, false, true, false, false, "channel"),
+            mk(5, "Rust China", "anyone tried hydrolysis on wayland?", 60, 12, false, false, false, false, "group"),
+            mk(6, "Bob", "see you at the rust meetup", 50, 0, false, false, false, false, "person"),
+            mk(7, "dogfood crew", "heap corruption is upstream", 40, 0, false, false, false, false, "group"),
+            mk(8, "Mom", "call me when free", 30, 1, false, false, false, false, "person"),
+            mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "channel"),
+            mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, "person"),
         ]);
         // Mirrors TDLib `chatFolders`: only user-created folders — the
         // built-in All/Archive lists are synthesized by the sidebar itself.
@@ -1003,6 +1007,15 @@ impl Store {
             MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into() },
             MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into() },
         ]);
+        // Chat 1 (WaterUI devs) is a group — the info panel's member list.
+        self.members.set(vec![
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into() },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into() },
+            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into() },
+            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into() },
+            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into() },
+        ]);
+        self.members_count.set_from("5 members");
         self.twofa.set_from("enabled");
         self.sticker_packs.set(vec![
             PackRow { id: 1, title: "Hot Cherry".into() },
@@ -2317,6 +2330,16 @@ impl Store {
         self.info_open.set(open);
         if open {
             self.load_shared_media();
+            let kind = self
+                .chats
+                .get()
+                .iter()
+                .find(|r| r.id == self.open_chat.get())
+                .map(|r| r.kind_icon.to_string())
+                .unwrap_or_default();
+            if matches!(kind.as_str(), "group" | "channel") {
+                self.load_members();
+            }
         }
     }
 

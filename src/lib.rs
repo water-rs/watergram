@@ -530,7 +530,8 @@ mod tests {
         let store = store();
         store.chats.set(vec![chat(1, "Alice", "hello", 100)]);
         let mode = store.archive_mode.clone();
-        let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        // The menu lives in the sidebar's nav toolbar now (Desktop parity).
+        let mut app = ui.mount(move || views::sidebar_stack(store.clone()).state(&store));
         app.query().label("Menu").tap();
         app.query().label("Archive").tap();
         assert!(mode.get());
@@ -1416,6 +1417,70 @@ mod tests {
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_root_dock.txt", &mut app);
         let _ = app.snapshot().save_png("/tmp/probe_root_dock.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_root_chat(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // The r14chat1400 page: views::root at 1400x900, `selected` set
+        // after mount as the demo task does, info closed.
+        let mut store = store();
+        store.seed_demo();
+        store.win_frame = Binding::container(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        let inner = store.clone();
+        let state = store.clone();
+        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
+            views::root(inner.clone()).state(&state)
+        });
+        app.semantic_mut().settle();
+        store.selected.set(Some(1));
+        store.open_chat.set(1);
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_root_chat.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_root_chat.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_root_chat_pre(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // Same as probe_root_chat but `selected` set BEFORE mount.
+        let mut store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.open_chat.set(1);
+        store.win_frame = Binding::container(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        let inner = store.clone();
+        let state = store.clone();
+        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
+            views::root(inner.clone()).state(&state)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_root_chat_pre.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_root_chat_pre.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_root_placeholder(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // The r14list1400 page: same mount, no selection — the detail
+        // placeholder should centre vertically.
+        let mut store = store();
+        store.seed_demo();
+        store.win_frame = Binding::container(waterui::prelude::Rect::new(
+            waterui::prelude::Point::new(0.0, 0.0),
+            waterui::prelude::Size::new(1400.0, 900.0),
+        ));
+        let inner = store.clone();
+        let state = store.clone();
+        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
+            views::root(inner.clone()).state(&state)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_root_placeholder.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_root_placeholder.png");
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]

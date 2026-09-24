@@ -17,7 +17,7 @@ use waterui::video::video_player;
 use waterui::accessibility::AccessibilityRole;
 use waterui::navigation::{
     ColumnWidth, NavigationSplitView, NavigationToolbar, NavigationToolbarItem,
-    NavigationToolbarPlacement, NavigationView, Navigator,
+    NavigationToolbarPlacement, NavigationView,
 };
 use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
@@ -233,9 +233,14 @@ pub(crate) fn main_screen(store: Store) -> impl View {
     )
     .sidebar_width(ColumnWidth::new(260.0, 340.0, 420.0))
     .placeholder(|| {
+        // A content-sized stack is placed at its own answer (§7) — top of
+        // the detail rect. The spacers make it stretch on the main axis so
+        // it fills the pane and centres the empty state like Desktop does.
         vstack((
+            spacer(),
             text("Watergram").title().foreground(Foreground),
             text("Select a chat to start messaging").body().muted(),
+            spacer(),
         ))
         .spacing(6.0)
     })
@@ -247,9 +252,40 @@ pub(crate) fn sidebar_stack(store: Store) -> impl View {
     let search = store.search.clone();
     NavigationStack::with_path(
         nav,
-        sidebar_view(store)
+        sidebar_view(store.clone())
             .title("Watergram")
-            .searchable(&search, "Search chats"),
+            .searchable(&search, "Search chats")
+            .navigation_toolbar(
+                // Telegram Desktop: the hamburger sits at the leading edge
+                // of the title/search row; New chat lives inside the menu.
+                NavigationToolbar::default().item(NavigationToolbarItem::new(
+                    NavigationToolbarPlacement::TopBarLeading,
+                    Menu::new(
+                        label("Menu").icon(menu()).icon_only(),
+                        ({
+                            let s = store.clone();
+                            store.tr("NewChat", 0, "New chat").action(move || {
+                                s.nav.push(Route::NewChat)
+                            })
+                        }, {
+                            let s = store.clone();
+                            store.tr("ArchivedChats", 0, "Archive").action(move || {
+                                s.toggle_archive_view()
+                            })
+                        }, {
+                            let s = store.clone();
+                            store.tr("Accounts", 0, "Accounts").action(move || {
+                                s.toggle_accounts()
+                            })
+                        }, {
+                            let s = store.clone();
+                            store
+                                .tr("Settings", 0, "Settings")
+                                .action(move || s.nav.push(Route::Settings))
+                        }),
+                    ),
+                )),
+            ),
     )
     .destination(
         move |route| match route {
@@ -317,41 +353,14 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
     let has_folders = store.folders.map(|f| !f.is_empty()).distinct();
 
     vstack((
-        hstack((
-            // Telegram Desktop header: a menu button holds the secondary
-            // actions; at registry-hydrolysis button widths (~72dp each) a
-            // row of four icon buttons overflows the 340px sidebar.
-            // Menu items' actions run under the popup's env, which does not
-            // inherit the app's `.state(&store)` — env extraction of Store /
-            // Navigator fails there (SemanticApp probe; DOGFOOD). Capture
-            // the store in zero-arg closures instead.
-            Menu::new(
-                label("Menu").icon(menu()).icon_only(),
-                ({
-                    let s = store.clone();
-                    store.tr("ArchivedChats", 0, "Archive").action(move || {
-                        s.toggle_archive_view()
-                    })
-                }, {
-                    let s = store.clone();
-                    store.tr("Accounts", 0, "Accounts").action(move || {
-                        s.toggle_accounts()
-                    })
-                }, {
-                    let s = store.clone();
-                    store
-                        .tr("Settings", 0, "Settings")
-                        .action(move || s.nav.push(Route::Settings))
-                }),
-            ),
-            spacer(),
-            text!("{conn}").caption().muted(),
-            spacer(),
-            icon_button_nav(plus(), "New chat", |nav: Navigator<Route>| {
-                nav.push(Route::NewChat)
-            }),
-        ))
-        .padding_with((6.0, 12.0)),
+        // Connection state: Desktop only surfaces it while reconnecting —
+        // the binding carries a label only for non-Ready states.
+        when(conn.map(|c: Str| !c.as_str().is_empty()), move || {
+            text!("{conn}")
+                .caption()
+                .muted()
+                .padding_with((6.0, 12.0))
+        }),
         // Collapsed `when` children would each still eat a vstack spacing
         // slot; keep the optional sections in one zero-spacing stack so a
         // hidden panel costs no gap.
@@ -552,15 +561,6 @@ where
     button(label(name).icon(icon).icon_only())
         .style(ButtonStyle::Plain)
         .action(move |store: Store| on_tap(store))
-}
-
-pub(crate) fn icon_button_nav<F>(icon: impl View + Clone + 'static, name: &'static str, on_tap: F) -> impl View
-where
-    F: Fn(Navigator<Route>) + 'static,
-{
-    button(label(name).icon(icon).icon_only())
-        .style(ButtonStyle::Plain)
-        .action(move |nav: Navigator<Route>| on_tap(nav))
 }
 
 /// Chat-list kind glyph: Telegram Desktop shows none for private chats,
@@ -1460,6 +1460,15 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                 .anyview(),
         ));
     }
+    if !row.outgoing && !sender.is_empty() {
+        parts.push(
+            text(sender.clone())
+                .caption()
+                .bold()
+                .foreground(Accent)
+                .anyview(),
+        );
+    }
     if has_media {
         parts.push(
             media
@@ -1469,15 +1478,6 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     }
     if let Some(poll) = &row.poll {
         parts.push(poll_block(row.id, poll).anyview());
-    }
-    if !row.outgoing && !sender.is_empty() {
-        parts.push(
-            text(sender.clone())
-                .caption()
-                .bold()
-                .foreground(Accent)
-                .anyview(),
-        );
     }
     if has_text {
         if has_styled {
@@ -1505,7 +1505,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let reactions_overlay: AnyView = if has_reactions {
         text(reactions.clone())
             .caption()
-            .padding_with([0.0, 11.0, 0.0, 10.0])
+            .padding_with([0.0, 11.0, 10.0, 10.0])
             .anyview()
     } else {
         AnyView::default()
@@ -2407,6 +2407,16 @@ pub(crate) fn info_panel(store: Store) -> impl View {
     );
     let cells = store.clone();
     let chat_id = store.selected.unwrap_or(0);
+    let kind = store
+        .chats
+        .zip(&chat_id)
+        .map(|(rows, id)| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .map(|r| r.kind_icon.clone())
+                .unwrap_or_default()
+        })
+        .distinct();
     let title = store
         .chats
         .zip(&chat_id)
@@ -2417,6 +2427,21 @@ pub(crate) fn info_panel(store: Store) -> impl View {
                 .unwrap_or_default()
         })
         .distinct();
+    // Telegram Desktop: the member list appears only for groups/channels —
+    // a private chat's panel shows no Members section.
+    let is_group = kind
+        .map(|k: Str| matches!(k.as_str(), "group" | "channel"))
+        .distinct();
+    let tr_store = store.clone();
+    let members_label = kind.map(move |k: Str| {
+        let key = if k.as_str() == "channel" {
+            "Subscribers"
+        } else {
+            "Members"
+        };
+        tr_store.tr(key, 0, key)
+    });
+    let member_rows = store.clone();
     vstack((
         hstack((
             text!("{t}", t = title.clone()).headline().line_limit(ONE),
@@ -2426,23 +2451,45 @@ pub(crate) fn info_panel(store: Store) -> impl View {
             }),
         ))
         .padding_with((8.0, 14.0)),
-        hstack((
-            text(store.tr("Members", 0, "Members"))
-                .caption()
-                .muted(),
-            spacer(),
-            text!("{n}", n = store.members_count.clone())
-                .caption()
-                .muted(),
-        ))
-        .padding_with((4.0, 14.0))
-        .on_tap(|store: Store| {
-            store.members_open.set(true);
-            store.load_members();
-        })
-        .a11y_label("Open member list")
-        .a11y_role(AccessibilityRole::Button)
-        ,
+        when(is_group, move || {
+            vstack((
+                hstack((
+                    text!("{l}", l = members_label).caption().muted(),
+                    spacer(),
+                    text!("{n}", n = member_rows.members_count.clone())
+                        .caption()
+                        .muted(),
+                ))
+                .padding_with((4.0, 14.0)),
+                VStack::for_each(
+                    SignalCollection::new(member_rows.members.clone()),
+                    move |row: MemberRow| {
+                        let label_text = format!("Member {}", row.name);
+                        hstack((
+                            button(Label::new(Str::from(label_text), move || {
+                                vstack((
+                                    text(row.name.clone()).caption(),
+                                    text(row.status.clone())
+                                        .caption()
+                                        .line_limit(ONE)
+                                        .muted(),
+                                ))
+                                .spacing(0.0)
+                                .leading()
+                                .padding_with((4.0, 14.0))
+                            }))
+                            .style(ButtonStyle::Plain)
+                            .action(|store: Store| {
+                                store.members_open.set(true);
+                                store.load_members();
+                            }),
+                            spacer(),
+                        ))
+                    },
+                ),
+            ))
+            .spacing(0.0)
+        }),
         text("Shared media").caption().muted().padding_with((8.0, 14.0)),
         scroll(VStack::for_each(media_chunks, move |chunk: MediaChunkRow| {
             let mut cells_v: Vec<AnyView> = Vec::new();
