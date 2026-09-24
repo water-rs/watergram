@@ -444,7 +444,8 @@ composer/toolbar children inside their panes. **One exception:
 `Menu::new(label(t).icon(i).icon_only(), items)` still measures
 72×40** (`(12,10,72,40)`) — the menu trigger builds its own
 `MENU_TRIGGER_STYLE` path and does not honour `icon_only`. Filed as
-**water-rs/hydrolysis#149**.
+**water-rs/hydrolysis#149** — **FIXED at hydrolysis dev e1ffa2c6 (verified
+r16): the sidebar `Menu` now measures `(4,8,48,48)`.**
 
 ### `EdgeInsets` tuple order is `(vertical, horizontal)` — ergonomics trap
 
@@ -893,6 +894,7 @@ All verified with probe bounds/dumps; app-side fixes (decorative
 
 ### Semantic walk never registers `hit_test.modal_interaction` — modal
 ### Escape is untestable on `ui.mount` → water-rs/hydrolysis#147
+### FIXED in hydrolysis dev e1ffa2c6 (verified r16)
 
 `ModalInteraction` reaches `hit_test.modal_interaction` only inside
 `bind_interaction_target_with_focus` (hit_test.rs:2275), which runs in the
@@ -900,7 +902,7 @@ All verified with probe bounds/dumps; app-side fixes (decorative
 from retained state via `emit_button_accessibility(ctx=None)` — no ctx, no
 interaction-target binding — so on `ui.mount` the flag is always `None`
 and `handle_keyboard_key_down`'s modal-Escape branch can never fire.
-Minimal repro:
+Minimal repro (now passes on `ui.mount` at e1ffa2c6):
 
 ```rust
 let closed = waterui::reactive::binding(false);
@@ -912,28 +914,24 @@ ui.viewport(300, 300).mount(move || {
     vstack((button("Inside").action(|_: Store| {}),)).with(esc.clone())
 });
 app.settle(); app.press_named_key("Escape"); app.settle();
-// expected: closed == true; observed (mount): false.
-// Same test on ui.mount_offscreen: true — the rendered path registers.
+// expected: closed == true; observed (mount at e676ca8): false;
+// observed (mount at e1ffa2c6): true.
 ```
 
-Workaround for tests: drive modal-Escape tests on `mount_offscreen`.
-(`tests::probe_modal_escape_minimal`, `keyboard_escape_dismisses_*`.)
+Verified r16: `probe_modal_escape_minimal`, `keyboard_escape_dismisses_emoji`
+and `keyboard_escape_dismisses_info` now run on `ui.mount` and pass.
 
 ### `press_named_key` emits `KeyState::Pressed` only — Enter/Space can
 ### never activate on rendered runtimes → water-rs/waterui#1222
+### FIXED in waterui dev c634e557 (verified r16)
 
-`key_press_event` (testing/driver.rs:288) is the only key constructor and
-emits `Pressed` — there is no release event. Rendered runtimes
-(`mount_offscreen`, winit) use `KeyboardActivation::PressRelease`: press
-arms on key-down, activation fires on key-UP — so `press_named_key("Enter")`
-can never activate anything there (verified: a11y focus lands on the
-button node, `el.tap()`/a11y Click works, Enter does nothing). The headless
-semantic runtime uses `KeyboardActivation::Semantic` — activation fires on
-key-down — so Enter tests must run on `ui.mount`. Result: the two halves
-of the keyboard contract are each testable on only one runtime today
-(Enter on `mount`, modal Escape on `mount_offscreen`); on a real winit
-window the full contract presumably holds but cannot be exercised by the
-testing API. A `key_release_event`/`press_and_release` would close it.
+`key_press_event` (testing/driver.rs:288) emitted only `Pressed` — no
+release event. Rendered runtimes (`mount_offscreen`, winit) use
+`KeyboardActivation::PressRelease`: press arms on key-down, activation
+fires on key-UP — so `press_named_key("Enter")` could never activate
+anything there. `press_named_key` now sends a full stroke; the whole
+keyboard contract (Enter activation + modal Escape) is testable on both
+runtimes — `keyboard_enter_activates_offscreen` passes on `mount_offscreen`.
 
 ### `ui_focus()` reports text-input focus only — by design
 
@@ -944,15 +942,16 @@ focusable node is `app.tree().focus()` (`update.focus`); keyboard tests
 must use it (fixed in `keyboard_tab_cycles_chat`).
 
 ### Every drawn shape/fill leaks an unnamed `Image` a11y node → water-rs/hydrolysis#148
+### FIXED in hydrolysis dev e1ffa2c6 (verified r16)
 
-`emit_graphics_image_accessibility` (renderer/tree/nodes.rs:984) emits
+`emit_graphics_image_accessibility` (renderer/tree/nodes.rs:984) emitted
 `AccessibilityNodeRole::Image` for every graphics leaf — `.background(fill)`,
 `Circle.fill` avatars, badge dots, selection pills — each an unnamed
-role-Image leaf in the tree (`AccessibilityHidden` at :992 suppresses it).
-Audit consequence: a bare `text("…").background(fill)` or any decorative
-fill becomes an "unnamed IMAGE" violation unless the app marks every such
-view `.a11y_hidden(true)` (done app-side). Arguably anonymous fills should
-not emit a11y nodes at all — a shape has no text content and no action.
+role-Image leaf in the tree. At e1ffa2c6 the emit sites are only
+SceneView/GpuSurface/custom-drawing content (flush.rs:292,350,565,597);
+plain fills emit no node. App-side `.a11y_hidden(true)` calls that only
+silenced fill noise were removed; the ones hiding icons/Photos (still real
+nodes) stay. Audits rerun green.
 
 ### `text().on_tap` gesture targets: pointer-only by design; the modal
 ### gap is water-rs/hydrolysis#147
@@ -976,7 +975,7 @@ semantics the arrow path can use). Telegram Desktop moves the chat
 selection with Up/Down. App-side this would need the framework to give
 list rows arrow semantics — recorded, not worked around.
 
-## r15-1: dynamically-mounted `NavigationSplitView` detail ignores the proposal — detail overflows the window
+## r15-1: dynamically-mounted `NavigationSplitView` detail ignores the proposal — detail overflows the window → water-rs/hydrolysis#153
 
 `measure_navigation_split_node` (hydrolysis `src/widgets/nav/navigation.rs:910`)
 takes `_proposal: ProposalSize` — **unused** — and measures a
@@ -1009,3 +1008,49 @@ Expected — same mount with `selected=Some(1)` set *before* mount
 composer `(346,844,48,48)` inside the window. The pane rect must be the
 proposal for a dynamically materialized detail exactly as for a static
 one (§7). Not worked around — the app path is the repro.
+
+## r16-4: `LazyStackNode::measure` relays an item's over-measured cross width — a multi-line (or trailing-spacer) item inflates the whole section
+
+`LazyStackNode::measure` (hydrolysis `src/renderer/tree/collection.rs:766`)
+reports the stack's cross extent as `sample.width` — item 0's measured
+width from `ensure_estimate` → `measure_item(0, cross)` (collection.rs:660),
+which proposes `ProposalSize::new(cross, None)` to the item. Two item
+shapes answer more than `cross` to that proposal, and the lazy stack
+relays the over-measure unclamped, so the enclosing `vstack`'s intrinsic
+cross envelope (waterui `stack/distribute.rs` `measure_stack` +
+`vstack_intrinsic_cross_metrics`) widens past its own proposal and every
+sibling is laid out ~2.9 px wider — in Watergram's Settings this pushed
+the Privacy/Notifications section's trailing values to x≈326.9 while the
+Account section's ended at x≈324.
+
+Watergram minimal repro (offscreen, M3, 340×900, all inside
+`scroll(vstack(...).padding_with((12, 16)))` so content cross = 308):
+
+```rust
+VStack::for_each(rows, |row| {
+    hstack((
+        text!("{title}\n{subtitle}", ..),  // or vstack((text(a), text(b)))
+        spacer(),
+        text("current"),
+    ))
+})
+```
+
+Verified trigger matrix (same page, same 308 proposal):
+
+| lazy item shape | section row width |
+|---|---|
+| `hstack((text("one line"), spacer(), text("x")))` | 308 (correct) |
+| `hstack((text("a\nb"), spacer(), text("x")))` — multi-line first child | 310.86 |
+| `hstack((vstack((text("a"), text("b"))), spacer(), when))` | 310.86 |
+| `hstack((text("a — b"), spacer()))` — two children, trailing spacer | 310.80 |
+| `hstack((vstack((text("a"), text("b"))), spacer()))` | 310.80 |
+| identical row placed literally (non-lazy) | 308 |
+
+Expected: an item must never answer a width above the cross-axis
+proposal it was measured under; `LazyStackNode` should also clamp
+`sample.width` to `cross` when reporting its cross extent. App fix: the
+session row was reshaped to `hstack((text(title).bold(), spacer(),
+text(subtitle + optional " · current" accent)))` — three single-line
+children — which measures correctly; the two-line variant stays here as
+the repro.

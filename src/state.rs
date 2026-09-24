@@ -6,6 +6,7 @@
 //! request futures are spawned with `spawn_local`. That keeps every `nami`
 //! type (which is `Rc`-backed and `!Send`) on one thread.
 
+use chrono::Datelike;
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc;
 use std::collections::HashMap;
@@ -172,6 +173,15 @@ pub struct MessageRow {
     /// Render the "Unread messages" divider above this row (first incoming
     /// message after `last_read_inbox_message_id`).
     pub unread_divider: bool,
+    /// Local-calendar day (`NaiveDate::num_days_from_ce`) the message was
+    /// sent; 0 when unknown.
+    pub day: i64,
+    /// First row of a distinct day — renders the date pill above the row.
+    pub day_header: bool,
+    /// Localized day label ("Today", "Yesterday", "Mar 15", …).
+    pub day_label: Str,
+    /// Message was edited (`edit_date` set) — meta shows "edited".
+    pub edited: bool,
     /// Poll content (question/options/votes) when the message is a poll.
     pub poll: Option<PollRow>,
 }
@@ -569,6 +579,35 @@ fn fmt_time(ts: i32) -> Str {
         .into()
 }
 
+/// Local calendar day index (`num_days_from_ce`) for a unix timestamp.
+fn local_day(ts: i32) -> i64 {
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|d| {
+            d.with_timezone(&chrono::Local)
+                .date_naive()
+                .num_days_from_ce() as i64
+        })
+        .unwrap_or(0)
+}
+
+/// "Today" / "Yesterday" / "Mar 15" / "Mar 15, 2025" for a day index.
+fn fmt_day_label(day: i64) -> Str {
+    let Some(date) = chrono::NaiveDate::from_num_days_from_ce_opt(day as i32) else {
+        return Str::from("");
+    };
+    let today = chrono::Local::now().date_naive();
+    let s = if date == today {
+        "Today".to_string()
+    } else if date == today.pred_opt().unwrap_or(today) {
+        "Yesterday".to_string()
+    } else if date.year() == today.year() {
+        date.format("%b %-d").to_string()
+    } else {
+        date.format("%b %-d, %Y").to_string()
+    };
+    Str::from(s)
+}
+
 /// Convert a TDLib `FormattedText` (UTF-16 entity offsets) into a
 /// `StyledStr`: bold/italic/underline/strike/mono, spoiler as a black
 /// block, links in accent blue, quotes on a light background.
@@ -687,6 +726,8 @@ pub struct MemberRow {
     pub sender: enums::MessageSender,
     /// Active @username for @mention completion (empty for chat senders).
     pub username: Str,
+    /// TDLib small profile-photo file id; 0 renders the initials circle.
+    pub photo: i32,
 }
 
 /// Collapse a TDLib privacy rule list into one audience label. The rule
@@ -959,6 +1000,10 @@ impl Store {
             pending: false,
             highlighted: false,
             unread_divider: false,
+            day: 0,
+            day_header: false,
+            day_label: Str::from(""),
+            edited: false,
             my_reaction: Str::from(""),
             styled: StyledStr::empty(),
             webpage: Str::from(""),
@@ -974,6 +1019,7 @@ impl Store {
         msgs[3].styled = styled;
         // real rows carry plain text alongside the styled body
         msgs[3].text = Str::from("check https://waterui.dev for the docs");
+        msgs[3].edited = true;
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "", "", ""));
         msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
         msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
@@ -992,10 +1038,18 @@ impl Store {
             });
             msgs.push(poll_msg);
         }
-        self.messages.set(msgs);
+        let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
+        for r in &mut msgs {
+            r.day = today;
+        }
+        // First demo message is "yesterday" so the date pill shows.
+        if let Some(first) = msgs.first_mut() {
+            first.day = today - 1;
+        }
+        self.set_messages(msgs);
         self.pinned_label.set_from("Alice: shipping it 🚀");
         self.sessions.set(vec![
-            SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "current session · this device".into(), current: true },
+            SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
             SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
         ]);
         self.privacy_rows.set(vec![
@@ -1004,16 +1058,16 @@ impl Store {
             PrivacyRow { setting: "Profile photos".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowProfilePhoto },
         ]);
         self.contacts.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into() },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into() },
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
         ]);
         // Chat 1 (WaterUI devs) is a group — the info panel's member list.
         self.members.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into() },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into() },
-            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into() },
-            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into() },
-            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into() },
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
+            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into(), photo: 0 },
+            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into(), photo: 0 },
+            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into(), photo: 0 },
         ]);
         self.members_count.set_from("5 members");
         self.twofa.set_from("enabled");
@@ -1465,6 +1519,10 @@ impl Store {
             pending,
             highlighted: false,
             unread_divider: false,
+            day: local_day(m.date),
+            day_header: false,
+            day_label: Str::from(""),
+            edited: m.edit_date != 0,
             poll,
         }
     }
@@ -1574,7 +1632,7 @@ impl Store {
         let mut list = self.messages.get();
         if let Some(r) = list.iter_mut().find(|r| r.id == message_id) {
             f(r);
-            self.messages.set(list);
+            self.set_messages(list);
         }
     }
 
@@ -1708,7 +1766,7 @@ impl Store {
                             r.read_out = true;
                         }
                     }
-                    self.messages.set(list);
+                    self.set_messages(list);
                 }
             }
             enums::Update::ChatIsMarkedAsUnread(u) => {
@@ -1818,7 +1876,7 @@ impl Store {
                     if !list.iter().any(|r| r.id == row.id) {
                         list.push(row);
                         list.sort();
-                        self.messages.set(list);
+                        self.set_messages(list);
                         self.scroll_bottom();
                     }
                     if !m.is_outgoing {
@@ -1843,7 +1901,7 @@ impl Store {
                     list.retain(|r| r.id != u.old_message_id && r.id != u.message.id);
                     list.push(self.message_row(&u.message));
                     list.sort();
-                    self.messages.set(list);
+                    self.set_messages(list);
                 }
             }
             enums::Update::MessageSendFailed(u) => {
@@ -1885,7 +1943,7 @@ impl Store {
                 if u.chat_id == self.open_chat.get() {
                     let mut list = self.messages.get();
                     list.retain(|r| !u.message_ids.contains(&r.id));
-                    self.messages.set(list);
+                    self.set_messages(list);
                 }
             }
             enums::Update::ChatDraftMessage(u) => {
@@ -2069,7 +2127,7 @@ impl Store {
 
     fn reset(&self) {
         self.chats.set(Vec::new());
-        self.messages.set(Vec::new());
+        self.set_messages(Vec::new());
         self.server_results.set(Vec::new());
         self.chat_objs.borrow_mut().clear();
         self.users.borrow_mut().clear();
@@ -2272,7 +2330,7 @@ impl Store {
         }
         let prev = self.open_chat.replace(chat_id);
         self.selected.set(Some(chat_id));
-        self.messages.set(Vec::new());
+        self.set_messages(Vec::new());
         self.reply_to.set(None);
         self.editing.set(None);
         self.no_more_history.set(false);
@@ -2450,8 +2508,22 @@ impl Store {
             }
         }
         if changed {
-            self.messages.set(list);
+            self.set_messages(list);
         }
+    }
+
+    /// Sets `messages` after marking the first row of each distinct local
+    /// day with `day_header` + `day_label` (the date pill).
+    pub fn set_messages(&self, mut rows: Vec<MessageRow>) {
+        let mut prev_day = 0i64;
+        for r in &mut rows {
+            r.day_header = r.day != prev_day;
+            if r.day_header {
+                r.day_label = fmt_day_label(r.day);
+            }
+            prev_day = r.day;
+        }
+        self.messages.set(rows);
     }
 
     /// Fetch the chat's pinned message into `pinned_label`/`pinned_id`.
@@ -2615,7 +2687,7 @@ impl Store {
                 for (i, r) in list.iter_mut().enumerate() {
                     r.highlighted = Some(i) == pos;
                 }
-                store.messages.set(list);
+                store.set_messages(list);
                 store.highlight_msg.set(message_id);
                 if let Some(idx) = pos {
                     store.scroll.scroll_to(idx);
@@ -2863,6 +2935,7 @@ impl Store {
                         status: "".into(),
                         sender: sender.clone(),
                         username: "".into(),
+                        photo: 0,
                     });
                 }
                 store.blocked.set(rows);
@@ -3023,7 +3096,7 @@ impl Store {
                 }
             }
             list.sort();
-            self.messages.set(list);
+            self.set_messages(list);
             if offset == 0 && from == 0 {
                 self.scroll_bottom();
             }
@@ -3877,7 +3950,7 @@ impl Store {
                     .set_from(format!("{} members", m.total_count));
                 let mut rows = Vec::new();
                 for member in m.members {
-                    let (key, name, sender, username) = match &member.member_id {
+                    let (key, name, sender, username, photo) = match &member.member_id {
                         enums::MessageSender::User(u) => {
                             let uid = u.user_id;
                             let cached = store.users.borrow().get(&uid).cloned();
@@ -3905,16 +3978,29 @@ impl Store {
                                 .and_then(|u| u.usernames.as_ref())
                                 .and_then(|us| us.active_usernames.first().cloned())
                                 .unwrap_or_default();
-                            (uid, name, member.member_id.clone(), uname)
+                            let photo = user
+                                .as_ref()
+                                .and_then(|u| u.profile_photo.as_ref())
+                                .map(|p| p.small.id)
+                                .unwrap_or(0);
+                            if photo != 0 {
+                                store.want_file_id(photo);
+                            }
+                            (uid, name, member.member_id.clone(), uname, photo)
                         }
                         enums::MessageSender::Chat(c) => {
-                            let title = store
+                            let (title, photo) = store
                                 .chat_objs
                                 .borrow()
                                 .get(&c.chat_id)
-                                .map(|ch| ch.title.clone())
-                                .unwrap_or_else(|| format!("Chat {}", c.chat_id));
-                            (c.chat_id, title, member.member_id.clone(), String::new())
+                                .map(|ch| {
+                                    (
+                                        ch.title.clone(),
+                                        ch.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
+                                    )
+                                })
+                                .unwrap_or_else(|| (format!("Chat {}", c.chat_id), 0));
+                            (c.chat_id, title, member.member_id.clone(), String::new(), photo)
                         }
                     };
                     let status = match &member.status {
@@ -3931,6 +4017,7 @@ impl Store {
                         status: status.into(),
                         sender,
                         username: username.into(),
+                        photo,
                     });
                 }
                 store.members.set(rows);
@@ -3970,6 +4057,7 @@ impl Store {
                                 user_id: uid,
                             }),
                             username: uname.trim_start_matches('@').to_string().into(),
+                            photo: user.profile_photo.map(|p| p.small.id).unwrap_or(0),
                         });
                     }
                 }
@@ -4439,7 +4527,7 @@ impl Store {
         self.accounts_open.set(false);
         // Clear account-scoped caches.
         self.chats.set(Vec::new());
-        self.messages.set(Vec::new());
+        self.set_messages(Vec::new());
         self.folders.set(Vec::new());
         self.members.set(Vec::new());
         self.server_results.set(Vec::new());
@@ -4802,7 +4890,7 @@ impl Store {
         if let Some(r) = list.iter_mut().find(|r| r.id == message_id) {
             r.failed = false;
             r.pending = true;
-            self.messages.set(list);
+            self.set_messages(list);
         }
         let client = self.client_id.get();
         spawn_local(async move {

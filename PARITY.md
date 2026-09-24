@@ -40,7 +40,7 @@
 |---|---|---|---|
 | 打开会话 + 历史分页 | ✅ | `getChatHistory` 向前翻页 | `messages_render` |
 | 发送文本 | ✅ | `sendMessage(inputMessageText)` | `composer_sends_and_clears` |
-| 编辑消息 | ✅ | `editMessageText` | — |
+| 编辑消息 | ✅ | `editMessageText`；`message.edit_date` → 气泡内 "edited" 标记 | — |
 | 删除消息 | ✅ | `deleteMessages` | — |
 | 转发 | ✅ | `forwardMessages` | — |
 | 回复 / 引用 | ✅ | `inputMessageReplyTo` | `reply_banner_shows` |
@@ -67,6 +67,7 @@
 | @提及/用户名补全 | ✅ | 输入框尾部 @token → `searchChatMembers`+`getUser`(username) 过滤弹层，选中回填 `@username ` | `mention_popup_filters_and_inserts`, `mention_token_parses` |
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
 | 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
+| 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
 
 ## 4. 媒体与附件
 

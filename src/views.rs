@@ -21,6 +21,7 @@ use waterui::navigation::{
 };
 use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
+use waterui::text::styled::{Style, StyledStr};
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
 use waterui::shape::{Circle, RoundedRectangle, ShapeExt};
@@ -454,7 +455,6 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 .background(if tab.active {
                                     RoundedRectangle::new(0.5)
                                         .fill(SurfaceVariant)
-                                        .a11y_hidden(true)
                                         .anyview()
                                 } else {
                                     AnyView::default()
@@ -633,14 +633,11 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                     Color::from(AccentForeground)
                 })
                 .padding_with((2.0, 6.0))
-                .background(
-                    (if row.muted {
-                        Circle.fill(SurfaceVariant)
-                    } else {
-                        Circle.fill(Accent)
-                    })
-                    .a11y_hidden(true),
-                )
+                .background(if row.muted {
+                    Circle.fill(SurfaceVariant)
+                } else {
+                    Circle.fill(Accent)
+                })
                 .anyview()
         }
     } else {
@@ -1195,9 +1192,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                             .anyview();
                             cell.padding_with((6.0, 6.0))
                                 .background(
-                                    RoundedRectangle::new(0.2)
-                                        .fill(SurfaceVariant)
-                                        .a11y_hidden(true),
+                                    RoundedRectangle::new(0.2).fill(SurfaceVariant),
                                 )
                                 .on_tap(move |store: Store| store.send_sticker(it.clone()))
                                 .a11y_label("Send sticker")
@@ -1512,6 +1507,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     };
 
     let meta_overlay = hstack((
+        when(row.edited, || text("edited").caption()),
         text(time).caption(),
         if row.pending {
             clock_outline().size(11.0, 11.0).anyview()
@@ -1555,16 +1551,13 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         .alignment(BottomLeading),
     )
     .max_width(bubble_cap)
-    .background(
-        (if row.highlighted {
-            RoundedRectangle::new(0.18).fill(AccentContainer)
-        } else if row.outgoing {
-            RoundedRectangle::new(0.18).fill(Accent)
-        } else {
-            RoundedRectangle::new(0.18).fill(SurfaceVariant)
-        })
-        .a11y_hidden(true),
-    );
+    .background(if row.highlighted {
+        RoundedRectangle::new(0.18).fill(AccentContainer)
+    } else if row.outgoing {
+        RoundedRectangle::new(0.18).fill(Accent)
+    } else {
+        RoundedRectangle::new(0.18).fill(SurfaceVariant)
+    });
     let bubble = bubble.foreground(if row.outgoing {
         Color::from(AccentForeground)
     } else {
@@ -1614,7 +1607,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     } else {
         hstack((bubble, spacer())).anyview()
     };
-    if row.unread_divider {
+    let placed = if row.unread_divider {
         vstack((
             zstack((
                 Color::from(BorderColor).height(1.0),
@@ -1624,6 +1617,28 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                         .caption()
                         .bold()
                         .foreground(Accent)
+                        .padding_with((0.0, 6.0))
+                        .background(Surface),
+                    spacer(),
+                )),
+            ))
+            .padding_with((2.0, 4.0)),
+            placed,
+        ))
+        .spacing(0.0)
+        .anyview()
+    } else {
+        placed
+    };
+    if row.day_header {
+        vstack((
+            zstack((
+                Color::from(BorderColor).height(1.0),
+                hstack((
+                    spacer(),
+                    text(row.day_label.clone())
+                        .caption()
+                        .muted()
                         .padding_with((0.0, 6.0))
                         .background(Surface),
                     spacer(),
@@ -1895,16 +1910,18 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             VStack::for_each(
                 SignalCollection::new(store.sessions.clone()),
                 move |row: SessionRow| {
-                    let is_current = row.current;
+                    let mut trailing = StyledStr::empty();
+                    trailing.push(
+                        row.subtitle.clone(),
+                        Style::new().foreground(MutedForeground),
+                    );
+                    if row.current {
+                        trailing.push(" · current", Style::new().foreground(Accent));
+                    }
                     hstack((
-                        vstack((
-                            text(row.title.clone()).bold(),
-                            text(row.subtitle.clone()).muted(),
-                        ))
-                        .spacing(2.0)
-                        .leading(),
+                        text(row.title.clone()).bold(),
                         spacer(),
-                        when(is_current, || text("current").foreground(Accent)),
+                        text(trailing),
                     ))
                     .padding_with((4.0, 0.0))
                     .context_menu(("Terminate".action(move |store: Store| {
@@ -2461,21 +2478,28 @@ pub(crate) fn info_panel(store: Store) -> impl View {
                         .muted(),
                 ))
                 .padding_with((4.0, 14.0)),
-                VStack::for_each(
+                {
+                    let member_av = member_rows.clone();
+                    VStack::for_each(
                     SignalCollection::new(member_rows.members.clone()),
                     move |row: MemberRow| {
                         let label_text = format!("Member {}", row.name);
+                        let av_store = member_av.clone();
                         hstack((
                             button(Label::new(Str::from(label_text), move || {
-                                vstack((
-                                    text(row.name.clone()).caption(),
-                                    text(row.status.clone())
-                                        .caption()
-                                        .line_limit(ONE)
-                                        .muted(),
+                                hstack((
+                                    avatar(av_store.clone(), row.photo, &row.name, 32.0),
+                                    vstack((
+                                        text(row.name.clone()).caption(),
+                                        text(row.status.clone())
+                                            .caption()
+                                            .line_limit(ONE)
+                                            .muted(),
+                                    ))
+                                    .spacing(0.0)
+                                    .leading(),
                                 ))
-                                .spacing(0.0)
-                                .leading()
+                                .spacing(10.0)
                                 .padding_with((4.0, 14.0))
                             }))
                             .style(ButtonStyle::Plain)
@@ -2486,7 +2510,8 @@ pub(crate) fn info_panel(store: Store) -> impl View {
                             spacer(),
                         ))
                     },
-                ),
+                )
+                }
             ))
             .spacing(0.0)
         }),

@@ -170,10 +170,13 @@ pub fn app(mut env: Environment) -> App {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Datelike;
     use crate::state::{ChatRow, FolderRow, MessageRow, Screen, SharedMediaRow, Store};
     use crate::views;
+    use waterui::accessibility::AccessibilityRole;
     use waterui::layout::frame::Frame;
     use waterui::prelude::*;
+    use waterui::reactive::collection::SignalCollection;
     use waterui_testing::{Role, Styled, UiBuilder};
 
     fn store() -> Store {
@@ -216,6 +219,10 @@ mod tests {
             pending: false,
             highlighted: false,
             unread_divider: false,
+            day: 0,
+            day_header: false,
+            day_label: "".into(),
+            edited: false,
             read_out: false,
             my_reaction: "".into(),
             styled: waterui::text::styled::StyledStr::empty(),
@@ -551,6 +558,7 @@ mod tests {
                 user_id: 9,
             }),
             username: "alice".into(),
+            photo: 0,
         }]);
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("2 members").assert_exists();
@@ -586,7 +594,8 @@ mod tests {
         app.query().label("Two-step verification").assert_exists();
         app.query().label("Active sessions").assert_exists();
         app.query().label("Telegram Desktop 5.0 · PC").assert_exists();
-        app.query().label("current").assert_exists();
+        // The trailing metadata is one merged line ("… · current").
+        app.query().label_contains("· current").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -600,11 +609,32 @@ mod tests {
                 user_id: 9,
             }),
             username: "alice".into(),
+            photo: 0,
         }]);
         let mut app = ui.mount(move || views::new_chat_view(store.clone()).state(&store));
         app.query().label("Alice A").assert_exists();
         app.query().label("@alice").assert_exists();
         app.query().label("Contacts").assert_exists();
+    }
+
+    #[test]
+    fn set_messages_marks_day_headers() {
+        let store = store();
+        let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
+        let mut rows = vec![msg(1, "d1a", false), msg(2, "d1b", false), msg(3, "d2a", true)];
+        rows[0].day = today - 1;
+        rows[1].day = today - 1;
+        rows[2].day = today;
+        store.set_messages(rows);
+        let got = store.messages.get();
+        assert!(got[0].day_header);
+        assert_eq!(got[0].day_label.as_str(), "Yesterday");
+        assert!(!got[1].day_header);
+        assert!(got[2].day_header);
+        assert_eq!(got[2].day_label.as_str(), "Today");
+        // deleting d2a's row recomputes on the next set
+        store.set_messages(vec![got[0].clone(), got[1].clone()]);
+        assert!(!store.messages.get()[1].day_header);
     }
 
     #[test]
@@ -1484,6 +1514,73 @@ mod tests {
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_settings_trailing(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // r16-4: Account trailing values end ~3px left of Privacy trailing
+        // values. Dump bounds to see which row's right edge deviates.
+        let store = store();
+        store.seed_demo();
+        let state = store.clone();
+        let mut app = ui.viewport(340, 900).mount_offscreen(move || {
+            views::settings_view(store.clone()).state(&state)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_settings.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_settings.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_row_width(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // r16-4 bisect: which modifier makes a row 2.86 wider than 308?
+        let store = store();
+        let state = store.clone();
+        let rows = Binding::container(vec![crate::state::PrivacyRow {
+            setting: "Row".into(),
+            audience: "Everyone".into(),
+            key: tdlib_rs::enums::UserPrivacySetting::ShowStatus,
+        }]);
+        let mut app = ui.viewport(340, 500).mount_offscreen(move || {
+            NavigationView::new(
+                "Settings",
+                scroll(vstack((
+                    hstack((text("a0"), spacer(), text("bare").muted())),
+                    vstack((
+                        hstack((text("a1"), spacer(), text("ctx").muted())).context_menu((
+                            "X".action(|_s: Store| {}),
+                        )),
+                        VStack::for_each(
+                            SignalCollection::new(rows.clone()),
+                            |n: crate::state::PrivacyRow| {
+                                hstack((text(n.setting.clone()), spacer(), text(n.audience.clone()).muted()))
+                                    .context_menu(("X".action(|_s: Store| {}),))
+                            },
+                        ),
+                        hstack((text("a2"), spacer(), text("tap").muted()))
+                            .on_tap(|_s: Store| {})
+                            .a11y_label("tap row")
+                            .a11y_role(AccessibilityRole::Button),
+                        toggle("sw", &store.notif_private),
+                        hstack((text("a4"), spacer(), text("plain-btn")))
+                            .on_tap(|_s: Store| {}),
+                        hstack((
+                            vstack((text("lit1"), text("lit2"))),
+                            spacer(),
+                        )),
+                    ))
+                    .spacing(4.0)
+                    .leading(),
+                ))
+                .spacing(10.0)
+                .leading()
+                .padding_with((12.0, 16.0))),
+            )
+            .state(&state)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_row_width.txt", &mut app);
+        let _ = app.snapshot().save_png("/tmp/probe_row_width.png");
+    }
+
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_bubble_inset(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         // Same bubble as probe_bubble_incoming but WITHOUT outer padding —
         // isolates whether `.padding_with((12,2))` or `List` inflates the row.
@@ -1793,6 +1890,7 @@ mod tests {
                 user_id: 42,
             }),
             username: "spam".into(),
+            photo: 0,
         }]);
         let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
         app.query().label("Blocked users").assert_exists();
@@ -1990,6 +2088,7 @@ mod tests {
                 user_id: id,
             }),
             username: uname.to_string().into(),
+            photo: 0,
         }
     }
 
@@ -2298,6 +2397,33 @@ mod tests {
         );
     }
 
+    /// waterui#1222: `press_named_key` now emits a full stroke (press +
+    /// release), so the rendered runtime's `PressRelease` activation path
+    /// fires — the same Enter activation must hold on `mount_offscreen`.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn keyboard_enter_activates_offscreen(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.semantic_mut().settle();
+        let el = app
+            .query()
+            .role(Role::BUTTON)
+            .label("Stickers & GIFs")
+            .single();
+        el.focus(&mut app);
+        app.press_named_key("Enter");
+        app.semantic_mut().settle();
+        assert!(
+            store.stickers_open.get(),
+            "Enter on focused button did not activate it on the rendered runtime"
+        );
+    }
+
     /// Escape dismisses the emoji panel when it is open.
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn keyboard_escape_dismisses_emoji(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
@@ -2306,15 +2432,13 @@ mod tests {
         store.selected.set(Some(1));
         store.stickers_open.set(true);
         let inner = store.clone();
-        // Rendered runtime: `hit_test.modal_interaction` is populated by
-        // `bind_interaction_target`, which only runs in the rendered emit
-        // path — the headless semantic walk never registers modal scopes.
+        // hydrolysis#147: modal scopes now register on the semantic walk too.
         let mut app = ui
             .viewport(660, 700)
-            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&inner));
-        app.semantic_mut().settle();
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.settle();
         app.press_named_key("Escape");
-        app.semantic_mut().settle();
+        app.settle();
         assert!(
             !store.stickers_open.get(),
             "Escape did not close the emoji panel"
@@ -2332,10 +2456,10 @@ mod tests {
         let inner = store.clone();
         let mut app = ui
             .viewport(460, 700)
-            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&inner));
-        app.semantic_mut().settle();
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.settle();
         app.press_named_key("Escape");
-        app.semantic_mut().settle();
+        app.settle();
         assert!(
             !store.info_open.get(),
             "Escape did not close the info overlay"
@@ -2376,16 +2500,14 @@ mod tests {
             true,
             SharedAction::new(move |_: Environment| c.set(true)),
         );
-        // Rendered runtime only: the headless semantic walk emits a11y
-        // nodes without `ctx`, so `bind_interaction_target` never runs and
-        // `hit_test.modal_interaction` is never populated (DOGFOOD).
-        let mut app = ui.viewport(300, 300).mount_offscreen(move || {
+        // #147 verified: the semantic runtime now registers modal scopes.
+        let mut app = ui.viewport(300, 300).mount(move || {
             vstack((button("Inside").action(|_: Store| {}),))
                 .with(esc.clone())
         });
-        app.semantic_mut().settle();
+        app.settle();
         app.press_named_key("Escape");
-        app.semantic_mut().settle();
+        app.settle();
         std::fs::write(
             "/tmp/modal_escape.txt",
             format!("closed={}\n", closed.get()),
