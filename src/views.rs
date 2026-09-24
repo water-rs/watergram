@@ -1434,6 +1434,25 @@ pub(crate) fn banner(
     .background(Surface)
 }
 
+/// Telegram Desktop renders a message that contains only emoji at a larger
+/// size with no bubble background. Returns the emoji count, 0 if the text
+/// contains anything else (whitespace, ZWJ, variation selectors, keycap and
+/// tag markers do not count as content).
+pub(crate) fn emoji_count(s: &str) -> usize {
+    let mut n = 0usize;
+    for c in s.chars() {
+        match c as u32 {
+            // Whitespace, ZWJ, variation selectors, keycap/tag markers, and
+            // skin-tone modifiers don't count as separate emoji.
+            0x20 | 0x200D | 0xFE0E | 0xFE0F | 0x20E3 | 0x1F3FB..=0x1F3FF
+            | 0xE0020..=0xE007F => {}
+            0x2300..=0x27BF | 0x2B00..=0x2BFF | 0x1F000..=0x1FAFF => n += 1,
+            _ => return 0,
+        }
+    }
+    n
+}
+
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
 pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let reply_excerpt = row.reply_excerpt.clone();
@@ -1470,6 +1489,12 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         }
     };
     let has_media = row.media_file != 0 || row.play_file != 0 || !row.media_label.is_empty();
+    // Emoji-only messages render large on no bubble fill (Telegram Desktop).
+    let emoji_n = if has_media || has_webpage || has_styled || row.poll.is_some() {
+        0
+    } else {
+        emoji_count(&body_text)
+    };
 
     let mut parts: Vec<AnyView> = Vec::new();
     if has_fwd {
@@ -1505,7 +1530,16 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         parts.push(poll_block(row.id, poll).anyview());
     }
     if has_text {
-        if has_styled {
+        if emoji_n > 0 {
+            let size = if emoji_n <= 3 {
+                44.0
+            } else if emoji_n <= 8 {
+                34.0
+            } else {
+                26.0
+            };
+            parts.push(text(body_text.clone()).size(size).anyview());
+        } else if has_styled {
             parts.push(text(body_styled.clone()).body().anyview());
         } else {
             parts.push(text(body_text.clone()).body().anyview());
@@ -1598,31 +1632,39 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let bubble_cap = store
         .win_frame
         .map(|f| ((f.width() - 340.0) * 0.72).clamp(220.0, 480.0));
-    let bubble = Frame::new(
-        zstack((
-            zstack((content, reactions_overlay)).alignment(BottomLeading),
-            // The meta overlay needs a trailing anchor: an infinite-width
-            // Frame fills the zstack's bounds, so `.alignment` can reach
-            // the trailing edge (a finite child only gets its own size).
-            Frame::new(meta_overlay)
-                .max_width(f32::INFINITY)
-                .alignment(BottomTrailing),
-        ))
-        .alignment(BottomLeading),
-    )
-    .max_width(bubble_cap)
-    .background(if row.highlighted {
-        RoundedRectangle::new(0.18).fill(AccentContainer)
-    } else if row.outgoing {
-        RoundedRectangle::new(0.18).fill(Accent)
+    let bubble_inner = zstack((
+        zstack((content, reactions_overlay)).alignment(BottomLeading),
+        // The meta overlay needs a trailing anchor: an infinite-width
+        // Frame fills the zstack's bounds, so `.alignment` can reach
+        // the trailing edge (a finite child only gets its own size).
+        Frame::new(meta_overlay)
+            .max_width(f32::INFINITY)
+            .alignment(BottomTrailing),
+    ))
+    .alignment(BottomLeading);
+    let bubble: AnyView = if emoji_n > 0 && !row.highlighted {
+        // No fill: the emoji itself is the content (Telegram Desktop).
+        Frame::new(bubble_inner)
+            .max_width(bubble_cap)
+            .foreground(Foreground)
+            .anyview()
     } else {
-        RoundedRectangle::new(0.18).fill(SurfaceVariant)
-    });
-    let bubble = bubble.foreground(if row.outgoing {
-        Color::from(AccentForeground)
-    } else {
-        Color::from(Foreground)
-    });
+        Frame::new(bubble_inner)
+            .max_width(bubble_cap)
+            .background(if row.highlighted {
+                RoundedRectangle::new(0.18).fill(AccentContainer)
+            } else if row.outgoing {
+                RoundedRectangle::new(0.18).fill(Accent)
+            } else {
+                RoundedRectangle::new(0.18).fill(SurfaceVariant)
+            })
+            .foreground(if row.outgoing {
+                Color::from(AccentForeground)
+            } else {
+                Color::from(Foreground)
+            })
+            .anyview()
+    };
 
     let react_label: &'static str = if row.my_reaction == "👍" {
         "Remove 👍"

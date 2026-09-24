@@ -1102,6 +1102,9 @@ impl Store {
             });
             msgs.push(poll_msg);
         }
+        // Emoji-only messages render large on no bubble (Telegram Desktop).
+        msgs.push(m(19, "", "🎉🎉🎉", "09:49", true, true, "", "", "", ""));
+        msgs.push(m(20, "Alice", "🔥", "09:50", false, false, "", "❤️1", "", ""));
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
             r.day = today;

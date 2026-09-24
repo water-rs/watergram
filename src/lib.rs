@@ -605,6 +605,34 @@ mod tests {
         app.query().label_contains("👍 3").assert_exists();
     }
 
+    /// Emoji-only detection: whitespace/ZWJ/VS16 don't count, any other
+    /// content disqualifies the message from the large no-bubble rendering.
+    #[test]
+    fn emoji_only_detection() {
+        assert_eq!(views::emoji_count("🔥"), 1);
+        assert_eq!(views::emoji_count("🎉🎉🎉"), 3);
+        assert_eq!(views::emoji_count("👍🏽 ❤️"), 2);
+        assert_eq!(views::emoji_count(""), 0);
+        assert_eq!(views::emoji_count("shipping it 🚀"), 0);
+        assert_eq!(views::emoji_count("1️⃣ keycap"), 0);
+    }
+
+    /// An emoji-only message renders as a large text label inside the row
+    /// (Telegram Desktop drops the bubble fill — semantic tree can't see the
+    /// fill, so assert the emoji label exists at all).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn emoji_only_bubble_renders(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        store.messages.set(vec![
+            msg(1, "🔥", false),
+            msg(2, "🎉🎉🎉", true),
+        ]);
+        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        app.query().label_contains("🔥").assert_exists();
+        app.query().label_contains("🎉🎉🎉").assert_exists();
+    }
+
     /// Tap a reaction pill: demo path toggles the chip locally — count
     /// +1, chosen, pill keeps rendering.
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]

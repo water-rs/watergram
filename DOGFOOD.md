@@ -1237,6 +1237,11 @@ x243 = the scroller's clip edge). Two live defects, both framework:
 the hstack does not grant its leftover to the scroll viewport, and the
 text node's semantic measure under-reports the winit glyph width.
 
+Filed as **water-rs/hydrolysis#182** (the chip clips in a horizontal
+scroll: the viewport misses the leftover width, and the semantic
+runtime's text measure differs from what the renderer paints). Fix
+session running. Still open.
+
 ## r20-2: `on_tap` targets inside a `List` row are unreachable on the real renderer — the row's press target consumes the pointer event
 
 Repro (real renderer, deterministic): `WATERGRAM_DEMO=1
@@ -1267,7 +1272,7 @@ No app-side workaround.
 Re-verified on hydrolysis `3ba17866`: pointer tap at the "👍 3" chip's
 bounds still does not toggle the reaction (`r21/react_tap2.png` —
 count unchanged); a tap on a bubble body instead scrolls/presses the
-row. Still open.
+row. Still open. Fix session running on hydrolysis `c19e8437`.
 
 ## r20-3: `NavigationView` emits an empty subtitle `Label` node when no subtitle is bound
 
@@ -1287,6 +1292,12 @@ also correct product behaviour). Expected: neither an unbound subtitle
 slot nor an empty text emits a node. Filed as **water-rs/hydrolysis#176**;
 fix session running. The audit has NO skip — `a11y_audit_settings`
 fails honestly on this node until the fix lands.
+
+**FIXED upstream** — hydrolysis dev `c19e8437` (#181: no empty `Label`
+nodes). Verified: `a11y_audit_settings` and all four audits pass again
+on `ui.mount` (the r22 suite: 4/4 audits ok). The `profile_note` `when`
+stays as product behaviour (Telegram shows no note until there is
+feedback), not a workaround. Closed.
 
 ## r21-1: sidebar `Menu` inline icon row — RETRACTED (stale-binary artifact)
 
@@ -1310,7 +1321,11 @@ Lesson recorded: the managed backend's real build output lands at
 `$MB/target/debug/watergram-hydrolysis-<hash>` (where `$MB` is the
 managed crate dir), and only that path proves a binary matches the
 pinned sources — verified via `ls -la` on the artifact copied to
-`dist/linux/debug/`.
+`dist/linux/debug/`. Filed upstream as **water-rs/cli#181** (the
+managed backend launched a stale binary from the shared build cache);
+fix session running. Until it lands, each round's report states the
+launched artifact's path and mtime. The stale `~/.water/build_cache/
+target/` cache (45 GB) was deleted this session.
 
 <details><summary>Superseded r21-1 text (stale binary)</summary>
 
