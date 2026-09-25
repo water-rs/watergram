@@ -10,7 +10,7 @@ rust-version = "1.95.0"
 
 [framework.release]
 repository = "https://github.com/water-rs/waterui"
-revision = "e45dc729e34fc41399ec67c98ea76eb577c83cd3"
+revision = "2fb2dee20f93f6c8bd55762cd73e3cf2fd0cd313"
 tag = "v0.5.2"
 
 [framework.metadata]
@@ -48,10 +48,10 @@ waterui-version = "0.5.2"
 
 [framework.experimental-packages.waterui-dew]
 git = "https://github.com/water-rs/dew"
-rev = "96713f93d4ee8cf7125a4905a5d5b5677997b37a"
+rev = "e9ab6a527b88e2750a6386feef053cdb081062c1"
 version = "0.3.0"
 
 [framework.experimental-packages.waterui-winui]
 git = "https://github.com/water-rs/waterui-winui"
-rev = "3601e745aa51a070a71df1aa98bb7faa6b3895a9"
+rev = "04d2be02704276a140f6bd852dd59f9cc23be11d"
 version = "0.1.0"

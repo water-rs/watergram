@@ -1876,3 +1876,34 @@ construction the API already offers.
 tuple `MenuView` should not cost ~30× more than `Computed::constant`.
 **File as upstream issue** (fold per-element `.computed()` → quadratic
 subscription/re-evaluation on every flush).
+
+## r28: upstream history rewrite — pins remapped to rewritten SHAs
+
+water-rs rewrote every commit that carried an AI-tool author (and every
+commit after them); trees are identical, SHAs changed, and the old SHAs
+are off every branch. Pin remapping applied this round:
+
+| repo | old pin | rewritten pin |
+|---|---|---|
+| hydrolysis | `eb962313` | `5c8e570d` |
+| hydrolysis-m3 | `f15d9196` | `7ff961b8` |
+| waterui* (all crates) | `0613b49f` | `2fb2dee2` |
+| water CLI | `314040e1` | `4c71570b` (reinstalled, `water 0.4.3`) |
+
+Earlier waterui/hydrolysis pins inside older entries (`8886bd42`,
+`5fd1c37f`, `c8a39201`) map to `02f9febe` / `cd93c88a` / `56b37983`
+respectively. nami (`5dc2d92e`) and waterkit (`123b0581`) still equal
+their repos' dev heads — unchanged. Every other framework pin moved to
+that repo's current dev head (barcode `7ca3c617`, canvas `61348102`,
+chart `848a82f6`, image `6dab5605`, map-gpu `b9465627`, math
+`a55cf564`, particle `ea6e350a`, video-gpu `fb0d46cd`, lints
+`85c9c1d0`, dew `e9ab6a52`, winui `04d2be02`). Non-water-rs pins
+(rust-block, rust-xcb, lexoliu/vello) untouched.
+
+**Caveat for readers:** every SHA cited inline in older entries below
+refers to the pre-rewrite object — still resolvable in any checkout
+that has it, but no longer on `origin/dev`. File:line references and
+repros are unaffected (trees are identical).
+
+`cargo check` compiles clean on the new pins; `water run` rebuilds and
+launches with no manual step (cli#183/#184 still closed).
