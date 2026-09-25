@@ -673,6 +673,88 @@ mod tests {
         assert_eq!(store.messages.snapshot()[0].my_reaction.as_str(), "");
     }
 
+    /// r27: a secondary click on a bubble merges the context menu into the
+    /// tree with Desktop's item set — the quick reactions on top, then
+    /// Reply / Edit (own only) / Copy text / Pin / Forward / Select /
+    /// Delete — and every command dispatches onto the demo store.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn message_context_menu_desktop_items(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let open_menu = |app: &mut waterui_testing::OffscreenApp, label: &str| {
+            let nodes = app.resolve_elements(&waterui_testing::Selector::default());
+            // The innermost matching node: a row's label also contains the
+            // text, but the context-menu target is the bubble inside it, so
+            // the smallest matching bounds is the one that clicks inside the
+            // bubble.
+            let bounds = nodes
+                .iter()
+                .filter(|el| el.node().label().unwrap_or("").contains(label))
+                .filter_map(|el| el.node().bounds())
+                .min_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
+                .expect("message node bounds");
+            app.secondary_click_at(
+                bounds.x() + bounds.width() / 2.0,
+                bounds.y() + bounds.height() / 2.0,
+            );
+            dump_bounds("/tmp/probe_menu.txt", app.semantic_mut());
+        };
+        for item in [
+            "React 👍", "React ❤️", "React 🔥", "React 😂", "React 😮", "Reply",
+            "Edit", "Copy text", "Pin message", "Forward", "Select", "Delete",
+        ] {
+            let store = store();
+            store.open_chat.set(7);
+            store.messages.set(vec![msg(1, "context me", true)]);
+            let mut app = ui.clone().mount_offscreen({
+                let store = store.clone();
+                move || views::chat_detail(store.clone(), 7).state(&store)
+            });
+            open_menu(&mut app, "context me");
+            app.query().label(item).assert_exists();
+            app.query().label(item).tap();
+            match item {
+                "Reply" => assert_eq!(store.reply_to.snapshot(), Some(1)),
+                "Edit" => assert_eq!(store.editing.snapshot(), Some(1)),
+                "Copy text" => assert!(store.clipboard.snapshot().to_string().contains("context me")),
+                "Pin message" => assert_eq!(store.pinned_id.get(), 1),
+                "Forward" => assert!(store.forward_message.snapshot().is_some()),
+                "Select" => assert_eq!(store.selected_msgs.snapshot(), vec![1]),
+                "Delete" => assert!(store.messages.snapshot().is_empty()),
+                r if r.starts_with("React") => {
+                    let chips = &store.messages.snapshot()[0].reaction_chips;
+                    assert_eq!(chips.len(), 1);
+                    assert!(chips[0].chosen);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// r27: the Edit command only exists on own (outgoing) messages — an
+    /// incoming bubble's menu skips it.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn message_context_menu_edit_only_own(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        store.messages.set(vec![msg(1, "incoming text", false)]);
+        let mut app = ui.clone().mount_offscreen({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
+        let nodes = app.resolve_elements(&waterui_testing::Selector::default());
+        let bounds = nodes
+            .iter()
+            .filter(|el| el.node().label().unwrap_or("").contains("incoming text"))
+            .filter_map(|el| el.node().bounds())
+            .min_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
+            .expect("message node bounds");
+        app.secondary_click_at(
+            (bounds.x() + bounds.width() / 2.0) as f32,
+            (bounds.y() + bounds.height() / 2.0) as f32,
+        );
+        app.query().label("Reply").assert_exists();
+        app.query().label("Edit").assert_not_exists();
+    }
+
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn archive_toggle_rebuilds_list(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
@@ -1192,6 +1274,68 @@ mod tests {
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_outgoing.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_outgoing.png");
+    }
+
+    /// r27 timing probe: mount+settle a tiny view carrying a 14-item
+    /// context_menu vs a 2-item one. waterui's resolve_menu_items cost.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_context_menu_cost(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut app = ui.viewport(400, 300).mount(move || {
+            let s1 = store.clone();
+            let s2 = store.clone();
+            let s3 = store.clone();
+            let s4 = store.clone();
+            let s5 = store.clone();
+            let s6 = store.clone();
+            let s7 = store.clone();
+            let s8 = store.clone();
+            let s9 = store.clone();
+            let s10 = store.clone();
+            let s11 = store.clone();
+            let s12 = store.clone();
+            text("ctx").context_menu((
+                "React 👍".action(move |_: Store| { let _ = &s1; }),
+                "React ❤️".action(move |_: Store| { let _ = &s2; }),
+                "React 🔥".action(move |_: Store| { let _ = &s3; }),
+                "React 😂".action(move |_: Store| { let _ = &s4; }),
+                "React 😮".action(move |_: Store| { let _ = &s5; }),
+                Divider,
+                "Reply".action(move |_: Store| { let _ = &s6; }),
+                "Edit".action(move |_: Store| { let _ = &s7; }),
+                "Copy text".action(move |_: Store| { let _ = &s8; }),
+                "Pin message".action(move |_: Store| { let _ = &s9; }),
+                "Forward".action(move |_: Store| { let _ = &s10; }),
+                "Select".action(move |_: Store| { let _ = &s11; }),
+                Divider,
+                "Delete".action(move |_: Store| { let _ = &s12; }),
+            ))
+        });
+        let t = std::time::Instant::now();
+        app.settle();
+        eprintln!("14-item settle: {:?}", t.elapsed());
+        app.press_named_key("Tab");
+        let t = std::time::Instant::now();
+        app.settle();
+        eprintln!("14-item tab settle: {:?}", t.elapsed());
+    }
+
+    /// r27 timing probe: mount+settle a tiny view carrying a 14-item
+    /// context_menu vs a 2-item one. waterui's resolve_menu_items cost.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_context_menu_cost_2item(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut app = ui.viewport(400, 300).mount(move || {
+            let s1 = store.clone();
+            let s2 = store.clone();
+            text("ctx").context_menu((
+                "Reply".action(move |_: Store| { let _ = &s1; }),
+                "Delete".action(move |_: Store| { let _ = &s2; }),
+            ))
+        });
+        let t = std::time::Instant::now();
+        app.settle();
+        eprintln!("2-item settle: {:?}", t.elapsed());
     }
 
     /// r13-2b bisect: same structure as the row's preview line —
@@ -2918,4 +3062,5 @@ mod tests {
             }
         }
     }
+
 }

@@ -1736,3 +1736,143 @@ for the other shared units.
 **Session workaround (not committed):**
 `ln -sf libwaterui_dylib.so dist/linux/debug/libwaterui_dylib-0267d27d87854afc.so`
 — the file contents are identical; only the name mismatched.
+
+## r27: message context menu (right-click) parity — one real defect, one vocabulary gap, one verified mechanism
+
+Round: right-click a bubble opens Desktop's action set — Reply /
+Edit (own only) / Copy text / Pin·Unpin / Forward / Select /
+Delete — plus a quick-reaction block on top, anchored at the
+pointer and kept inside the window. hydrolysis `eb962313`,
+waterui* `0613b49f`, m3 `f15d9196`.
+
+### r27-1: `MenuItem` can't host a horizontal reaction strip — vocabulary gap (waterui)
+
+Desktop opens a horizontal emoji strip *above* the action list.
+WaterUI's context-menu vocabulary is `Command | Divider | Menu`
+only (`waterui::menu::MenuItem`, resolve at
+`components/menu.rs`): a menu item cannot carry an arbitrary
+`View`, so a pill row of emoji inside the popup is not
+expressible — the closest form is flat `React <emoji>` commands
+with `.selected(my_reaction == e)` marking the chosen one, which
+is what the app ships (views.rs `message_context_menu_desktop`).
+A `MenuItem::Custom(impl View)` (or a `reaction_strip` first-class
+item) would be needed for true parity. **For upstream filing.**
+
+### r27-2: popup stays inside the window at 1400/800/600 — verified, no defect
+
+`WinitWindow::apply_properties` (`src/platform.rs:2588-2597`)
+clamps every window's `target_position` to the current monitor's
+rect (`x.clamp(monitor.x, monitor.x + monitor.w − window.w)`), so
+a pointer near the edge yields an edge-snapped popup instead of
+an off-window one. Live-verified with real pointer events on
+Xvfb: click (1300,550) at 1400×900 → popup 118×672 at
++1283+228 (= 1400−118 ±1, 900−672 exactly); click (700,530) at
+800×900 → +683+228; click (500,545) at 600×900 → +483+228. Both
+axes clamp exactly to the window edge. The app's `.context_menu`
+needs no positioning code — the framework does it.
+
+### r27-3: context-menu popup window maps and dispatches but never paints — renderer defect
+
+**Finding (framework bug, for upstream filing):** on the winit
+renderer a `.context_menu` popup opens as a real
+`Window::style(Borderless)` X11 window with the correct bounds,
+the full menu a11y tree (14 items incl. Edit on own messages), a
+correctly-clamped origin — and renders **zero pixels, forever**.
+
+**Repro:** any `.context_menu` on the winit renderer —
+```rust
+text("right-click me")
+    .context_menu(("Copy".action(|_| ()),
+                   "Delete".action(|_| ())))
+```
+then a real right-click on the item.
+
+**Observed:** the popup window maps at the clamped origin
+(`xwininfo`: `118x672+1283+228`), the a11y/semantic tree carries
+all 14 menu items, and **commands dispatch** — clicking into the
+invisible window hit "Edit" and the app's composer switched to
+editing with the message text prefilled (`r27_after_react.png`).
+But `import -window <popup>` reads only the pixels *behind* the
+window: `r27_popup_new.png` vs `r27_popup_30s.png` are
+pixel-identical chat content; the popup never presents a frame
+over ≥30 s.
+
+**Likely cause:** `animated_popup_panel`
+(`src/renderer/input/popup_menu.rs:181`) starts the panel at
+`opacity 0.0` + scale 0.96 and animates to 0.96/1.0 over 120 ms
+via `.on_appear` — on this renderer the appear animation either
+never ticks or the window never presents at all. The input/hit
+machinery is fully alive; only presentation is dead. This makes
+context menus **unusable** on the winit renderer while being
+functionally correct underneath.
+
+**Expected:** the panel animates in and paints. No app-side
+workaround exists (opacity/scale are inside the framework's
+popup panel).
+
+### r27-4: touch long-press → context menu not reachable — no recognizer in crate (unverified on this box)
+
+The task target "right-click, **or long-press on touch**" is only
+half-verifiable here: hydrolysis `eb962313` contains no
+`LongPress` recognizer anywhere in the crate (grep-verified), and
+this Xvfb+winit environment has no touch device to inject one
+with. A touch long-press cannot open the menu on this backend
+today; whether a touch-hold should synthesize a secondary event
+is a framework decision — **noted for upstream**, not filed,
+since the session cannot demonstrate it end-to-end.
+
+### r27-5: cli#183 + cli#184 verified fixed @ `314040e1` — workarounds dropped
+
+- **cli#183 (env `RUSTFLAGS` replacing `[build] rustflags`)**: the
+  fix landed in cli#185. `water run --backend hydrolysis` was run
+  with no `RUSTFLAGS` in the environment; the managed build picked
+  up `~/.cargo/config.toml`'s shim `-L`/`-l` flags and linked
+  cleanly (the earlier `__isoc23_strtol` failure path). Export
+  removed.
+- **cli#184 (staged dylib name ≠ `DT_NEEDED`)**: fixed by cli#187.
+  `dist/linux/debug/` now stages
+  `libwaterui_dylib-<hash>.so` under the name the binary records —
+  the two `libwaterui_dylib-*.so` symlinks are deleted and the
+  packaged binary launches with no `LD_LIBRARY_PATH` and no
+  manual step. `resources/fonts` still lands beside the exe.
+- Both workaround blocks in r26-3/r26-4 are retired; entries kept
+  for history with their fix references.
+
+### r27-6: tuple `MenuView` with a realistic item count makes `mount`/`settle` effectively hang — n-deep `zip` fold (waterui `0613b49f`)
+
+Every action on the bubble works, so shipping the full Desktop menu
+order meant ~14 `MenuView` items per row × ~25 list rows. Measured on
+this tree (debug, `mount_offscreen`-class semantic runtime):
+
+| construction | mount+settle | full `keyboard_tab_cycles_chat` |
+|---|---|---|
+| no `.context_menu` | baseline | 7.8 s |
+| 2-item tuple on all ~25 bubbles | baseline | 8.0 s |
+| **14-item tuple on ONE bubble** | ~6 s | **99.9 s** |
+| **14-item tuple on all ~25 bubbles** | **~60 s** | **>35 min (killed)** |
+| same 14 items via `Computed::constant(Vec<MenuItem>)` on all | back to baseline | **9.0 s** |
+
+**Where it lives:** the tuple `MenuView` impl
+(`components/foundation/controls/src/menu.rs:502-514`) left-folds
+into `items.zip(&next).map(extend_menu_items).computed()` per element —
+a 14-element tuple is a **13-deep zip chain**, then
+`resolve_menu_items` (:556) adds one more `zip(locale)`. `Vec<T>`
+folds identically (:439-449). Each intermediate `.computed()` node
+subscribes its whole left spine again, so per-flush re-evaluation cost
+grows super-linearly with chain depth — each re-settle re-walks every
+registered menu target's chain (`resolve_menu_items_now` →
+`Command::resolve` → `semantic_text().resolve` + `label.resolve` +
+`Disabled::resolve`, :200-218).
+
+**Escape hatch that already exists in the API:** `impl MenuView for
+Computed<Vec<MenuItem>>` (:359-363) passes the computed through
+untouched — `bubble.context_menu(Computed::constant(vec![...14
+MenuItems]))` collapses the fold to a single node and the suite is
+back to ~9 s with the identical menu content. The app uses this; it is
+not an app-side patch of framework code, just the non-tuple
+construction the API already offers.
+
+**Expected:** a 14-item context menu is ordinary content — `Vec<T>`/
+tuple `MenuView` should not cost ~30× more than `Computed::constant`.
+**File as upstream issue** (fold per-element `.computed()` → quadratic
+subscription/re-evaluation on every flush).

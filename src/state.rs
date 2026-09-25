@@ -2803,6 +2803,26 @@ impl Store {
     pub fn pin_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
         let client = self.client_id.get();
+        if client == 0 {
+            // Demo: pin locally, matching what refresh_pinned would produce
+            // from a real pinChatMessage + getChatPinnedMessage round-trip.
+            let label = self
+                .messages
+                .snapshot()
+                .iter()
+                .find(|r| r.id == message_id)
+                .map(|r| {
+                    if r.text.is_empty() {
+                        r.media_label.clone()
+                    } else {
+                        r.text.clone()
+                    }
+                })
+                .unwrap_or_default();
+            self.pinned_id.set(message_id);
+            self.pinned_label.set(label);
+            return;
+        }
         let store = self.clone();
         spawn_local(async move {
             if functions::pin_chat_message(chat_id, message_id, false, false, client)
@@ -2818,6 +2838,11 @@ impl Store {
     pub fn unpin_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
         let client = self.client_id.get();
+        if client == 0 {
+            self.pinned_id.set(0);
+            self.pinned_label.set_from("");
+            return;
+        }
         let store = self.clone();
         spawn_local(async move {
             if functions::unpin_chat_message(chat_id, message_id, client)
@@ -4036,6 +4061,14 @@ impl Store {
     pub fn delete_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
         let client = self.client_id.get();
+        if client == 0 {
+            // Demo: no TDLib client, so drop the row the way a real
+            // updateDeleteMessages would.
+            let mut msgs = self.messages.snapshot();
+            msgs.retain(|r| r.id != message_id);
+            self.messages.set(msgs);
+            return;
+        }
         spawn_local(async move {
             let _ =
                 functions::delete_messages(chat_id, vec![message_id], true, client).await;

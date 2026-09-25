@@ -1846,26 +1846,75 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let r9 = row.clone();
     let r10 = row.clone();
     let r11 = row.id;
-    let bubble = bubble.context_menu((
-        "Reply".action(move |store: Store| store.start_reply(&r1)),
-        "Select".action(move |store: Store| store.toggle_select(r11)),
-        react_label.action(move |store: Store| store.toggle_reaction(&r6, "👍")),
-        "React ❤️".action(move |store: Store| store.toggle_reaction(&r7, "❤️")),
-        "React 😂".action(move |store: Store| store.toggle_reaction(&r8, "😂")),
-        "React 😮".action(move |store: Store| store.toggle_reaction(&r9, "😮")),
-        "React 😢".action(move |store: Store| store.toggle_reaction(&r10, "😢")),
-        "Forward".action(move |store: Store| store.start_forward(&r2)),
-        pin_label.action(move |store: Store| {
-            if pinned {
-                store.unpin_message(row.id)
-            } else {
-                store.pin_message(row.id)
-            }
-        }),
-        "Copy".action(move |store: Store| store.copy_message(&r3)),
-        "Edit".action(move |store: Store| store.start_edit(&r4)),
-        "Delete".action(move |store: Store| store.delete_message(r5)),
-    ));
+    let my_reaction = row.my_reaction.clone();
+    // Telegram Desktop order: a quick-reaction block on top, then the
+    // message actions. `MenuItem` carries commands/dividers/submenus only —
+    // a horizontal emoji strip inside the popup isn't expressible, so the
+    // quick reactions stay flat commands with the chosen one marked
+    // (DOGFOOD r27-1). Edit applies to own messages only.
+    let mut menu_items: Vec<MenuItem> = vec![
+        react_label
+            .action(move |store: Store| store.toggle_reaction(&r6, "👍"))
+            .selected(my_reaction == "👍")
+            .into(),
+        "React ❤️"
+            .action(move |store: Store| store.toggle_reaction(&r7, "❤️"))
+            .selected(my_reaction == "❤️")
+            .into(),
+        "React 🔥"
+            .action(move |store: Store| store.toggle_reaction(&r8, "🔥"))
+            .selected(my_reaction == "🔥")
+            .into(),
+        "React 😂"
+            .action(move |store: Store| store.toggle_reaction(&r9, "😂"))
+            .selected(my_reaction == "😂")
+            .into(),
+        "React 😮"
+            .action(move |store: Store| store.toggle_reaction(&r10, "😮"))
+            .into(),
+        Divider.into(),
+        "Reply"
+            .action(move |store: Store| store.start_reply(&r1))
+            .into(),
+    ];
+    if row.outgoing {
+        menu_items.push(
+            "Edit"
+                .action(move |store: Store| store.start_edit(&r4))
+                .into(),
+        );
+    }
+    menu_items.extend([
+        "Copy text"
+            .action(move |store: Store| store.copy_message(&r3))
+            .into(),
+        pin_label
+            .action(move |store: Store| {
+                if pinned {
+                    store.unpin_message(row.id)
+                } else {
+                    store.pin_message(row.id)
+                }
+            })
+            .into(),
+        "Forward"
+            .action(move |store: Store| store.start_forward(&r2))
+            .into(),
+        "Select"
+            .action(move |store: Store| store.toggle_select(r11))
+            .into(),
+        Divider.into(),
+        "Delete"
+            .action(move |store: Store| store.delete_message(r5))
+            .into(),
+    ]);
+    // A `Vec<MenuItem>` keeps `MenuView::into_menu_items` a flat constant —
+    // the 14-element tuple builds a left-folded `zip` chain 13 deep whose
+    // per-flush re-evaluation makes `mount`/`settle` effectively hang
+    // (DOGFOOD r27-6).
+    let bubble = bubble
+        .context_menu(Computed::constant(menu_items))
+        .anyview();
 
     let placed = if row.outgoing {
         hstack((spacer(), bubble)).anyview()
