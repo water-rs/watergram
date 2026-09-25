@@ -219,18 +219,9 @@ pub struct MessageRow {
     /// Sender profile-photo small file id (0 → initials).
     pub sender_photo: i32,
     /// Service row (pin/join/etc.) — renders as a centered label, not a
-    /// bubble; excluded from sender runs and multi-select. `set_messages`
-    /// folds these into the neighboring row's `service_above`/`service_below`
-    /// lines (Desktop draws them as interstitial lines, not list rows); a
-    /// service row reaches the view only when no message row exists to
-    /// carry it.
+    /// bubble; excluded from sender runs and multi-select. Kept as its own
+    /// list row (the r30 fold was reverted — DOGFOOD r31-1).
     pub is_service: bool,
-    /// Folded service lines rendered above this row's bubble, after the
-    /// day/unread dividers — chronological order.
-    pub service_above: Vec<Str>,
-    /// Folded service lines rendered below this row's bubble — only used
-    /// when a service event has no following message row to attach to.
-    pub service_below: Vec<Str>,
 }
 
 /// A single poll answer option as shown inside a poll bubble.
@@ -1129,8 +1120,6 @@ impl Store {
             forwarded_from: Str::from(fwd.to_string()),
             poll: None,
             is_service: false,
-            service_above: Vec::new(),
-            service_below: Vec::new(),
         };
         let svc = |id: i64, text: &str| {
             let mut r = m(id, "", text, "", false, false, "", "", "", "");
@@ -1187,8 +1176,8 @@ impl Store {
         msgs.push(m(25, "Alice", "six distinct reactions", "09:53", false, false, "", "👍4 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
         msgs.push(m(26, "", "🚀🚀", "09:54", true, true, "", "👍1 ❤️1 🔥1", "", ""));
         msgs.push(m(27, "Alice", "👀", "09:55", false, false, "", "👍2 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
-        // Trailing service line — folds into m27's `service_below`, so the
-        // bottom of the chat exercises that path too.
+        // A trailing service line — the bottom of the chat carries a
+        // service row after the last message row too.
         msgs.push(svc(28, "Lexo created the group"));
         // A reply quote inside the visible window for live tap-to-jump
         // verification: m24 quotes m23.
@@ -1813,8 +1802,6 @@ impl Store {
             edited: m.edit_date != 0,
             poll,
             is_service,
-            service_above: Vec::new(),
-            service_below: Vec::new(),
         }
     }
 
@@ -2820,44 +2807,6 @@ impl Store {
     /// Sets `messages` after marking the first row of each distinct local
     /// day with `day_header` + `day_label` (the date pill).
     pub fn set_messages(&self, mut rows: Vec<MessageRow>) {
-        // Service events are interstitial chrome in Desktop's chat view
-        // (same treatment as day headers, which already live inside a
-        // row): fold each service row's text into the FOLLOWING message
-        // row's `service_above` — a trailing run goes into the previous
-        // row's `service_below`. The folded row never becomes a list
-        // item, so it doesn't take the list's one-line minimum height
-        // (DOGFOOD r30-1).
-        let mut folded: Vec<MessageRow> = Vec::with_capacity(rows.len());
-        let mut pending: Vec<MessageRow> = Vec::new();
-        for mut r in rows.drain(..) {
-            if r.is_service {
-                pending.push(r);
-            } else {
-                // Keep the fold idempotent: set_messages also re-runs on
-                // already-folded lists (regroup, edits, jumps), where
-                // `pending` is empty — clearing `service_above` there
-                // would silently drop every folded line.
-                if !pending.is_empty() {
-                    let mut lines: Vec<Str> =
-                        pending.drain(..).map(|s| s.text).collect();
-                    lines.append(&mut r.service_above);
-                    r.service_above = lines;
-                }
-                folded.push(r);
-            }
-        }
-        if pending.is_empty() {
-            rows = folded;
-        } else if let Some(last) = folded.last_mut() {
-            last.service_below
-                .extend(pending.drain(..).map(|s| s.text));
-            rows = folded;
-        } else {
-            // Nothing but service lines — keep them as standalone rows
-            // rather than dropping content.
-            folded.extend(pending);
-            rows = folded;
-        }
         let mut prev_day = 0i64;
         for r in &mut rows {
             r.day_header = r.day != prev_day;
@@ -2982,8 +2931,6 @@ impl Store {
                 show_avatar: false,
                 sender_photo: 0,
                 is_service: true,
-                service_above: Vec::new(),
-                service_below: Vec::new(),
             });
             self.set_messages(rows);
             return;

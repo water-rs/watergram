@@ -185,6 +185,7 @@ mod tests {
     use waterui::accessibility::AccessibilityRole;
     use waterui::layout::frame::Frame;
     use waterui::prelude::*;
+    use waterui::id::IdentifiableExt;
     use waterui::reactive::collection::SignalCollection;
     use waterui_testing::{Role, Styled, UiBuilder};
 
@@ -249,8 +250,6 @@ mod tests {
             show_avatar: false,
             sender_photo: 0,
             is_service: false,
-            service_above: Vec::new(),
-            service_below: Vec::new(),
         }
     }
 
@@ -882,12 +881,10 @@ mod tests {
         for row in [find(17), find(19)] {
             assert!(row.group_first && row.group_last && row.show_avatar);
         }
-        // The service events fold into their following rows' service
-        // lines (DOGFOOD r30-1): no is_service row survives set_messages,
-        // and m16/m19 carry the lines above their bubbles.
-        assert!(rows.iter().all(|r| !r.is_service));
-        assert_eq!(find(16).service_above.as_slice(), &[Str::from("Alice pinned a message")]);
-        assert_eq!(find(19).service_above.as_slice(), &[Str::from("Bob joined the group")]);
+        // The service events are their own list rows again (r31: fold
+        // reverted — the row-height gap tracks waterui#1249).
+        assert!(rows.iter().any(|r| r.is_service && r.text == "Alice pinned a message"));
+        assert!(rows.iter().any(|r| r.is_service && r.text == "Bob joined the group"));
         // The Alice m22-m25 run carries the avatar on its last row (m25);
         // m26 breaks it (outgoing) so m27 is a one-message run with both marks.
         let (run_first, run_mid, run_last, solo) = (find(22), find(23), find(25), find(27));
@@ -987,29 +984,21 @@ mod tests {
         let before = store.messages.snapshot().len();
         store.pin_message(11);
         let rows = store.messages.snapshot();
-        // The pin's service event folds into the last row's service lines
-        // (no new list row — DOGFOOD r30-1).
-        assert_eq!(rows.len(), before);
+        // The pin's service event appends its own service row.
+        assert_eq!(rows.len(), before + 1);
         let last = rows.last().unwrap();
-        assert!(!last.is_service);
-        assert_eq!(
-            last.service_below.as_slice(),
-            &[
-                Str::from("Lexo created the group"),
-                Str::from("You pinned a message"),
-            ]
-        );
+        assert!(last.is_service);
+        assert_eq!(last.text, Str::from("You pinned a message"));
         assert_eq!(store.pinned_id.get(), 11);
     }
 
     #[test]
     fn service_row_not_selectable() {
-        // Folded service lines have no selectable row, and the service
-        // event's id itself refuses selection (Desktop matches).
+        // Service rows refuse selection — Desktop's service lines have
+        // no multi-select affordance either.
         let store = store();
         store.open_chat.set(1);
         store.set_messages(Store::demo_conversation());
-        assert!(store.messages.snapshot().iter().all(|r| !r.is_service));
         store.toggle_select(15);
         store.toggle_select(18);
         assert!(store.selected_msgs.snapshot().is_empty());
@@ -1019,25 +1008,25 @@ mod tests {
 
     #[test]
     fn service_rows_break_runs() {
-        // "Alice pinned a message" folds into m16 — the event still
-        // separates Alice's m14 from outgoing m16 (both keep solo-run
-        // marks on their shared side).
+        // "Alice pinned a message" sits between m14 and m16 as its own
+        // row — the event still separates Alice's m14 from outgoing m16
+        // (both keep solo-run marks on their shared side).
         let store = store();
         store.open_chat.set(1);
         store.set_messages(Store::demo_conversation());
         let rows = store.messages.snapshot();
         let m14 = rows.iter().position(|r| r.id == 14).unwrap();
         let m16 = rows.iter().position(|r| r.id == 16).unwrap();
-        assert_eq!(m16 - m14, 1, "no list row between m14 and m16");
+        assert_eq!(m16 - m14, 2, "the service row sits between m14 and m16");
+        assert!(rows[m14 + 1].is_service);
         assert!(rows[m14].group_last, "m14 ends its run before the service line");
         assert!(rows[m16].group_first, "m16 starts a run after the service line");
-        assert_eq!(rows[m16].service_above.as_slice(), &[Str::from("Alice pinned a message")]);
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
-    fn folded_service_lines_render_in_row(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
-        // The folded service text lives inside the following row's column,
-        // not as its own list item — the mounted tree still carries it.
+    fn service_row_renders_in_list(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        // The service row is its own list item again (r31 revert) — the
+        // mounted tree still carries its pill text.
         let store = store();
         store.open_chat.set(7);
         let mut rows = vec![msg(1, "hello", false), msg(2, "back", true)];
@@ -1071,8 +1060,8 @@ mod tests {
         let _ = app.snapshot().save_png("/tmp/probe_pill_alone.png");
     }
 
-    /// r30: the folded service pill must paint — bounds dump + raster of a
-    /// row carrying service_above lines.
+    /// r30/r31: the service pill must paint — bounds dump + raster of a
+    /// service list row.
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_service_pill_bounds(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
@@ -1478,6 +1467,53 @@ mod tests {
         let t = std::time::Instant::now();
         app.settle();
         eprintln!("2-item settle: {:?}", t.elapsed());
+    }
+
+    /// r31: dump every element's bounds on the real chat page — used to
+    /// identify the 320x1 grey strips rendering at the bottom of the
+    /// photo / forwarded / poll rows on the live renderer.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_chat_strips(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.open_chat.set(1);
+        store.regroup_messages();
+        let st = store.clone();
+        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
+            views::chat_detail(st.clone(), 1).state(&st)
+        });
+        app.semantic_mut().settle();
+        store.jump_to_message(17);
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_strips.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/probe_strips.png");
+    }
+
+    /// r31-2a minimal reproduction: a List row whose content's intrinsic
+    /// height changes after first measure must be re-measured. The row's
+    /// extent is cached in `VirtualExtentIndex` (hydrolysis
+    /// src/widgets/layout/list.rs:1163-1176) and the index is only reset by
+    /// the contents-watch (list.rs:354-358 / 492-517) — a signal-driven
+    /// intrinsic change touches neither, so the row keeps its stale extent.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_list_row_remeasure(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::list::{List, ListItem};
+        let tall = Binding::bool(false);
+        let t = tall.clone();
+        let size = t.map(|t| if t { 160.0f64 } else { 20.0 });
+        let rows = Binding::container(vec![1_u64.self_id()]);
+        let mut app = ui.viewport(400, 700).mount_offscreen(move || {
+            let size = size.clone();
+            List::for_each(SignalCollection::new(rows.clone()), move |_id: _| {
+                ListItem::new(text("growing row").size(size.clone()))
+            })
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/rems_before.txt", app.semantic_mut());
+        tall.set(true);
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/rems_after.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/rems_after.png");
     }
 
     /// r13-2b bisect: same structure as the row's preview line —

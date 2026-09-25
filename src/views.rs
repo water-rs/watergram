@@ -1609,8 +1609,7 @@ pub(crate) fn service_pill_for_test() -> AnyView {
     service_pill(Str::from("Alice pinned a message"))
 }
 
-/// Standalone service row — reached only when no message row exists to
-/// carry the line (set_messages folds them into neighbors otherwise).
+/// Standalone service row — every service event is its own List row.
 #[allow(needless_anyview)] // AnyView is the concrete type: `message_bubble`'s
 // tail returns AnyView, so `-> impl View` would not unify the two sites.
 fn service_line(row: &MessageRow) -> AnyView {
@@ -1943,7 +1942,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         hstack((bubble, spacer())).anyview()
     };
     // Desktop's vertical order inside a row: day divider, unread
-    // divider, folded service lines, the bubble, trailing service lines.
+    // divider, then the bubble itself.
     let mut column: Vec<AnyView> = Vec::new();
     if row.day_header {
         column.push(
@@ -1982,13 +1981,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             .anyview(),
         );
     }
-    for line in &row.service_above {
-        column.push(service_pill(line.clone()));
-    }
     column.push(placed);
-    for line in &row.service_below {
-        column.push(service_pill(line.clone()));
-    }
     vstack(column).spacing(0.0).anyview()
 }
 

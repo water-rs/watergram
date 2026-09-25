@@ -2090,3 +2090,126 @@ was non-empty at the end. The fold is now idempotent
 (prepend/extend guarded on `!pending.is_empty()`); pills paint
 on GPU at 1400/800/600. Not a framework defect — recorded here
 because earlier captures made it look like one.
+
+## r31: fold reverted — spacing gap blocked on waterui#1249
+
+### r31-1: service events are their own `List` rows again
+
+The r30 fold was reverted per maintainer decision: routing
+service events through neighbouring rows' columns worked
+around a real framework gap, and the idempotency bug it
+needed (r30-3) showed how brittle it was. The gap is filed as
+**water-rs/waterui#1249** (per-row insets + a minimum row
+height) — an API decision, not in progress. `service_above`/
+`service_below` and the `pending` drain are deleted; service
+rows render through `service_line` as their own list items
+again, which means each one pays the 56 pt one-line floor
+(r30-1) until #1249 lands — visible as ~30 px of extra space
+above and below the pill at 1400/800/600 (r31chat*.png). No
+other spacing change was made.
+
+### r31-2a: `List` never re-measures a row whose content changed size — hydrolysis defect (minimal reproduction)
+
+A `List` row's extent is measured once — the first time the
+row enters the visible window — cached in
+`VirtualExtentIndex`, and **never re-measured** until the
+whole index resets:
+
+- `src/widgets/layout/list.rs:1162-1177` (flush): the cached
+  `extent_index.measured(index)` wins unconditionally;
+  `measure_list_item_row_height` runs only on a cache miss.
+- The index resets only on (a) a `config.contents` watch
+  firing — the rows *collection* changed
+  (`list.rs:354-360` sets `rows_dirty`, consumed by
+  `prepare_rows` at `:492-517`), or (b) section-chrome arrival
+  (`:1090-1096`). A row's own content changing intrinsic
+  size touches neither path.
+- Because the row subview also keeps its stale slot
+  (`flush_in_rect` at `:1568-1574` bounds it to
+  `list_content_rect`, which vertically *centers* the content
+  inside the slot, `:1946-1959`), content that grew is
+  clipped top and bottom on the real renderer.
+
+Reproduced live: the photo row (`Alice 📷 photo.jpg`,
+media_file seeded → `when(has, Photo.max_width(320).clip(..))`
+in `media_slot`) measures **104.8 pt** for content that lays
+out ~262 pt — the row was measured while `file_signal`'s
+`has` was still false (the `otherwise` file-card branch) or
+before the image's intrinsic arrived; `has`/decode landed
+afterwards and the stale extent stayed. a11y dump from a
+headless mount jumping to the row:
+
+```
+#59 Role(ListItem) "Alice 📷 photo.jpg 09:46" bounds=(0, 151.9, 1400, 104.8)
+    children at y≈555-582 — avatar "A" (39.9,581.7),
+    "📷 photo.jpg" (74,555.9), "09:46" (246,582.6) —
+    ~330 pt below the row, i.e. the laid-out content
+    overflowing its stale slot
+#65 Role(Image) bounds=(-146, 192, 640, 360) — intrinsic
+    640×360 centered into a ~340-wide frame
+```
+
+On GPU the row shows only the image's top slice — no bottom
+rounded corners, no timestamp (r31_final1400.png, photo
+visible y≈456-519 inside a ~156 px row).
+
+**Minimal reproduction** (runnable in this repo —
+`probe_list_row_remeasure`, lib.rs): a one-row `List` whose
+row content is `text("growing row").size(signal)`, signal
+20 → 160 after mount:
+
+```
+before: Role(ListItem) bounds=(0,0,400,56)   Role(Label) (16,16.28,368,23.44)
+after : Role(ListItem) bounds=(0,0,400,56)   Role(Label) (16,10,368,36)
+        — row keeps its cached extent (56 pt floor) while
+          the label re-measures to 160 pt and is squeezed
+          into the stale 36 pt content rect
+```
+
+Expected: the list re-measures the row's extent when the row
+subview's measured height changes (e.g. compare the freshly
+measured extent with `extent_index.measured(index)` each
+flush, or invalidate the entry when the row's own signals
+fire). Observed: the extent is permanent until the rows
+collection changes. No app-side workaround exists that does
+not route around the framework — do not want to
+over-provision `max_height` on every row — so the fix
+belongs upstream. Blocks the r31 photo row until then.
+
+### r31-2b: two stray 1 px horizontal lines — same defect, not a divider
+
+The two hairlines under Bob's forwarded bubble and under the
+poll bubble in r30chat1400.png are **not** a divider, row
+separator, or clip edge:
+
+- m3's `draw_list_separator` is a no-op
+  (hydrolysis-m3 `src/layout/list.rs:164`), and neither row
+  carries `day_header`/`unread_divider` (checked the seed).
+- Measured on GPU: each strip sits at exactly one row's
+  bottom edge (`row_rect.y1`) — one under the `svc18` row,
+  one under `m19`'s row — spanning the chat width, ~1 px
+  tall, lavender-grey blends.
+- Every row fills its full `row_rect` with the theme surface
+  (hydrolysis `list.rs:1278` → m3 `draw_row_background`
+  `list.rs:58`, `fill_rect(bounds, surface)`). The ~1 px
+  antialiasing seams between adjacent row fills reveal
+  whatever paints beneath.
+- What paints beneath is the photo row's **overflow**: its
+  content (~262-312 pt) is flushed into the stale 104.8 pt
+  slot and spills below the row (r31-2a) — row backgrounds
+  below cover it except at the seams.
+
+Verified by experiment, no code change needed:
+
+- Scroll the photo row off screen and back: strips redraw at
+  the same row boundaries; scroll past the photo entirely:
+  zero strips anywhere in the list (scroll_down.png).
+- Removing the photo's `.clip(RoundedRectangle)` moved/reshaped
+  the strips with the wider unclipped overflow (bisect1_jump.png)
+  — clip is innocent; restored.
+
+So the strips are the second symptom of the stale-extent
+defect: no overflow → nothing to reveal → no strips. The fix
+is the same upstream re-measure as r31-2a; suppressing them
+app-side would mean hiding the overflow with another layout
+hack — not done per the no-workaround rule.
