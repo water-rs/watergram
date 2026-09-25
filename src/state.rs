@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
 use waterui::color::Srgb;
+use waterui::theme::color::{Accent, SurfaceVariant};
 use waterui::form::secure::Secure;
 use waterui::text::styled::{Style, StyledStr};
 use waterui::layout::{Rect, ScrollController, Size};
@@ -183,9 +184,18 @@ pub struct MessageRow {
     /// Emoji the current user has chosen on this message, if any.
     pub my_reaction: Str,
     /// Rich-text body; empty when the message has no formatting entities.
+    /// For spoiler rows this is the MASKED variant (spoiler spans colored
+    /// like the bubble fill); `styled_open` holds the revealed text.
     pub styled: StyledStr,
-    /// Link-preview card line (site — title · description).
-    pub webpage: Str,
+    /// Unmasked styled body for spoiler rows after the user taps to
+    /// reveal; empty otherwise.
+    pub styled_open: StyledStr,
+    /// The message carries spoiler entities (masked spans).
+    pub has_spoiler: bool,
+    /// Link-preview card: site name, title and description (empty = none).
+    pub link_site: Str,
+    pub link_title: Str,
+    pub link_desc: Str,
     /// "Forwarded from X" attribution, empty when not forwarded.
     pub forwarded_from: Str,
     pub failed: bool,
@@ -337,6 +347,8 @@ pub struct Store {
     pub editing: Binding<Option<i64>>,
     /// (from_chat_id, message_id) of the message being forwarded.
     pub forward_message: Binding<Option<(i64, i64)>>,
+    /// Message ids whose spoiler spans have been revealed by tap.
+    pub revealed_spoilers: Binding<Vec<i64>>,
     pub attach: Binding<Vec<Url>>,
     pub clipboard: Binding<Str>,
     pub new_chat_input: Binding<Str>,
@@ -655,9 +667,12 @@ fn fmt_day_label(day: i64) -> Str {
 }
 
 /// Convert a TDLib `FormattedText` (UTF-16 entity offsets) into a
-/// `StyledStr`: bold/italic/underline/strike/mono, spoiler as a black
-/// block, links in accent blue, quotes on a light background.
-pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
+/// `StyledStr`: bold/italic/underline/strike/mono, links in accent blue,
+/// quotes on a light background. `mask`: spoiler chunks get `foreground =
+/// mask` so the text disappears into the bubble fill until revealed
+/// (hydrolysis drops per-span `background`, so a black-on-black box is
+/// not possible — see DOGFOOD r32-2). `None` leaves spoiler text visible.
+pub(crate) fn styled_from_formatted_mask(ft: &types::FormattedText, mask: Option<Color>) -> StyledStr {
     let mut styled = StyledStr::empty();
     if ft.entities.is_empty() {
         styled.push_str(ft.text.clone());
@@ -743,10 +758,10 @@ pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
         if link {
             st = st.foreground(Srgb::try_from_hex("#1F6FC0").unwrap());
         }
-        if spoiler {
-            st = st
-                .foreground(Srgb::BLACK)
-                .background(Srgb::BLACK);
+        if spoiler
+            && let Some(mask) = &mask
+        {
+            st = st.foreground((*mask).clone());
         }
         if quote {
             st = st.background(Srgb::try_from_hex("#E8E8E8").unwrap());
@@ -754,6 +769,18 @@ pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
         styled.push(seg.to_string(), st);
     }
     styled
+}
+
+/// Convenience: entities rendered with spoiler spans masked by `mask`.
+pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
+    styled_from_formatted_mask(ft, Some(Color::from(Srgb::BLACK)))
+}
+
+/// True when `ft` carries at least one spoiler entity.
+pub(crate) fn has_spoiler_entity(ft: &types::FormattedText) -> bool {
+    ft.entities
+        .iter()
+        .any(|e| matches!(e.r#type, enums::TextEntityType::Spoiler))
 }
 
 fn position_in<'a>(chat: &'a types::Chat, list: &enums::ChatList) -> Option<&'a types::ChatPosition> {
@@ -848,6 +875,7 @@ impl Store {
             reply_to: Binding::default(),
             editing: Binding::default(),
             forward_message: Binding::default(),
+            revealed_spoilers: Binding::<Vec<i64>>::default(),
             attach: Binding::<Vec<Url>>::default(),
             clipboard: Binding::container(Str::from("")),
             new_chat_input: Binding::container(Str::from("")),
@@ -1116,7 +1144,11 @@ impl Store {
             edited: false,
             my_reaction: Str::from(""),
             styled: StyledStr::empty(),
-            webpage: Str::from(""),
+            styled_open: StyledStr::empty(),
+            has_spoiler: false,
+            link_site: Str::from(""),
+            link_title: Str::from(""),
+            link_desc: Str::from(""),
             forwarded_from: Str::from(fwd.to_string()),
             poll: None,
             is_service: false,
@@ -1136,6 +1168,10 @@ impl Store {
         // real rows carry plain text alongside the styled body
         msgs[3].text = Str::from("check https://waterui.dev for the docs");
         msgs[3].edited = true;
+        // A link message carries a page preview card (r32-1).
+        msgs[3].link_site = Str::from("waterui.dev");
+        msgs[3].link_title = Str::from("WaterUI — native apps in Rust");
+        msgs[3].link_desc = Str::from("One Rust codebase for iOS, Android, web and desktop — declarative views, fine-grained reactive state, native widgets.");
         msgs[1].reply_to_id = 10;
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
         // Service rows (Desktop's centered grey lines): the pin that put
@@ -1179,6 +1215,28 @@ impl Store {
         // A trailing service line — the bottom of the chat carries a
         // service row after the last message row too.
         msgs.push(svc(28, "Lexo created the group"));
+        // A spoiler message: the masked span currently renders black on
+        // black forever; r32-2 makes it reveal on tap like Desktop.
+        {
+            let spoiler_text = "no spoilers please — it's a trap";
+            let mut spoiler_msg =
+                m(29, "Carol", spoiler_text, "09:56", false, false, "", "", "", "");
+            let ft = types::FormattedText {
+                text: spoiler_text.into(),
+                entities: vec![types::TextEntity {
+                    offset: 21,
+                    length: 11,
+                    r#type: enums::TextEntityType::Spoiler,
+                }],
+            };
+            spoiler_msg.has_spoiler = true;
+            spoiler_msg.styled = styled_from_formatted_mask(
+                &ft,
+                Some(Color::from(SurfaceVariant)),
+            );
+            spoiler_msg.styled_open = styled_from_formatted_mask(&ft, None);
+            msgs.push(spoiler_msg);
+        }
         // A reply quote inside the visible window for live tap-to-jump
         // verification: m24 quotes m23.
         msgs[14].reply_excerpt = Str::from("single reaction on text");
@@ -1688,25 +1746,38 @@ impl Store {
                 .map(|c| m.id <= c.last_read_outbox_message_id)
                 .unwrap_or(false);
         let (reactions, my_reaction) = Self::reactions_info(m);
-        let (styled, webpage) = if let enums::MessageContent::MessageText(t) = &m.content {
-            (
-                styled_from_formatted(&t.text),
-                t.link_preview
-                    .as_ref()
-                    .map(|p| {
-                        let desc = p.description.text.trim();
-                        if desc.is_empty() {
-                            format!("{} — {}", p.site_name, p.title)
-                        } else {
-                            format!("{} — {} · {}", p.site_name, p.title, desc)
-                        }
-                    })
-                    .unwrap_or_default()
-                    .into(),
-            )
-        } else {
-            (StyledStr::empty(), Str::from(""))
-        };
+        let (styled, styled_open, has_spoiler, link_site, link_title, link_desc) =
+            if let enums::MessageContent::MessageText(t) = &m.content {
+                let mask = if m.is_outgoing {
+                    Color::from(Accent)
+                } else {
+                    Color::from(SurfaceVariant)
+                };
+                let spoiler = has_spoiler_entity(&t.text);
+                (
+                    styled_from_formatted_mask(&t.text, spoiler.then_some(mask)),
+                    if spoiler {
+                        styled_from_formatted_mask(&t.text, None)
+                    } else {
+                        StyledStr::empty()
+                    },
+                    spoiler,
+                    t.link_preview.as_ref().map(|p| p.site_name.clone().into()).unwrap_or_default(),
+                    t.link_preview.as_ref().map(|p| p.title.clone().into()).unwrap_or_default(),
+                    t.link_preview.as_ref().map(|p| {
+                        p.description.text.clone().into()
+                    }).unwrap_or_default(),
+                )
+            } else {
+                (
+                    StyledStr::empty(),
+                    StyledStr::empty(),
+                    false,
+                    Str::from(""),
+                    Str::from(""),
+                    Str::from(""),
+                )
+            };
         let forwarded_from = m
             .forward_info
             .as_ref()
@@ -1778,7 +1849,11 @@ impl Store {
             outgoing: m.is_outgoing,
             read_out,
             styled,
-            webpage,
+            styled_open,
+            has_spoiler,
+            link_site,
+            link_title,
+            link_desc,
             forwarded_from,
             can_edit: m.is_outgoing,
             reply_excerpt,
@@ -2914,7 +2989,11 @@ impl Store {
                 reaction_chips: Vec::new(),
                 my_reaction: Str::from(""),
                 styled: StyledStr::empty(),
-                webpage: Str::from(""),
+                styled_open: StyledStr::empty(),
+                has_spoiler: false,
+                link_site: Str::from(""),
+                link_title: Str::from(""),
+                link_desc: Str::from(""),
                 forwarded_from: Str::from(""),
                 failed: false,
                 pending: false,
@@ -4208,6 +4287,22 @@ impl Store {
             row.text.clone()
         };
         self.reply_label.set(label);
+    }
+
+    /// Reveal a message's spoiler spans (Desktop: tap the mask).
+    pub fn reveal_spoiler(&self, message_id: i64) {
+        self.revealed_spoilers.with_mut(|v| {
+            if !v.contains(&message_id) {
+                v.push(message_id);
+            }
+        });
+    }
+
+    /// Reactive `true` while this row's spoiler spans stay masked.
+    pub fn spoiler_masked(&self, message_id: i64) -> Computed<bool> {
+        self.revealed_spoilers
+            .map(move |v: Vec<i64>| !v.contains(&message_id))
+            .computed()
     }
 
     pub fn start_edit(&self, row: &MessageRow) {

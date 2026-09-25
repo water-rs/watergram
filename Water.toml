@@ -10,7 +10,7 @@ rust-version = "1.95.0"
 
 [framework.release]
 repository = "https://github.com/water-rs/waterui"
-revision = "edc75f2ba964394ea4b407c09805ab10ab3ce4b6"
+revision = "25e8b1a34715a4492fed8701262b716fde175783"
 tag = "v0.5.2"
 
 [framework.metadata]

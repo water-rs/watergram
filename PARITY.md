@@ -54,10 +54,11 @@
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
 | 发送中/失败状态 | ✅ | `updateMessageSendSucceeded`/`Failed` 行内图标；点 ✗ → `resendMessages` | `resend_failed_marks_pending` |
 | 定时消息 / 静默发送 | ✅ | `sendMessage(MessageSendOptions{disable_notification,scheduling_state=SendAtDate})` — 发送按钮右键 | — (send_opt 路径） |
-| 链接预览 | ✅ | `MessageText.link_preview` → 站内一行卡片（site—title·desc) | `link_preview_line_shows` |
+| 链接预览 | ✅ | `MessageText.link_preview` → Desktop 式预览卡片：accent 竖条 + site·title·desc（外发气泡内 AccentForeground/内 Accent） | `link_preview_line_shows` `link_preview_card_shows_site_title_desc` |
+| 剧透点按揭示 | ✅ | Spoiler 实体 → 遮掩态（masked 文本前景=气泡填充融入）+ 点按揭示（`revealed_spoilers` 切换 `.visible`，a11y Button「Hidden text — tap to reveal」揭示后隐藏） | `spoiler_tap_reveals` `spoiler_tap_reveals_offscreen` |
 | 富文本实体（粗/斜/剧透/超链） | ✅ | `FormattedText.entities` → `StyledStr`（粗/斜/下划/删除/剧透/代码/引用/链接，UTF-16→byte 映射+重叠合并） | `styled_entities_merge` |
 | 转发带出处徽标 | ✅ | `m.forward_info.origin`（User/HiddenUser/Chat/Channel 出处行内徽标） | — |
-| 消息右键菜单（回复/编辑/复制/转发/删除/反应/置顶/选择） | ✅ | 行 context_menu → 对应 API：5×React(.selected)/Reply/Edit(仅own)/Copy/Pin·Unpin/Forward/Select/Delete；指针锚定+窗口内钳制已实测(1400/800/600)；winit 弹窗不绘制见 DOGFOOD r27-3 | `message_context_menu_desktop_items` `message_context_menu_edit_only_own` |
+| 消息右键菜单（回复/编辑/复制/转发/删除/反应/置顶/选择） | ✅ | 行 context_menu → 对应 API：5×React(.selected)/Reply/Edit(仅own)/Copy/Pin·Unpin/Forward/Select/Delete；指针锚定+窗口内钳制已实测(1400/800/600)；winit 弹窗于 hydrolysis f84c538 已恢复绘制（r32_ctx.png，DOGFOOD r27-3→#118） | `message_context_menu_desktop_items` `message_context_menu_edit_only_own` |
 | 多选消息（批量删除/批量转发） | ✅ | `deleteMessages(revoke)` / `forwardMessages` 批处理 + 选择条（☑/☐ 行内勾选） | `multi_select_bar_appears` |
 | 投票显示与投票 | ✅ | `MessagePoll` → 问题/选项/得票条/已选✓/总数；`setPollAnswer` 投票 | `poll_renders_in_bubble` |
 | 创建投票 | ✅ | 附件菜单 → 创建投票：问题 + 2–10 选项 + 匿名/多选/测验标记 → `sendMessage(inputMessagePoll)`，含 Regular/Quiz 两型与 correct_option_id | `poll_creator_sends_and_resets` `poll_option_remove_shifts` |
@@ -133,6 +134,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：86 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
+- 已实现 ✅：87 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。

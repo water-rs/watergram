@@ -1815,6 +1815,14 @@ functionally correct underneath.
 workaround exists (opacity/scale are inside the framework's
 popup panel).
 
+**r32 update — appears FIXED on hydrolysis `f84c538`:** a live
+right-click opened a fully-painted popup — all 14 items
+visible at the clamped origin (`r32_ctx.png`), and a menu
+command dispatched on click (`r32_pin_menu.png` shows the
+pin applied). The Mesa-26.2.3 wolfi run also clears the
+depth-32 presentation panic path. Recommending #118 for
+closure pending upstream confirmation.
+
 ### r27-4: `.context_menu` does not open on a long press — no long-press binding (hydrolysis#191 — recognizer works; `context_menu` must open on touch/pen press-and-hold, not a held mouse button)
 
 **Original claim was wrong in scope.** I grepped hydrolysis's own
@@ -2110,6 +2118,10 @@ other spacing change was made.
 
 ### r31-2a: `List` never re-measures a row whose content changed size — hydrolysis defect (minimal reproduction)
 
+**Filed as water-rs/hydrolysis#199** — fix in progress. Keep
+`probe_list_row_remeasure` until the fix lands and the pin is
+bumped; remove it then.
+
 A `List` row's extent is measured once — the first time the
 row enters the visible window — cached in
 `VirtualExtentIndex`, and **never re-measured** until the
@@ -2210,6 +2222,116 @@ Verified by experiment, no code change needed:
 
 So the strips are the second symptom of the stale-extent
 defect: no overflow → nothing to reveal → no strips. The fix
-is the same upstream re-measure as r31-2a; suppressing them
+is the same upstream re-measure as r31-2a — both entries are
+covered by **water-rs/hydrolysis#199**; suppressing them
 app-side would mean hiding the overflow with another layout
 hack — not done per the no-workaround rule.
+
+### r32-2: per-span `background` is dropped by the text service — spoiler mask reads as plain text
+
+**Finding (framework gap, for upstream filing):**
+`TextStyle` carries a per-span `background: Option<Color>`
+(waterui `components/foundation/text/src/styled.rs:24`), but
+hydrolysis's text service never reads it:
+`ResolvedTextStyleSpec`
+(`src/renderer/render/text_service.rs:351-358`) projects only
+`font`, `foreground`, `italic`, `underline`, `strikethrough`,
+and `span_cache_key` (`:411-419`) matches — no `background`
+field exists anywhere in the resolve/shape/draw path.
+
+Consequence: a spoiler span styled as "mask" (foreground ==
+bubble fill, background == mask colour — the only way to draw
+the bar over the glyphs) renders as ordinary text: the
+background is discarded and the masked span's foreground is
+either invisible (if it matched the fill it wouldn't need a
+mask) or, as seeded, plain black-on-bubble — the "hidden"
+text was fully readable (`r32_before_1400.png`, `…800`,
+`…600`).
+
+Workaround shipped in watergram instead, no app-side masking
+hack: the masked variant styles the span `foreground =
+bubble fill` so the glyphs merge into the bubble and only an
+empty gap remains; revealed variant uses the normal style.
+Files: `src/state.rs:761-764` (mask branch),
+`src/views.rs:1743-1762` (dual `.visible` zstack +
+`on_tap → reveal_spoiler`).
+
+Minimal repro:
+
+```rust
+let mut s = StyledStr::empty();
+let mut st = TextStyle::default();
+st.background = Some(Color::srgb(0, 0, 0));
+st.foreground = Some(Color::srgb(0, 0, 0));
+s.push("it's a trap", st);
+text(s) // renders "it's a trap" — no black bar behind it
+```
+
+Expected: the span's background paints behind the glyphs
+(parley `StyleProperty::BackgroundBrush`, or a drawn rect
+behind the run). Observed: background is silently dropped at
+`resolve_text_style` (`text_service.rs:433-443`).
+
+### r32-3: in-row gesture regions sit ~15 px below the painted
+content on a pristine virtualized launch
+
+**Finding (framework bug, for upstream filing):** on the live
+winit renderer, taps on the spoiler row's tap target only
+register ~15 px BELOW where the target's text paints — the
+gesture region is offset relative to the row's painted
+content inside a `List`.
+
+Live numbers (wolfi Mesa 26.2.3 lavapipe, Xvfb 1400×1000,
+pristine launch, list already scrolled to bottom — no prior
+input, no scroll):
+
+- m29's masked spoiler text paints at y≈836-852.
+- Click (480, 843): `pointer down candidates → pointer_hits=[]`
+  — zero gesture hits; nothing happens.
+- Click (480, 860): `pointer up handled gesture_changed=true`
+  and the action runs — the spoiler revealed (r32_tap860.png
+  vs r32_tap843.png).
+- Same for the 🔥 chip row: its visual chip (y≈780-845 in the
+  same capture) is dead; taps land only ~15 px below paint.
+
+What it is not:
+
+- Not shadowing: temporarily removing the row-level `on_tap`
+  left ZERO recognizers at the painted point (843) — nothing
+  eats the press; the region simply isn't there.
+- Not stale-from-scroll: reproduced on a fresh launch with no
+  prior pointer input.
+- Not headless-invisible: `mount_offscreen` +
+  `query().label(..).tap_at()` resolves real element bounds
+  and reveals correctly
+  (`spoiler_tap_reveals_offscreen` passes); on a viewport
+  tall enough to mount every row without virtualization the
+  region and paint agree
+  (`spoiler_region_matches_paint_full_list` passes).
+- Not the action never running: a temporary pin+reveal
+  diagnostic on the same `on_tap` produced the service pin
+  row on the 860 tap — the recognizer fired.
+
+Mechanism candidates (unresolved): the ~15 px matches the
+sender-name caption height — the region may be registered
+against a content rect that includes a part the paint pass
+places differently; or a retained-node stale transform only
+in the virtualized path. Files worth a look upstream:
+gesture region registration `bindings.rs:233-296`, hit-test
+geometry built in `hit_test.rs` — and note `render_depth` is
+never incremented anywhere, so `top_group_id_at` priority
+reduces to registration order (all equal-depth targets).
+
+Minimal repro shape:
+
+```rust
+List::for_each(rows, |row| ListItem::new(
+    vstack((
+        text("Sender").caption().muted(),   // ~14 px line
+        text("tap me").on_tap(|_| /* state flip */),
+    )),
+))
+```
+
+in a list tall enough to virtualize, launched fresh, then a
+real pointer click on the "tap me" glyphs.

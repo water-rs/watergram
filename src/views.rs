@@ -14,7 +14,7 @@ use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
 use waterui::media::Photo;
 use waterui::video::video_player;
-use waterui::accessibility::AccessibilityRole;
+use waterui::accessibility::{AccessibilityRole, AccessibilityState};
 use waterui::navigation::{
     ColumnWidth, NavigationSplitView, NavigationToolbar, NavigationToolbarItem,
     NavigationToolbarPlacement, NavigationView,
@@ -1627,8 +1627,10 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let body_text = row.text.clone();
     let body_styled = row.styled.clone();
     let has_styled = !body_styled.is_empty();
-    let webpage = row.webpage.clone();
-    let has_webpage = !webpage.is_empty();
+    let link_site = row.link_site.clone();
+    let link_title = row.link_title.clone();
+    let link_desc = row.link_desc.clone();
+    let has_link = !link_site.is_empty() || !link_title.is_empty();
     let fwd = row.forwarded_from.clone();
     let has_fwd = !fwd.is_empty();
     let has_text = !body_text.is_empty();
@@ -1657,7 +1659,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     };
     let has_media = row.media_file != 0 || row.play_file != 0 || !row.media_label.is_empty();
     // Emoji-only messages render large on no bubble fill (Telegram Desktop).
-    let emoji_n = if has_media || has_webpage || has_styled || row.poll.is_some() {
+    let emoji_n = if has_media || has_link || has_styled || row.poll.is_some() {
         0
     } else {
         emoji_count(&body_text)
@@ -1729,15 +1731,78 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             };
             parts.push(text(body_text.clone()).size(size).anyview());
         } else if has_styled {
-            parts.push(text(body_styled.clone()).body().anyview());
+            if row.has_spoiler {
+                // Desktop masks spoiler spans until tapped. The masked
+                // styled carries the spoiler text in the bubble-fill
+                // color (hydrolysis drops per-span background — r32-2),
+                // so it disappears into the bubble until revealed.
+                let masked = store.spoiler_masked(row.id);
+                let masked_styled = body_styled.clone();
+                let open_styled = row.styled_open.clone();
+                let rid = row.id;
+                // Both variants stay mounted and flip `.visible` — under a
+                // `when()`'s Dynamic mount the mask branch disappears on
+                // reveal, taking its gesture region with it (r32-3: regions
+                // also sit ~15px below paint on virtualized rows).
+                let open = masked.not();
+                parts.push(
+                    zstack((
+                        text(masked_styled.clone())
+                            .body()
+                            .visible(masked.clone()),
+                        text(open_styled.clone()).body().visible(open.clone()),
+                    ))
+                    .on_tap(move |store: Store| store.reveal_spoiler(rid))
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_label("Hidden text — tap to reveal")
+                    .a11y_state_signal(
+                        open.map(|shown| AccessibilityState::new().hidden(shown)),
+                    )
+                    .anyview(),
+                );
+            } else {
+                parts.push(text(body_styled.clone()).body().anyview());
+            }
         } else {
             parts.push(text(body_text.clone()).body().anyview());
         }
     }
-    if has_webpage {
-        parts.push(muted_parts(
-            text(webpage.clone()).caption().line_limit(TWO).anyview(),
-        ));
+    if has_link {
+        // Desktop's link-preview card: accent bar + site name, title and
+        // description, inside the bubble under the message text.
+        let card_color = if row.outgoing {
+            Color::from(AccentForeground)
+        } else {
+            Color::from(Accent)
+        };
+        let mut card: Vec<AnyView> = Vec::new();
+        if !link_site.is_empty() {
+            card.push(
+                text(link_site.clone())
+                    .caption()
+                    .foreground(card_color.clone())
+                    .anyview(),
+            );
+        }
+        if !link_title.is_empty() {
+            card.push(
+                text(link_title.clone())
+                    .body()
+                    .bold()
+                    .line_limit(TWO)
+                    .anyview(),
+            );
+        }
+        if !link_desc.is_empty() {
+            card.push(muted_parts(
+                text(link_desc.clone()).caption().line_limit(TWO).anyview(),
+            ));
+        }
+        parts.push(
+            hstack((card_color.width(2.0), vstack(card).spacing(1.0).leading()))
+                .spacing(6.0)
+                .anyview(),
+        );
     }
     // Reactions and the meta row overlay the bubble's bottom inset on two
     // separate lines: chips sit on the zone right under the content

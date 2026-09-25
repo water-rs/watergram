@@ -241,7 +241,11 @@ mod tests {
             read_out: false,
             my_reaction: "".into(),
             styled: waterui::text::styled::StyledStr::empty(),
-            webpage: "".into(),
+            styled_open: waterui::text::styled::StyledStr::empty(),
+            has_spoiler: false,
+            link_site: "".into(),
+            link_title: "".into(),
+            link_desc: "".into(),
             forwarded_from: "".into(),
             poll: None,
             group_first: true,
@@ -1179,14 +1183,152 @@ mod tests {
         let store = store();
         store.chats.set(vec![chat(1, "Chat", "", 0)]);
         let mut m = msg(1, "check this", false);
-        m.webpage = "Example — Title · desc".into();
+        m.link_title = "Example — Title".into();
+        m.link_desc = "desc".into();
         store.messages.set(vec![m]);
         store.selected.set(Some(1));
         let inner = store.clone();
         let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query()
-            .label_contains("Example — Title · desc")
+            .label_contains("Example — Title")
             .assert_exists();
+    }
+
+    /// r32-2: Desktop-style link preview card under the message text —
+    /// site name, title and description lines each render.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn link_preview_card_shows_site_title_desc(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        let mut m = msg(1, "check this", false);
+        m.link_site = "example.com".into();
+        m.link_title = "Example — Title".into();
+        m.link_desc = "A description line.".into();
+        store.messages.set(vec![m]);
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        for label in ["example.com", "Example — Title", "A description line."] {
+            app.query().label_contains(label).assert_exists();
+        }
+    }
+
+    /// r32-2: spoiler spans render masked (a11y "tap to reveal" label)
+    /// until `reveal_spoiler` flips the branch to the open styled text.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn spoiler_tap_reveals(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        let ft = tdlib_rs::types::FormattedText {
+            text: "no spoilers please — it's a trap".into(),
+            entities: vec![tdlib_rs::types::TextEntity {
+                offset: 21,
+                length: 11,
+                r#type: tdlib_rs::enums::TextEntityType::Spoiler,
+            }],
+        };
+        let mut m = msg(1, "no spoilers please — it's a trap", false);
+        m.has_spoiler = true;
+        m.styled = crate::state::styled_from_formatted_mask(
+            &ft,
+            Some(Color::from(waterui::theme::color::SurfaceVariant)),
+        );
+        m.styled_open = crate::state::styled_from_formatted_mask(&ft, None);
+        store.messages.set(vec![m]);
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let revealed = store.revealed_spoilers.clone();
+        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query()
+            .label("Hidden text — tap to reveal")
+            .assert_exists();
+        let els = app.resolve_elements(
+            &waterui_testing::Selector::default().label("Hidden text — tap to reveal"),
+        );
+        assert!(!els.is_empty());
+        els.iter().next().unwrap().tap(&mut app);
+        assert!(revealed.snapshot().contains(&1));
+        app.query()
+            .label("Hidden text — tap to reveal")
+            .assert_not_exists();
+    }
+
+    /// r32-3: the same spoiler reveal driven by REAL pointer input on the
+    /// rendered runtime (`mount_offscreen` + `tap_at`). Headless the tap
+    /// lands inside the resolved bounds and works; in the live winit build
+    /// on a pristine launch the gesture region sits ~15px BELOW the painted
+    /// text inside the same List row (DOGFOOD r32-3), which this test does
+    /// not reproduce — region and paint agree once virtualization is absent
+    /// (`spoiler_region_matches_paint_full_list`).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn spoiler_tap_reveals_offscreen(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        let ft = tdlib_rs::types::FormattedText {
+            text: "no spoilers please — it's a trap".into(),
+            entities: vec![tdlib_rs::types::TextEntity {
+                offset: 21,
+                length: 11,
+                r#type: tdlib_rs::enums::TextEntityType::Spoiler,
+            }],
+        };
+        let mut m = msg(1, "no spoilers please — it's a trap", false);
+        m.has_spoiler = true;
+        m.styled = crate::state::styled_from_formatted_mask(
+            &ft,
+            Some(Color::from(waterui::theme::color::SurfaceVariant)),
+        );
+        m.styled_open = crate::state::styled_from_formatted_mask(&ft, None);
+        store.messages.set(vec![m]);
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let revealed = store.revealed_spoilers.clone();
+        let mut app = ui
+            .clone()
+            .viewport(800, 600)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/spoiler_offscreen_bounds.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/spoiler_offscreen.png");
+        app.query()
+            .label("Hidden text — tap to reveal")
+            .tap_at(0.5, 0.5);
+        assert!(
+            revealed.snapshot().contains(&1),
+            "real pointer tap on the spoiler zstack must reveal it"
+        );
+    }
+
+    /// r32-3 diagnostic: mount the FULL seeded demo list (25 rows, taller than
+    /// the viewport) exactly like the winit app, dump the a11y bounds of the
+    /// spoiler button and paint a frame — comparing the element's declared
+    /// bounds with where its text actually renders isolates whether the live
+    /// ~15px offset between the gesture region and the painted text is a
+    /// registration defect or a paint defect.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn spoiler_region_matches_paint_full_list(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        store.open_chat.set(1);
+        store.regroup_messages();
+        let inner = store.clone();
+        let revealed = store.revealed_spoilers.clone();
+        let mut app = ui
+            .clone()
+            // Tall enough that all 25 demo rows mount with no virtualization.
+            .viewport(1400, 3200)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/spoiler_fulllist_bounds.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/spoiler_fulllist.png");
+        app.query()
+            .label("Hidden text — tap to reveal")
+            .tap_at(0.5, 0.5);
+        assert!(
+            revealed.snapshot().contains(&29),
+            "real pointer tap on the spoiler zstack must reveal it"
+        );
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
