@@ -49,6 +49,7 @@
 | 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
 | 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + `List` `ScrollController<usize>` 按索引精确滚动 + 气泡高亮 | — |
 | 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
+| 服务消息（置顶/入群/拉人，居中灰条） | ✅ | `MessagePinMessage`/`MessageChatAddMembers`/`MessageChatJoinBy*` → 居中 pill 行（"You"/发送者名前缀，拉人解析成员名）；不参与消息组、不可多选、无右键菜单；demo pin 路径同步追加服务行 | `pin_appends_service_row` / `service_row_not_selectable` / `service_rows_break_runs` |
 | Reactions 展示（统一 pill 组件：气泡内气泡色派生 tint、已选 accent） | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
 | 发送中/失败状态 | ✅ | `updateMessageSendSucceeded`/`Failed` 行内图标；点 ✗ → `resendMessages` | `resend_failed_marks_pending` |
@@ -132,6 +133,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：85 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
+- 已实现 ✅：86 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。

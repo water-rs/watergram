@@ -1756,7 +1756,9 @@ expressible — the closest form is flat `React <emoji>` commands
 with `.selected(my_reaction == e)` marking the chosen one, which
 is what the app ships (views.rs `message_context_menu_desktop`).
 A `MenuItem::Custom(impl View)` (or a `reaction_strip` first-class
-item) would be needed for true parity. **For upstream filing.**
+item) would be needed for true parity. **Filed upstream:
+water-rs/waterui#1245** — an API decision pending with the
+maintainer; the flat reaction commands stay until it is decided.
 
 ### r27-2: popup stays inside the window at 1400/800/600 — verified, no defect
 
@@ -1778,6 +1780,9 @@ renderer a `.context_menu` popup opens as a real
 `Window::style(Borderless)` X11 window with the correct bounds,
 the full menu a11y tree (14 items incl. Edit on own messages), a
 correctly-clamped origin — and renders **zero pixels, forever**.
+
+**Filed upstream: water-rs/hydrolysis#118** — reopened with the
+same fill-only evidence from hydroterm; a fix is in progress.
 
 **Repro:** any `.context_menu` on the winit renderer —
 ```rust
@@ -1810,16 +1815,57 @@ functionally correct underneath.
 workaround exists (opacity/scale are inside the framework's
 popup panel).
 
-### r27-4: touch long-press → context menu not reachable — no recognizer in crate (unverified on this box)
+### r27-4: `.context_menu` does not open on a long press — no long-press binding (CLOSED r29 — recognizer exists and works; the remaining gap is that `context_menu` binds only the secondary button)
 
-The task target "right-click, **or long-press on touch**" is only
-half-verifiable here: hydrolysis `eb962313` contains no
-`LongPress` recognizer anywhere in the crate (grep-verified), and
-this Xvfb+winit environment has no touch device to inject one
-with. A touch long-press cannot open the menu on this backend
-today; whether a touch-hold should synthesize a secondary event
-is a framework decision — **noted for upstream**, not filed,
-since the session cannot demonstrate it end-to-end.
+**Original claim was wrong in scope.** I grepped hydrolysis's own
+crate for a `LongPress` recognizer and found none, and reported
+"no recognizer in crate." The recognizer lives in
+`waterui-backend-core`: `LongPressDetector`
+(`backends/core/src/gesture.rs:687-780`) consumes the generic
+`GestureInput::{PointerDown, PointerMove, PointerUp,
+PointerCancel, Tick}` stream — any pointer kind, not touch-only —
+fires on the `Tick` deadline (or on `PointerUp` after
+`duration`), and move-cancels at `LONG_PRESS_SLOP`.
+hydrolysis's `GestureEngine` is fully wired
+(`register_target`, `handle_pointer_down/up`, `handle_tick`,
+`next_deadline`, `sync_after_layout`). hydrolysis#189 closed as
+not-a-bug on that basis.
+
+**What I actually tried and saw (r29, live on winit @
+`5c8e570d` / waterui `7083a27a`):**
+
+- View code: the chat bubble carries
+  `.context_menu((…14-element tuple…))` plus, temporarily, a probe
+  `.on_long_press_gesture(500, move |store: Store| store.toggle_select(r11))`
+  (probe reverted after verification; it was never shipped).
+- Input: `xdotool mousemove 500 420 mousedown 1; sleep 1.3;
+  mouseup 1` — a 1.3 s held *left* press on the "six distinct
+  reactions" bubble.
+- Observed: the probe handler **fired** — "1 selected" and the
+  selection toolbar appeared (screenshot r29_probe_longpress2).
+  `xwininfo -root -children` before and after shows only the main
+  window — the `.context_menu` popup did **not** open.
+- Earlier inputs I had driven were only `xdotool click 3`
+  (secondary click) which does open the menu — I never drove a
+  held press before this round.
+
+**Diagnosis.** The recognizer machinery works end-to-end on a
+held mouse press on winit: `on_long_press_gesture` fired at the
+deadline and dispatched the handler. The remaining gap is narrow
+and precise: `.context_menu` opens only on
+`PointerButton::Secondary` (hydrolysis
+`renderer/input/hit_test.rs:738,796,897`). `PointerKind::Touch`
+flows through the same handler, so no long-press — touch or held
+pointer — can open a context menu. `LongPressGesture` is
+app-bindable per view, but a gesture handler cannot open the
+framework-owned `.context_menu` popup: the popup's anchor point
+and lifetime are internal to the context-menu path, so the app
+cannot wire "long press → open that menu" itself. That binding —
+long press opens the same popup — is the missing piece and needs
+a framework decision (or a small new API such as
+`.context_menu(...).open_on_long_press()`); until it exists,
+touch long-press → context menu is unreachable on this backend.
+PARITY context-menu row keeps the caveat.
 
 ### r27-5: cli#183 + cli#184 verified fixed @ `314040e1` — workarounds dropped
 
@@ -1874,8 +1920,15 @@ construction the API already offers.
 
 **Expected:** a 14-item context menu is ordinary content — `Vec<T>`/
 tuple `MenuView` should not cost ~30× more than `Computed::constant`.
-**File as upstream issue** (fold per-element `.computed()` → quadratic
-subscription/re-evaluation on every flush).
+**Filed upstream: water-rs/waterui#1244.**
+
+**CLOSED r29 (verified):** waterui#1247 merged at `7083a27a`; tuple,
+array and `Vec` menus now evaluate through a single computed. The app
+reverted to the 14-element tuple form (the conditional `Edit` item is an
+`Option<Command>` member, which `MenuView` supports) and
+`keyboard_tab_cycles_chat` passes in **9.51 s** — same as the
+`Computed::constant` escape hatch (9.0 s) and the no-menu baseline
+(7.8-8.0 s).
 
 ## r28: upstream history rewrite — pins remapped to rewritten SHAs
 
@@ -1907,3 +1960,46 @@ repros are unaffected (trees are identical).
 
 `cargo check` compiles clean on the new pins; `water run` rebuilds and
 launches with no manual step (cli#183/#184 still closed).
+
+## r29: upstream citations + service message rows (pin)
+
+### r29-1: `ScrollController` is write-only — no way to read scroll position back (waterui, noted)
+
+While choosing the r29 parity item the obvious candidate was
+Desktop's floating "jump to latest" button: it appears only while
+the list is scrolled away from the bottom, shows the unread count,
+and tapping it scrolls to the newest message. `ScrollController<T>`
+(`components/foundation/layout/src/collections/scroll.rs:14-51`)
+exposes exactly `scroll_to(target)`, `target()` and `generation()` —
+a one-way request channel. Nothing reports the realized scroll
+offset or the at-bottom state back to the app, so the button's
+show/hide condition is unimplementable today: an app can *ask* to
+scroll but can never observe that the user scrolled up or reached
+the bottom. The same gap also blocks "scroll to bottom when the
+user is already at bottom, else keep position" on new messages.
+Noted for upstream (a `position`/`at_bottom` signal on the
+controller, or an `on_scroll` metadata, would cover it); the
+service-row pick below was chosen instead because it has no
+framework dependency.
+
+### r29-2: service message rows ("X pinned a message" / "joined the group") — implemented
+
+Desktop draws centered grey service lines in the message flow for
+pin notifications, member joins, adds and similar actions. Real
+TDLib content (`MessagePinMessage`, `MessageChatAddMembers`,
+`MessageChatJoinByLink`, `MessageChatJoinByRequest`) already mapped
+to preview text but rendered as ordinary bubbles. `MessageRow`
+gained `is_service`: `message_row` marks those content kinds and
+prefixes the actor (`"You"`/sender name; add-members resolves the
+added names from the users cache), the bubble renders a centered
+muted caption on a `SurfaceVariant` pill with no tail/avatar/meta/
+context-menu, `set_messages` breaks sender runs across service
+rows, and multi-select skips them (no checkbox, `toggle_select`
+rejects service ids — Desktop doesn't let you select them). The
+demo `pin_message` path appends `"You pinned a message"` like a
+real notifying `pinChatMessage`, and the seed carries
+`"Alice pinned a message"` after m14 (matching the pinned banner,
+which also got `pinned_id = 14` so the banner tap jumps) and
+`"Bob joined the group"` before Bob's first message. Tests:
+`pin_appends_service_row`, `service_row_not_selectable`,
+`service_rows_break_runs`.

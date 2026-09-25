@@ -218,6 +218,9 @@ pub struct MessageRow {
     pub show_avatar: bool,
     /// Sender profile-photo small file id (0 → initials).
     pub sender_photo: i32,
+    /// Service row (pin/join/etc.) — renders as a centered label, not a
+    /// bubble; excluded from sender runs and multi-select.
+    pub is_service: bool,
 }
 
 /// A single poll answer option as shown inside a poll bubble.
@@ -1029,6 +1032,7 @@ impl Store {
         ]);
         self.set_messages(Self::demo_conversation());
         self.pinned_label.set_from("Alice: shipping it 🚀");
+        self.pinned_id.set(14);
         self.sessions.set(vec![
             SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
             SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
@@ -1105,6 +1109,12 @@ impl Store {
             webpage: Str::from(""),
             forwarded_from: Str::from(fwd.to_string()),
             poll: None,
+            is_service: false,
+        };
+        let svc = |id: i64, text: &str| {
+            let mut r = m(id, "", text, "", false, false, "", "", "", "");
+            r.is_service = true;
+            r
         };
         let mut msgs = vec![
             m(10, "Alice", "morning! did the camera filters example work?", "09:41", false, false, "", "", "", ""),
@@ -1118,17 +1128,21 @@ impl Store {
         msgs[3].edited = true;
         msgs[1].reply_to_id = 10;
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
-        msgs.push(m(15, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
-        msgs.push(m(16, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
+        // Service rows (Desktop's centered grey lines): the pin that put
+        // m14 on the banner, and a member join before Bob's first message.
+        msgs.push(svc(15, "Alice pinned a message"));
+        msgs.push(m(16, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
+        msgs.push(m(17, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
         // A real file id so tapping the media slot opens the viewer (demo
         // has no downloaded bytes, so the viewer shows "Downloading…").
         msgs.last_mut().unwrap().media_file = 1;
         msgs[2].unread_divider = true;
+        msgs.push(svc(18, "Bob joined the group"));
         // A second named sender exercises per-peer colors on the sender name
         // and the run avatar in group chats.
-        msgs.push(m(17, "Bob", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
+        msgs.push(m(19, "Bob", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
         {
-            let mut poll_msg = m(18, "Alice", "", "09:48", false, false, "", "", "", "");
+            let mut poll_msg = m(20, "Alice", "", "09:48", false, false, "", "", "", "");
             poll_msg.poll = Some(PollRow {
                 question: "Ship the r8 bundle today?".into(),
                 options: vec![
@@ -1141,31 +1155,31 @@ impl Store {
             msgs.push(poll_msg);
         }
         // Emoji-only messages render large on no bubble (Telegram Desktop).
-        msgs.push(m(19, "", "🎉🎉🎉", "09:49", true, true, "", "", "", ""));
-        msgs.push(m(20, "Alice", "🔥", "09:50", false, false, "", "❤️1", "", ""));
+        msgs.push(m(21, "", "🎉🎉🎉", "09:49", true, true, "", "", "", ""));
+        msgs.push(m(22, "Alice", "🔥", "09:50", false, false, "", "❤️1", "", ""));
         // 1/3/6-chip reaction bands on text and emoji-only rows — the r24
         // no-overlap layout matrix in demo form.
-        msgs.push(m(21, "Alice", "single reaction on text", "09:51", false, false, "", "👍1", "", ""));
-        msgs.push(m(22, "Alice", "three reactions on this one", "09:52", false, false, "", "👍1 ❤️1 🔥1", "", ""));
-        msgs.push(m(23, "Alice", "six distinct reactions", "09:53", false, false, "", "👍4 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
-        msgs.push(m(24, "", "🚀🚀", "09:54", true, true, "", "👍1 ❤️1 🔥1", "", ""));
-        msgs.push(m(25, "Alice", "👀", "09:55", false, false, "", "👍2 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
+        msgs.push(m(23, "Alice", "single reaction on text", "09:51", false, false, "", "👍1", "", ""));
+        msgs.push(m(24, "Alice", "three reactions on this one", "09:52", false, false, "", "👍1 ❤️1 🔥1", "", ""));
+        msgs.push(m(25, "Alice", "six distinct reactions", "09:53", false, false, "", "👍4 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
+        msgs.push(m(26, "", "🚀🚀", "09:54", true, true, "", "👍1 ❤️1 🔥1", "", ""));
+        msgs.push(m(27, "Alice", "👀", "09:55", false, false, "", "👍2 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
         // A reply quote inside the visible window for live tap-to-jump
-        // verification: m22 quotes m21.
-        msgs[12].reply_excerpt = Str::from("single reaction on text");
-        msgs[12].reply_to_id = 21;
+        // verification: m24 quotes m23.
+        msgs[14].reply_excerpt = Str::from("single reaction on text");
+        msgs[14].reply_to_id = 23;
         // A quote whose original is scrolled well out of view (r25-2):
-        // m23 quotes the first demo message — tapping it must scroll the
+        // m25 quotes the first demo message — tapping it must scroll the
         // list up to m10, not just highlight an on-screen row.
-        msgs[13].reply_excerpt = Str::from("morning! did the camera filters example work?");
-        msgs[13].reply_to_id = 10;
+        msgs[15].reply_excerpt = Str::from("morning! did the camera filters example work?");
+        msgs[15].reply_to_id = 10;
         // A quote whose original is NOT in the loaded window — tapping it
         // exercises the getChatHistory fetch path (r25-2).
-        msgs[15].reply_excerpt = Str::from("earlier history, not loaded");
-        msgs[15].reply_to_id = 9;
+        msgs[17].reply_excerpt = Str::from("earlier history, not loaded");
+        msgs[17].reply_to_id = 9;
         // Chosen states in both chip placements (r25-1 verification):
-        // inside an incoming bubble (m21) and on an emoji-only row (m24).
-        if let Some(chip) = msgs[11].reaction_chips.first_mut() {
+        // inside an incoming bubble (m23) and on an emoji-only row (m26).
+        if let Some(chip) = msgs[13].reaction_chips.first_mut() {
             chip.chosen = true;
         }
         // Chosen inside an outgoing bubble (m14) — the container-tint
@@ -1173,7 +1187,7 @@ impl Store {
         if let Some(chip) = msgs[4].reaction_chips.first_mut() {
             chip.chosen = true;
         }
-        if let Some(chip) = msgs[14].reaction_chips.first_mut() {
+        if let Some(chip) = msgs[16].reaction_chips.first_mut() {
             chip.chosen = true;
         }
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
@@ -1583,6 +1597,45 @@ impl Store {
         if let enums::MessageContent::MessageText(t) = &m.content {
             text = t.text.text.clone().into();
         }
+        // TDLib service messages render as Desktop's centered grey lines,
+        // not bubbles — prefix the actor ("You"/sender name) like Desktop.
+        let is_service = matches!(
+            m.content,
+            enums::MessageContent::MessagePinMessage(_)
+                | enums::MessageContent::MessageChatAddMembers(_)
+                | enums::MessageContent::MessageChatJoinByLink
+                | enums::MessageContent::MessageChatJoinByRequest
+        );
+        if is_service {
+            let actor = if m.is_outgoing {
+                Str::from("You")
+            } else {
+                self.sender_name(&m.sender_id)
+            };
+            let action = match &m.content {
+                enums::MessageContent::MessagePinMessage(_) => "pinned a message".to_string(),
+                enums::MessageContent::MessageChatAddMembers(a) => {
+                    let names = a
+                        .member_user_ids
+                        .iter()
+                        .filter_map(|uid| {
+                            self.users
+                                .borrow()
+                                .get(uid)
+                                .map(|u| u.first_name.clone())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if names.is_empty() {
+                        "added new members".to_string()
+                    } else {
+                        format!("added {names}")
+                    }
+                }
+                _ => "joined the group".to_string(),
+            };
+            text = format!("{actor} {action}").into();
+        }
         if media_file != 0 {
             self.want_file_id(media_file);
         }
@@ -1733,6 +1786,7 @@ impl Store {
             day_label: Str::from(""),
             edited: m.edit_date != 0,
             poll,
+            is_service,
         }
     }
 
@@ -2764,13 +2818,15 @@ impl Store {
                     && a.sender == b.sender
                     && !b.unread_divider
                     && !b.day_header
+                    && !a.is_service
+                    && !b.is_service
             };
             let first = i == 0 || !same_run(&rows[i - 1], &rows[i]);
             let last = i + 1 == n || !same_run(&rows[i], &rows[i + 1]);
             let r = &mut rows[i];
             r.group_first = first;
             r.group_last = last;
-            r.avatar_col = grouped && !r.outgoing;
+            r.avatar_col = grouped && !r.outgoing && !r.is_service;
             r.show_avatar = r.avatar_col && last;
         }
         self.messages.set(rows);
@@ -2821,6 +2877,47 @@ impl Store {
                 .unwrap_or_default();
             self.pinned_id.set(message_id);
             self.pinned_label.set(label);
+            // A real pinChatMessage(notify) produces a service row in
+            // history; mirror it so the demo chat shows the same line.
+            let mut rows = self.messages.snapshot();
+            let day = rows.last().map(|r| r.day).unwrap_or(0);
+            let next_id = rows.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+            rows.push(MessageRow {
+                id: next_id,
+                sender: Str::from(""),
+                sender_accent: -1,
+                text: Str::from("You pinned a message"),
+                time: Str::from(""),
+                outgoing: false,
+                read_out: false,
+                can_edit: false,
+                reply_excerpt: Str::from(""),
+                reply_to_id: 0,
+                media_file: 0,
+                play_file: 0,
+                media_label: Str::from(""),
+                reaction_chips: Vec::new(),
+                my_reaction: Str::from(""),
+                styled: StyledStr::empty(),
+                webpage: Str::from(""),
+                forwarded_from: Str::from(""),
+                failed: false,
+                pending: false,
+                highlighted: false,
+                unread_divider: false,
+                day,
+                day_header: false,
+                day_label: Str::from(""),
+                edited: false,
+                poll: None,
+                group_first: false,
+                group_last: false,
+                avatar_col: false,
+                show_avatar: false,
+                sender_photo: 0,
+                is_service: true,
+            });
+            self.set_messages(rows);
             return;
         }
         let store = self.clone();
@@ -3380,6 +3477,16 @@ impl Store {
     /// Multi-selection: context-menu "Select" starts it, tapping a bubble
     /// toggles membership; an empty selection ends the mode.
     pub fn toggle_select(&self, message_id: i64) {
+        // Service rows (pins/joins) aren't real messages — nothing to
+        // delete/forward, and Desktop doesn't let you select them.
+        if self
+            .messages
+            .snapshot()
+            .iter()
+            .any(|r| r.id == message_id && r.is_service)
+        {
+            return;
+        }
         let mut sel = self.selected_msgs.snapshot();
         if sel.contains(&message_id) {
             sel.retain(|&x| x != message_id);

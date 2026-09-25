@@ -896,6 +896,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             // inset, inner edges collapse.
             let pad_top = if row.group_first { 2.0 } else { 0.5 };
             let pad_bottom = if row.group_last { 2.0 } else { 0.5 };
+            let is_service = row.is_service;
             let check = sel_msgs_rows
                 .map(move |v: Vec<i64>| v.contains(&rid))
                 .distinct();
@@ -903,9 +904,11 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 hstack((
                     when(sel_active_rows.clone(), move || {
                         let check = check.clone();
-                        when(check, || text("☑").body().foreground(Accent))
-                            .otherwise(|| text("☐").body().muted())
-                            .padding_with((0.0, 4.0))
+                        when(!is_service, move || {
+                            when(check.clone(), || text("☑").body().foreground(Accent))
+                                .otherwise(|| text("☐").body().muted())
+                                .padding_with((0.0, 4.0))
+                        })
                     }),
                     message_bubble(inner.clone(), row),
                 ))
@@ -913,7 +916,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 .on_tap(move |store: Store| {
                     // Only multi-select mode: context-menu "Select"
                     // seeds the set; further taps toggle membership.
-                    if !store.selected_msgs.snapshot().is_empty() {
+                    if !is_service && !store.selected_msgs.snapshot().is_empty() {
                         store.toggle_select(rid);
                     }
                 })
@@ -1584,7 +1587,28 @@ fn bubble_tail_layer(outgoing: bool, fill: Color) -> AnyView {
     vstack((spacer(), row)).spacing(0.0).anyview()
 }
 
+/// Desktop service line ("X pinned a message", "joined the group"):
+/// a centered muted caption on a subtle pill — no bubble, no meta, no
+/// context menu, not multi-selectable.
+#[allow(needless_anyview)] // AnyView is the concrete type: `message_bubble`'s
+// tail returns AnyView, so `-> impl View` would not unify the two sites.
+fn service_line(row: &MessageRow) -> AnyView {
+    hstack((
+        spacer(),
+        text(row.text.clone())
+            .caption()
+            .muted()
+            .padding_with((2.0, 8.0))
+            .background(RoundedRectangle::new(0.5).fill(SurfaceVariant)),
+        spacer(),
+    ))
+    .anyview()
+}
+
 pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
+    if row.is_service {
+        return service_line(&row);
+    }
     let reply_excerpt = row.reply_excerpt.clone();
     let has_reply = !reply_excerpt.is_empty();
     let body_text = row.text.clone();
@@ -1851,69 +1875,40 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     // message actions. `MenuItem` carries commands/dividers/submenus only —
     // a horizontal emoji strip inside the popup isn't expressible, so the
     // quick reactions stay flat commands with the chosen one marked
-    // (DOGFOOD r27-1). Edit applies to own messages only.
-    let mut menu_items: Vec<MenuItem> = vec![
-        react_label
-            .action(move |store: Store| store.toggle_reaction(&r6, "👍"))
-            .selected(my_reaction == "👍")
-            .into(),
-        "React ❤️"
-            .action(move |store: Store| store.toggle_reaction(&r7, "❤️"))
-            .selected(my_reaction == "❤️")
-            .into(),
-        "React 🔥"
-            .action(move |store: Store| store.toggle_reaction(&r8, "🔥"))
-            .selected(my_reaction == "🔥")
-            .into(),
-        "React 😂"
-            .action(move |store: Store| store.toggle_reaction(&r9, "😂"))
-            .selected(my_reaction == "😂")
-            .into(),
-        "React 😮"
-            .action(move |store: Store| store.toggle_reaction(&r10, "😮"))
-            .into(),
-        Divider.into(),
-        "Reply"
-            .action(move |store: Store| store.start_reply(&r1))
-            .into(),
-    ];
-    if row.outgoing {
-        menu_items.push(
-            "Edit"
-                .action(move |store: Store| store.start_edit(&r4))
-                .into(),
-        );
-    }
-    menu_items.extend([
-        "Copy text"
-            .action(move |store: Store| store.copy_message(&r3))
-            .into(),
-        pin_label
-            .action(move |store: Store| {
+    // (DOGFOOD r27-1). Edit applies to own messages only. Tuple form
+    // evaluates through a single computed since waterui#1247 (r27-6).
+    let bubble = bubble
+        .context_menu((
+            react_label
+                .action(move |store: Store| store.toggle_reaction(&r6, "👍"))
+                .selected(my_reaction == "👍"),
+            "React ❤️"
+                .action(move |store: Store| store.toggle_reaction(&r7, "❤️"))
+                .selected(my_reaction == "❤️"),
+            "React 🔥"
+                .action(move |store: Store| store.toggle_reaction(&r8, "🔥"))
+                .selected(my_reaction == "🔥"),
+            "React 😂"
+                .action(move |store: Store| store.toggle_reaction(&r9, "😂"))
+                .selected(my_reaction == "😂"),
+            "React 😮".action(move |store: Store| store.toggle_reaction(&r10, "😮")),
+            Divider,
+            "Reply".action(move |store: Store| store.start_reply(&r1)),
+            row.outgoing
+                .then(|| "Edit".action(move |store: Store| store.start_edit(&r4))),
+            "Copy text".action(move |store: Store| store.copy_message(&r3)),
+            pin_label.action(move |store: Store| {
                 if pinned {
                     store.unpin_message(row.id)
                 } else {
                     store.pin_message(row.id)
                 }
-            })
-            .into(),
-        "Forward"
-            .action(move |store: Store| store.start_forward(&r2))
-            .into(),
-        "Select"
-            .action(move |store: Store| store.toggle_select(r11))
-            .into(),
-        Divider.into(),
-        "Delete"
-            .action(move |store: Store| store.delete_message(r5))
-            .into(),
-    ]);
-    // A `Vec<MenuItem>` keeps `MenuView::into_menu_items` a flat constant —
-    // the 14-element tuple builds a left-folded `zip` chain 13 deep whose
-    // per-flush re-evaluation makes `mount`/`settle` effectively hang
-    // (DOGFOOD r27-6).
-    let bubble = bubble
-        .context_menu(Computed::constant(menu_items))
+            }),
+            "Forward".action(move |store: Store| store.start_forward(&r2)),
+            "Select".action(move |store: Store| store.toggle_select(r11)),
+            Divider,
+            "Delete".action(move |store: Store| store.delete_message(r5)),
+        ))
         .anyview();
 
     let placed = if row.outgoing {

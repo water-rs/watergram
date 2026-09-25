@@ -248,6 +248,7 @@ mod tests {
             avatar_col: false,
             show_avatar: false,
             sender_photo: 0,
+            is_service: false,
         }
     }
 
@@ -873,16 +874,22 @@ mod tests {
         store.set_messages(Store::demo_conversation());
         let rows = store.messages.snapshot();
         let find = |id: i64| rows.iter().find(|r| r.id == id).unwrap().clone();
-        // The photo / forwarded / poll stretch (m16 Alice, m17 Bob, m18
-        // Alice) is three solo runs — different senders break each run, so
-        // every row is its run's first and last and carries the avatar.
-        for row in [find(16), find(17), find(18)] {
+        // m17 (Alice's photo) and m19 (Bob's forward) are solo runs —
+        // outgoing rows and the service rows around them break every run,
+        // so each is its run's first and last and carries the avatar.
+        for row in [find(17), find(19)] {
             assert!(row.group_first && row.group_last && row.show_avatar);
         }
-        // The Alice m20-m23 run carries the avatar on its last row (m23);
-        // m24 breaks it (outgoing) so m25 is a one-message run with both marks.
-        let (run_first, run_last, solo) = (find(20), find(23), find(25));
-        assert!(run_first.group_first && !run_last.group_first && run_last.group_last && run_last.show_avatar);
+        // The service rows between them are also solo runs, but they draw
+        // as centered labels: no avatar column, no avatar.
+        let svc = find(18);
+        assert!(svc.is_service && svc.group_first && svc.group_last && !svc.avatar_col && !svc.show_avatar);
+        // The Alice m22-m25 run carries the avatar on its last row (m25);
+        // m26 breaks it (outgoing) so m27 is a one-message run with both marks.
+        let (run_first, run_mid, run_last, solo) = (find(22), find(23), find(25), find(27));
+        assert!(run_first.group_first && !run_first.group_last);
+        assert!(!run_mid.group_first && !run_mid.group_last);
+        assert!(run_last.group_last && run_last.show_avatar && !run_last.group_first);
         assert!(solo.group_first && solo.group_last && solo.show_avatar);
         // Outgoing rows never get the avatar column.
         assert!(rows.iter().filter(|r| r.outgoing).all(|r| !r.avatar_col));
@@ -964,6 +971,60 @@ mod tests {
         assert_eq!(store.highlight_msg.snapshot(), 10);
         assert!(store.messages.snapshot().iter().find(|r| r.id == 10).unwrap().highlighted);
         assert!(store.messages.snapshot().iter().filter(|r| r.highlighted).count() == 1);
+    }
+
+    #[test]
+    fn pin_appends_service_row() {
+        // Desktop shows a centered "X pinned a message" service line for a
+        // notifying pin — the demo path mirrors pinChatMessage(notify).
+        let store = store();
+        store.open_chat.set(1);
+        store.set_messages(Store::demo_conversation());
+        let before = store.messages.snapshot().len();
+        store.pin_message(11);
+        let rows = store.messages.snapshot();
+        assert_eq!(rows.len(), before + 1, "pin adds one service row");
+        let svc = rows.last().unwrap();
+        assert!(svc.is_service, "last row is the service line");
+        assert_eq!(svc.text.as_str(), "You pinned a message");
+        assert_eq!(store.pinned_id.get(), 11);
+        // The service row is its own run: it never joins a sender run and
+        // it ends the run above it.
+        assert!(svc.group_first && svc.group_last);
+        assert!(!svc.avatar_col);
+        assert!(rows[rows.len() - 2].group_last, "service row ends the run above");
+    }
+
+    #[test]
+    fn service_row_not_selectable() {
+        // Service rows are excluded from multi-select (Desktop matches).
+        let store = store();
+        store.open_chat.set(1);
+        store.set_messages(Store::demo_conversation());
+        let svc_id = store
+            .messages
+            .snapshot()
+            .iter()
+            .find(|r| r.is_service)
+            .map(|r| r.id)
+            .expect("demo has service rows");
+        store.toggle_select(svc_id);
+        assert!(store.selected_msgs.snapshot().is_empty());
+        store.toggle_select(11);
+        assert_eq!(store.selected_msgs.snapshot(), vec![11]);
+    }
+
+    #[test]
+    fn service_rows_break_runs() {
+        // "Alice pinned a message" sits between Alice's m14 and outgoing
+        // m16 — the two sides can never share a run across the service row.
+        let store = store();
+        store.open_chat.set(1);
+        store.set_messages(Store::demo_conversation());
+        let rows = store.messages.snapshot();
+        let i = rows.iter().position(|r| r.is_service).unwrap();
+        assert!(rows[i - 1].group_last, "row before a service line ends its run");
+        assert!(rows[i + 1].group_first, "row after a service line starts a run");
     }
 
     #[test]
