@@ -122,6 +122,9 @@ pub struct ChatRow {
     /// Has a position in the Archive list.
     pub in_archive: bool,
     pub photo_file: i32,
+    /// TDLib `accent_color_id` for the peer (−1 = none) — seeds the
+    /// userpic color slot.
+    pub accent: i32,
     pub time: Str,
     pub typing: bool,
     pub online: bool,
@@ -159,6 +162,9 @@ pub struct MessageRow {
     #[id]
     pub id: i64,
     pub sender: Str,
+    /// Sender's TDLib `accent_color_id` (−1 = none) — seeds the per-peer
+    /// color slot on the group sender name and avatar circle.
+    pub sender_accent: i32,
     pub text: Str,
     pub time: Str,
     pub outgoing: bool,
@@ -764,6 +770,8 @@ pub struct MemberRow {
     pub username: Str,
     /// TDLib small profile-photo file id; 0 renders the initials circle.
     pub photo: i32,
+    /// Peer `accent_color_id` (−1 = none) — seeds the userpic color.
+    pub accent: i32,
 }
 
 /// Collapse a TDLib privacy rule list into one audience label. The rule
@@ -989,6 +997,7 @@ impl Store {
                 marked_unread: false,
                 in_archive: false,
                 photo_file: 0,
+                accent: -1,
                 time: Str::from("14:32"),
                 typing,
                 online,
@@ -1030,16 +1039,16 @@ impl Store {
             PrivacyRow { setting: "Profile photos".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowProfilePhoto },
         ]);
         self.contacts.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0, accent: -1 },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0, accent: -1 },
         ]);
         // Chat 1 (WaterUI devs) is a group — the info panel's member list.
         self.members.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0 },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0 },
-            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into(), photo: 0 },
-            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into(), photo: 0 },
-            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into(), photo: 0 },
+            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0, accent: -1 },
+            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0, accent: -1 },
+            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into(), photo: 0, accent: -1 },
+            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into(), photo: 0, accent: -1 },
+            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into(), photo: 0, accent: -1 },
         ]);
         self.members_count.set_from("5 members");
         self.twofa.set_from("enabled");
@@ -1064,6 +1073,9 @@ impl Store {
         let m = |id: i64, sender: &str, text: &str, time: &str, outgoing: bool, read_out: bool, reply: &str, reactions: &str, fwd: &str, media: &str| MessageRow {
             id,
             sender: Str::from(sender.to_string()),
+            // Demo senders carry no TDLib accent id — the peer color
+            // falls back to the name hash (still stable per member).
+            sender_accent: -1,
             text: Str::from(text.to_string()),
             time: Str::from(time.to_string()),
             outgoing,
@@ -1112,7 +1124,9 @@ impl Store {
         // has no downloaded bytes, so the viewer shows "Downloading…").
         msgs.last_mut().unwrap().media_file = 1;
         msgs[2].unread_divider = true;
-        msgs.push(m(17, "Alice", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
+        // A second named sender exercises per-peer colors on the sender name
+        // and the run avatar in group chats.
+        msgs.push(m(17, "Bob", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
         {
             let mut poll_msg = m(18, "Alice", "", "09:48", false, false, "", "", "", "");
             poll_msg.poll = Some(PollRow {
@@ -1676,6 +1690,20 @@ impl Store {
         MessageRow {
             id: m.id,
             sender: self.sender_name(&m.sender_id),
+            sender_accent: match &m.sender_id {
+                enums::MessageSender::User(u) => self
+                    .users
+                    .borrow()
+                    .get(&u.user_id)
+                    .map(|u| u.accent_color_id)
+                    .unwrap_or(-1),
+                enums::MessageSender::Chat(c) => self
+                    .chat_objs
+                    .borrow()
+                    .get(&c.chat_id)
+                    .map(|ch| ch.accent_color_id)
+                    .unwrap_or(-1),
+            },
             sender_photo,
             text,
             time: fmt_time(m.date),
@@ -1786,6 +1814,7 @@ impl Store {
             marked_unread: chat.is_marked_as_unread,
             in_archive: position_in(&chat, &enums::ChatList::Archive).is_some(),
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
+            accent: chat.accent_color_id,
             time,
             typing: false,
             online,
@@ -3216,6 +3245,20 @@ impl Store {
                         enums::MessageSender::User(u) => u.user_id,
                         enums::MessageSender::Chat(c) => c.chat_id,
                     };
+                    let accent = match &sender {
+                        enums::MessageSender::User(u) => store
+                            .users
+                            .borrow()
+                            .get(&u.user_id)
+                            .map(|u| u.accent_color_id)
+                            .unwrap_or(-1),
+                        enums::MessageSender::Chat(c) => store
+                            .chat_objs
+                            .borrow()
+                            .get(&c.chat_id)
+                            .map(|ch| ch.accent_color_id)
+                            .unwrap_or(-1),
+                    };
                     rows.push(MemberRow {
                         key,
                         name: if name.is_empty() { "Blocked".into() } else { name.into() },
@@ -3223,6 +3266,7 @@ impl Store {
                         sender: sender.clone(),
                         username: "".into(),
                         photo: 0,
+                        accent,
                     });
                 }
                 store.blocked.set(rows);
@@ -4237,7 +4281,7 @@ impl Store {
                     .set_from(format!("{} members", m.total_count));
                 let mut rows = Vec::new();
                 for member in m.members {
-                    let (key, name, sender, username, photo) = match &member.member_id {
+                    let (key, name, sender, username, photo, accent) = match &member.member_id {
                         enums::MessageSender::User(u) => {
                             let uid = u.user_id;
                             let cached = store.users.borrow().get(&uid).cloned();
@@ -4273,10 +4317,14 @@ impl Store {
                             if photo != 0 {
                                 store.want_file_id(photo);
                             }
-                            (uid, name, member.member_id.clone(), uname, photo)
+                            let accent = user
+                                .as_ref()
+                                .map(|u| u.accent_color_id)
+                                .unwrap_or(-1);
+                            (uid, name, member.member_id.clone(), uname, photo, accent)
                         }
                         enums::MessageSender::Chat(c) => {
-                            let (title, photo) = store
+                            let (title, photo, accent) = store
                                 .chat_objs
                                 .borrow()
                                 .get(&c.chat_id)
@@ -4284,10 +4332,11 @@ impl Store {
                                     (
                                         ch.title.clone(),
                                         ch.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
+                                        ch.accent_color_id,
                                     )
                                 })
-                                .unwrap_or_else(|| (format!("Chat {}", c.chat_id), 0));
-                            (c.chat_id, title, member.member_id.clone(), String::new(), photo)
+                                .unwrap_or_else(|| (format!("Chat {}", c.chat_id), 0, -1));
+                            (c.chat_id, title, member.member_id.clone(), String::new(), photo, accent)
                         }
                     };
                     let status = match &member.status {
@@ -4305,6 +4354,7 @@ impl Store {
                         sender,
                         username: username.into(),
                         photo,
+                        accent,
                     });
                 }
                 store.members.set(rows);
@@ -4345,6 +4395,7 @@ impl Store {
                             }),
                             username: uname.trim_start_matches('@').to_string().into(),
                             photo: user.profile_photo.map(|p| p.small.id).unwrap_or(0),
+                            accent: user.accent_color_id,
                         });
                     }
                 }
@@ -5738,6 +5789,7 @@ impl Store {
             marked_unread: false,
             in_archive: position_in(&chat, &enums::ChatList::Archive).is_some(),
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
+            accent: chat.accent_color_id,
             time: "".into(),
             typing: false,
             online: false,

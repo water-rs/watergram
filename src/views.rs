@@ -23,7 +23,7 @@ use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
-use waterui::shape::{Circle, Path, RoundedRectangle, ShapeExt};
+use waterui::shape::{Circle, Path, RoundedRectangle, ShapeExt, UnevenRoundedRectangle};
 use waterui::graphics::color::{BorderColor, Srgb, WithOpacity};
 use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Error, Foreground,
@@ -600,12 +600,38 @@ pub(crate) fn initials(name: &str) -> Str {
     }
 }
 
-pub(crate) fn avatar(store: Store, file_id: i32, title: &str, size: f32) -> impl View {
+/// Telegram Desktop assigns every peer one of seven accent colors — the
+/// colored userpics and the group sender names. A peer's slot comes from
+/// TDLib's `accent_color_id` (`id % 7` over the userpic palette); when the
+/// peer carries none (demo rows, unresolved senders) the display name is
+/// hashed instead, so a peer keeps one color everywhere it is drawn.
+pub(crate) fn peer_color(accent: i32, name: &str) -> Color {
+    const PALETTE: [&str; 7] = [
+        "#CC5049", // red
+        "#D67722", // orange
+        "#955CDB", // violet
+        "#40A920", // green
+        "#309EBA", // cyan
+        "#368AD1", // blue
+        "#C7508B", // pink
+    ];
+    let slot = if accent >= 0 {
+        accent as usize % 7
+    } else {
+        (name.bytes()
+            .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64))
+            % 7) as usize
+    };
+    Srgb::from_hex(PALETTE[slot]).into()
+}
+
+pub(crate) fn avatar(store: Store, file_id: i32, title: &str, size: f32, accent: i32) -> impl View {
     let path_a = store.file_signal(file_id);
     let path_b = store.file_signal(file_id);
     let has = path_a.map(|p: Str| !p.is_empty()).distinct();
     let url = path_b.map(Url::from_file_path_str);
     let label = initials(title);
+    let fill = peer_color(accent, title);
     // Decorative: the avatar sits beside the chat/member name that already
     // labels the row — hide the shape/photo leaves from the a11y tree.
     when(has, move || {
@@ -617,7 +643,7 @@ pub(crate) fn avatar(store: Store, file_id: i32, title: &str, size: f32) -> impl
             .bold()
             .foreground(AccentForeground)
             .size(size, size)
-            .background(Circle.fill(Accent))
+            .background(Circle.fill(fill.clone()))
     })
     .a11y_hidden(true)
 }
@@ -689,7 +715,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
     };
 
     hstack((
-        avatar(store, row.photo_file, &row.title, 44.0),
+        avatar(store, row.photo_file, &row.title, 44.0, row.accent),
         vstack((
             hstack((
                 kind_icon(&row.kind_icon),
@@ -1515,30 +1541,47 @@ fn reaction_chip(row: &MessageRow, c: &ReactionChip, surface: ChipSurface) -> An
     }
 }
 
-/// Bubble tail: a small hook drawn at the bottom outer corner of a
-/// run's last bubble, pointing toward the sender's avatar (incoming)
-/// or the screen edge (outgoing) — Telegram Desktop's tail. The inner
-/// edge is flush with the bubble; the quad's control point pulls the
-/// outer edge into a concave hook tapering to the tip (r25-3). It sits
-/// in an 8 pt gutter that is reserved on every row so bubble edges stay
-/// aligned regardless of tails.
+/// Bubble tail: a small hook growing out of a run's last bubble at the
+/// bottom corner on the sender's side (Telegram Desktop). Drawn as a
+/// layer of the bubble's own background — same fill, so it reads as part
+/// of the outline — and `.offset` pushes the wedge outward past the edge,
+/// so no layout space is reserved (r26-2). The path's flat side lands a
+/// few points inside the edge so no antialiased seam shows; the joined
+/// corner is drawn square via `UnevenRoundedRectangle` (r26-1).
 fn bubble_tail(outgoing: bool, fill: Color) -> AnyView {
-    const W: f32 = 8.0;
-    const H: f32 = 10.0;
+    const W: f32 = 10.0;
+    const H: f32 = 13.0;
+    // PathCommand coordinates are normalized to the view's bounds — the
+    // W×H frame pins the wedge's absolute size.
     let path = if outgoing {
         Path::new()
             .move_to(0.0, 0.0)
-            .quad_to(3.0, 4.5, W, H)
-            .line_to(0.0, H)
+            .quad_to(0.18, 0.88, 0.9, 1.0)
+            .line_to(0.0, 1.0)
             .close()
     } else {
         Path::new()
-            .move_to(W, 0.0)
-            .quad_to(5.0, 4.5, 0.0, H)
-            .line_to(W, H)
+            .move_to(1.0, 0.0)
+            .quad_to(0.82, 0.88, 0.1, 1.0)
+            .line_to(1.0, 1.0)
             .close()
     };
-    path.fill(fill).size(W, H).anyview()
+    path.fill(fill)
+        .size(W, H)
+        .offset(if outgoing { 7.0 } else { -7.0 }, 0.0)
+        .anyview()
+}
+
+/// Positions the wedge at the bubble's bottom corner on the sender's
+/// side: trailing for outgoing, leading for incoming.
+fn bubble_tail_layer(outgoing: bool, fill: Color) -> AnyView {
+    let wedge = bubble_tail(outgoing, fill);
+    let row: AnyView = if outgoing {
+        hstack((spacer(), wedge)).spacing(0.0).anyview()
+    } else {
+        hstack((wedge, spacer())).spacing(0.0).anyview()
+    };
+    vstack((spacer(), row)).spacing(0.0).anyview()
 }
 
 pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
@@ -1624,7 +1667,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             text(sender.clone())
                 .caption()
                 .bold()
-                .foreground(Accent)
+                .foreground(peer_color(row.sender_accent, sender.as_str()))
                 .anyview(),
         );
     }
@@ -1741,7 +1784,12 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         meta_overlay,
     ))
     .alignment(BottomTrailing);
-    // The tail reuses the bubble's fill so the hook reads as part of it.
+    // The tail hooks a run's last bubble toward the sender's avatar /
+    // the screen edge (Desktop); bubble-less emoji-only rows get none.
+    // It is a layer of the bubble's background offset past the edge —
+    // nothing is reserved in layout — and the joined corner is square
+    // (r26-1, r26-2).
+    let tail_on = row.group_last && !(emoji_n > 0 && !row.highlighted);
     let bubble_fill = if row.highlighted {
         Color::from(AccentContainer)
     } else if row.outgoing {
@@ -1756,15 +1804,23 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             .foreground(Foreground)
             .anyview()
     } else {
+        let bg: AnyView = if tail_on {
+            // The sender-side bottom corner is square where the tail
+            // joins so fill and wedge read as one outline.
+            let (bl, br) = if row.outgoing { (0.18, 0.0) } else { (0.0, 0.18) };
+            zstack((
+                UnevenRoundedRectangle::new(0.18, 0.18, bl, br)
+                    .fill(bubble_fill.clone())
+                    .anyview(),
+                bubble_tail_layer(row.outgoing, bubble_fill),
+            ))
+            .anyview()
+        } else {
+            RoundedRectangle::new(0.18).fill(bubble_fill).anyview()
+        };
         Frame::new(bubble_inner)
             .max_width(bubble_cap)
-            .background(if row.highlighted {
-                RoundedRectangle::new(0.18).fill(AccentContainer)
-            } else if row.outgoing {
-                RoundedRectangle::new(0.18).fill(Accent)
-            } else {
-                RoundedRectangle::new(0.18).fill(SurfaceVariant)
-            })
+            .background(bg)
             .foreground(if row.outgoing {
                 Color::from(AccentForeground)
             } else {
@@ -1811,49 +1867,22 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         "Delete".action(move |store: Store| store.delete_message(r5)),
     ));
 
-    // The tail hooks a run's last bubble toward the sender's avatar /
-    // the screen edge (Desktop); bubble-less emoji-only rows get none.
-    // The 8 pt gutter is reserved on every row so bubble edges stay
-    // aligned whether or not a tail is drawn (r25-3).
-    let tail_on = row.group_last && !(emoji_n > 0 && !row.highlighted);
-    let tail_slot = move |show: bool, outgoing: bool| -> AnyView {
-        let shape = if show {
-            bubble_tail(outgoing, bubble_fill)
-        } else {
-            // An empty box keeps the gutter width constant on tail-less
-            // rows — the tail must never shift the bubble's edge.
-            Color::from(Surface).size(8.0, 10.0).anyview()
-        };
-        vstack((spacer(), shape)).spacing(0.0).anyview()
-    };
     let placed = if row.outgoing {
-        hstack((
-            spacer(),
-            hstack((bubble, tail_slot(tail_on, true))).spacing(0.0),
-        ))
-        .anyview()
+        hstack((spacer(), bubble)).anyview()
     } else if row.avatar_col {
         // Groups/channels reserve a leading avatar column on incoming rows
         // so a run's bubbles stay aligned; the avatar itself shows only on
         // the run's last row, bottom-aligned (Telegram Desktop).
         let slot: AnyView = if row.show_avatar {
-            avatar(store.clone(), row.sender_photo, sender.as_str(), 32.0).anyview()
+            avatar(store.clone(), row.sender_photo, sender.as_str(), 32.0, row.sender_accent).anyview()
         } else {
             Color::from(Surface).size(32.0, 32.0).anyview()
         };
-        hstack((
-            vstack((spacer(), slot)).spacing(0.0),
-            hstack((tail_slot(tail_on, false), bubble)).spacing(0.0),
-            spacer(),
-        ))
-        .spacing(4.0)
-        .anyview()
+        hstack((vstack((spacer(), slot)).spacing(0.0), bubble, spacer()))
+            .spacing(4.0)
+            .anyview()
     } else {
-        hstack((
-            hstack((tail_slot(tail_on, false), bubble)).spacing(0.0),
-            spacer(),
-        ))
-        .anyview()
+        hstack((bubble, spacer())).anyview()
     };
     let placed = if row.unread_divider {
         vstack((
@@ -2737,7 +2766,7 @@ pub(crate) fn info_panel(store: Store) -> impl View {
                         hstack((
                             button(Label::new(Str::from(label_text), move || {
                                 hstack((
-                                    avatar(av_store.clone(), row.photo, &row.name, 32.0),
+                                    avatar(av_store.clone(), row.photo, &row.name, 32.0, row.accent),
                                     vstack((
                                         text(row.name.clone()).caption(),
                                         text(row.status.clone())

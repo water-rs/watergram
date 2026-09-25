@@ -1242,6 +1242,15 @@ scroll: the viewport misses the leftover width, and the semantic
 runtime's text measure differs from what the renderer paints). Fix
 session running. Still open.
 
+**CLOSED (r26, hydrolysis `eb962313`, #186 landed):** the nested scroll
+now reports its content's extent — the horizontal chip scroller is
+sized from its content, so the "Archive" chip is inside the viewport
+and reads whole. Re-verified on the real renderer at 1400, 800, 600
+and 420 (`r26/chat1400_new.png`, `chat800_new.png`,
+`chat600_new.png`, `list420_pre.png`): "Archive" paints complete at
+every width — no mid-glyph clip anywhere, so there is nothing the
+rail needs to scroll to.
+
 ## r20-2: `on_tap` targets inside a `List` row are unreachable on the real renderer — the row's press target consumes the pointer event
 
 Repro (real renderer, deterministic): `WATERGRAM_DEMO=1
@@ -1340,6 +1349,18 @@ managed backend launched a stale binary from the shared build cache);
 fix session running. Until it lands, each round's report states the
 launched artifact's path and mtime. The stale `~/.water/build_cache/
 target/` cache (45 GB) was deleted this session.
+
+**CLOSED (r26, cli `b17efc04`, cli#182 landed):** the mechanism is
+verified — the launched binary is this build's own output (fresh
+`Finished` + full relink every `water run`; first run logged "cache
+changed shape, cleaning" and rebuilt the managed crate from scratch),
+and the staged `resources/` (including `resources/fonts/
+Roboto-Variable.ttf`) is copied beside the packaged executable at
+`dist/linux/debug/`, so the renderer now measures with the app's own
+fonts. The cli#182 work surfaced two NEW cli defects — r26-3 (env
+`RUSTFLAGS` silently replaces user `[build] rustflags`) and r26-4
+(the staged `libwaterui_dylib.so` does not match the binary's
+hash-suffixed `DT_NEEDED` name) — both for upstream filing.
 
 <details><summary>Superseded r21-1 text (stale binary)</summary>
 
@@ -1576,3 +1597,142 @@ mid-glyph, `r25/chat1400.png` x≈220), cli#181 (artifact staleness —
 this round's launched artifact:
 `$MB/dist/linux/debug/watergram-hydrolysis`, mtime 2026-09-24 22:45 UTC,
 171,138,192 bytes), hydrolysis#130, waterui#1214, nami#23.
+
+## r26-1: bubble tails re-attached — `Path` wedge as a background layer + `.offset`, no reserved layout space
+
+**User review of r25:** the r25 tails were detached — a small triangle
+hanging *below* the bubble's bottom border, ~45 px from the corner, and
+the 8 pt gutter hack reserved layout space on every row.
+
+**Root cause of the r25 detachment:** the tail `Path` lived in a
+sibling `tail_slot` column *beside* the bubble (`hstack((bubble,
+tail_slot))`), and `PathCommand` coordinates are **normalized
+(0.0–1.0)** against the view's bounds (`shape/src/lib.rs:55`) — feeding
+absolute 0–6/0–11 point values drew a sliver stretched 6×/11× inside
+the frame, landing under the bubble rather than on its edge. Lesson:
+normalized path coords scale with whatever frame the view gets — pin
+the frame (`.size(6,11)`) to get absolute geometry.
+
+**Reconstruction (user's option (b)):** the wedge is now a layer of the
+bubble's own `zstack` background — same `fill` as the rounded rect, so
+fill + tail read as one shape — positioned by a `hstack((wedge,
+spacer()))` row inside a `vstack((spacer(), row))` so it sits on the
+bottom edge, then `.offset(±5.0, 0)` pushes it outward past the bubble
+edge (`Offset` is purely visual, `view.rs:1023`; hydrolysis translates
+it at `flush.rs:129` — no layout space is reserved, so the gutter and
+the invisible `Surface` box are gone entirely). The wedge's flat side
+lands 1 pt inside the edge so no antialiased seam shows; the joined
+corner is drawn square (radius 0) via `UnevenRoundedRectangle::new`
+while the other three corners keep 0.18 — Desktop's geometry.
+
+Both of the user's offered constructions were available — no framework
+limitation hit: (a) a single `Path` outline would have worked too
+(normalized coords aside), and (b) an overlay/background layer may
+extend past its base's bounds unclipped (confirmed: the offset wedge
+draws ~7 pt outside the zstack's bounds on the real renderer).
+
+**Verified (rebuilt at hydrolysis eb962313; wedge retuned to 10×13,
+offset ±7 — a ~6 pt hook, closer to Desktop's sweep):**
+`r26/tail_in_m12.png`, `r26/tail_in_800.png`, `r26/tail_in_600.png`
+(incoming hook grows tangentially out of the bottom-left corner —
+square join, down-left sweep toward the avatar gutter, at 6×),
+`r26/tail_out_m13.png`, `r26/tail_out_800.png`,
+`r26/tail_out_600.png` (outgoing mirror on the bottom-right — a ~6 pt
+sweep, tip level with the bubble bottom, Desktop's shape). Full
+captures `r26/chat1400_jump4.png`, `r26/chat800_jump2.png`,
+`r26/chat600_jump.png` — all reached by tapping the m23→m10 reply
+quote (the loaded fast-path scroll re-verified in the same shots).
+
+## r26-2: per-peer accent colors (pick)
+
+Desktop assigns every peer one of seven accent colors — the colored
+userpics in the chat list/members/message sender column and the group
+sender names. `peer_color(accent, name)` in `src/views.rs` maps TDLib's
+`accent_color_id` (`id % 7`) over the userpic palette
+(red/orange/violet/green/cyan/blue/pink); when the peer carries none
+(demo rows, unresolved senders) the display name is hashed instead, so
+a peer keeps one color everywhere it is drawn — "Alice" matches in the
+chat list, the group bubble name and the member row. Rows carry the
+real accent id end to end: `ChatRow.accent` ← `chat.accent_color_id`,
+`MessageRow.sender_accent` ← sender user/chat accent,
+`MemberRow.accent` ← resolved user/chat accent; the avatar component
+takes the accent and falls back to its `title` hash.
+
+**Verified:** `r26/chat33.png` — every chat-list userpic a distinct
+color (WD cyan, Alice orange, Saved pink, News green, RC red, Bob
+blue, DC violet), "Alice" sender name + run avatar cyan in the group,
+member avatars colored. Same at 800 and 600.
+
+**Still open — cites:** hydrolysis#130, waterui#1214, nami#23, plus
+cli#183 (env `RUSTFLAGS` drops user config rustflags — fix in
+progress; session workaround stays) and the new staging defect in
+r26-4 (staged dylib name ≠ `DT_NEEDED`). r20-1 and r21-1 closed this
+round: hydrolysis#186 (via #182) verified — the "Archive" chip reads
+whole at every width; cli#182 verified — the launched binary is this
+build's own output and `resources/fonts` sits beside it.
+
+## r26-3: `water run` drops `[build] rustflags` from cargo config — env `RUSTFLAGS` replaces them (**water-rs/cli#183**)
+
+**Finding (cli bug):** at cli `b17efc04`,
+`water run --platform linux` fails the final link of
+`watergram-hydrolysis-a0f23df4` with
+`undefined symbol: __isoc23_strtol` out of tdlib-rs's bundled OpenSSL
+objects — **only because** the user's own `[build] rustflags` never
+reached rustc.
+
+**Repro:** put link flags the binary needs in a cargo config file —
+here `~/.cargo/config.toml` carries
+`-L /home/ubuntu/.cargo-shims -l dylib=shim_c -l dylib=shim_cpp`
+(shim libs supplying `__isoc23_strtol`/`__isoc23_strto*` and libc++
+verbose-abort symbols; tdlib-rs 1.4.0's `download-tdlib` prebuilt
+archive is compiled on a glibc≥2.38 toolchain while this box runs
+glibc 2.35, so the shims are required to link and to run). Then
+`water run --platform linux` → the link step errors.
+
+**Root cause:** `src/workflows/build.rs:1520-1526` in the cli injects
+the new shared-runtime flags by *setting the `RUSTFLAGS` env var*
+(`-Cprefer-dynamic -Crpath`, added by `with_preferred_dynamic_linking`
+at :1076 — part of the cli#182 dist work). Cargo treats env
+`RUSTFLAGS` and config `build.rustflags` as **mutually exclusive
+sources** — env wins, so every flag in the user's config files is
+silently dropped from every unit in the managed build. The `--config`
+file args the cli also passes load the files for other keys but do not
+save `build.rustflags` from the precedence rule.
+
+**Not a cli#182 regression (corrected after user review):** the same
+env-`RUSTFLAGS` injection sits at the same place before #182
+(`b17efc04^1`, build.rs:1461) — the earlier builds likely reused
+cached units, so the link only broke now that cli#182's cache-clean
+forced a full relink. Filed upstream as **water-rs/cli#183**; fix in
+progress.
+
+**Impact:** any user whose cargo config carries rustflags — custom
+linker, `-Ctarget-cpu`, `-L`/`-l` shims — loses them under the cli;
+the failure surfaces as unrelated-looking link or behavior bugs.
+
+**Session workaround (not committed, kept until cli#183 lands):**
+export `RUSTFLAGS` with the config flags before `water run` — the cli
+*prepends* the existing env value (build.rs:1521) then appends its
+own, so the shims link again.
+
+## r26-4: packaged app won't launch — staged `libwaterui_dylib.so` name does not match `DT_NEEDED` (cli#182 regression)
+
+**Finding (cli bug, for upstream filing):** at cli `b17efc04`, the
+packaged artifact `dist/linux/debug/watergram-hydrolysis` exits 127 on
+launch: `error while loading shared libraries:
+libwaterui_dylib-0267d27d87854afc.so: cannot open shared object file`.
+
+**Repro:** `water run --platform linux` on a project built against the
+`waterui-dylib` shared runtime (cli#182's dev-build linkage). The
+binary records `DT_NEEDED =
+libwaterui_dylib-0267d27d87854afc.so` (cargo's hash-suffixed output
+name), but `dist/linux/debug/` stages the dylib as the GENERIC
+`libwaterui_dylib.so`. The hash-named copy exists in the build tree at
+`deps/libwaterui_dylib-0267d27d87854afc.so` — only the staged name is
+wrong. `libstd-c64e6e11aa24fc43.so` in the same dist dir IS staged
+under its hash name, so the staging code already handles hashed names
+for the other shared units.
+
+**Session workaround (not committed):**
+`ln -sf libwaterui_dylib.so dist/linux/debug/libwaterui_dylib-0267d27d87854afc.so`
+— the file contents are identical; only the name mismatched.

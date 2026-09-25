@@ -26,7 +26,7 @@
 | 未读数 / 提及徽标 | ✅ | `Chat.unread_count`/`unread_mention_count` → unread pill + `@` mention pill | `chat_list_rows`, `chat_row_mention_badge` |
 | 置顶聊天 | ✅ | `toggleChatIsPinned` | — |
 | 静音 / 通知设置 | ✅ | `setChatNotificationSettings` | — |
-| 头像 + 在线状态点 | ✅ | `chat.photo`/`user.status` + `downloadFile` | `chat_list_rows` |
+| 头像 + 在线状态点 | ✅ | `chat.photo`/`user.status` + `downloadFile`；首字母圆按 TDLib `accent_color_id` %7 上七色用户色板（无 accent 时按显示名哈希取色，跨聊天列表/消息头像/成员行一致） | `chat_list_rows` |
 | typing/… 指示 | ✅ | `sendChatAction` + `updateChatAction` | — |
 | 草稿显示 | ✅ | `updateChatDraftMessage`；列表行内红色 "Draft:" 前缀（r19 起，typing 优先） | — |
 | 归档（Archive 文件夹） | ✅ | `addChatToList(Main/Archive)` + `ChatPosition` | `archive_toggle_rebuilds_list` |
@@ -68,7 +68,7 @@
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
 | 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
-| 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母圆）；组末气泡底角画 Path 尾巴（预留 8pt 槽不位移气泡）；组间间距大于组内 | `set_messages_groups_runs` |
+| 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条并按对端 accent 色着色；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母色圆）；组末气泡底角尾巴为气泡背景层内 Path 楔形 + `.offset` 外推（同 fill 一体、接角方角、不占布局空间）；组间间距大于组内 | `set_messages_groups_runs` |
 
 ## 4. 媒体与附件
 

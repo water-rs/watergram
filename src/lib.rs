@@ -210,6 +210,7 @@ mod tests {
             kind_icon: "".into(),
             marked_unread: false,
             in_archive: false,
+            accent: -1,
         }
     }
 
@@ -217,6 +218,7 @@ mod tests {
         MessageRow {
             id,
             sender: if outgoing { "".into() } else { "Alice".into() },
+            sender_accent: -1,
             text: Str::from(text.to_string()),
             time: "12:00".into(),
             outgoing,
@@ -698,6 +700,7 @@ mod tests {
             }),
             username: "alice".into(),
             photo: 0,
+            accent: -1,
         }]);
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("2 members").assert_exists();
@@ -748,6 +751,7 @@ mod tests {
             }),
             username: "alice".into(),
             photo: 0,
+            accent: -1,
         }]);
         let mut app = ui.mount(move || views::new_chat_view(store.clone()).state(&store));
         app.query().label("Alice A").assert_exists();
@@ -787,12 +791,12 @@ mod tests {
         store.set_messages(Store::demo_conversation());
         let rows = store.messages.snapshot();
         let find = |id: i64| rows.iter().find(|r| r.id == id).unwrap().clone();
-        // Alice's 09:46-09:48 run (photo, forwarded, poll): the name shows
-        // only on the run's first row, the avatar only on the last.
-        let (first, mid, last) = (find(16), find(17), find(18));
-        assert!(first.group_first && !first.show_avatar);
-        assert!(!mid.group_first && !mid.show_avatar);
-        assert!(!last.group_first && last.group_last && last.show_avatar);
+        // The photo / forwarded / poll stretch (m16 Alice, m17 Bob, m18
+        // Alice) is three solo runs — different senders break each run, so
+        // every row is its run's first and last and carries the avatar.
+        for row in [find(16), find(17), find(18)] {
+            assert!(row.group_first && row.group_last && row.show_avatar);
+        }
         // The Alice m20-m23 run carries the avatar on its last row (m23);
         // m24 breaks it (outgoing) so m25 is a one-message run with both marks.
         let (run_first, run_last, solo) = (find(20), find(23), find(25));
@@ -1335,6 +1339,7 @@ mod tests {
                     typing: false,
                     online: false,
                     kind_icon: "group".into(),
+                    accent: -1,
                 },
             )
         });
@@ -1369,6 +1374,7 @@ mod tests {
                     typing: false,
                     online: false,
                     kind_icon: "group".into(),
+                    accent: -1,
                 },
             )
         });
@@ -2243,6 +2249,7 @@ mod tests {
             }),
             username: "spam".into(),
             photo: 0,
+            accent: -1,
         }]);
         let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
         app.query().label("Blocked users").assert_exists();
@@ -2441,6 +2448,7 @@ mod tests {
             }),
             username: uname.to_string().into(),
             photo: 0,
+            accent: -1,
         }
     }
 

@@ -2747,7 +2747,7 @@ dependencies = [
 [[package]]
 name = "hydrolysis"
 version = "0.3.1"
-source = "git+https://github.com/water-rs/hydrolysis?rev=9ccf2efe30730ccae9869239b5d546b89596b08c#9ccf2efe30730ccae9869239b5d546b89596b08c"
+source = "git+https://github.com/water-rs/hydrolysis?rev=eb962313c6fae7c558056a0c0ac2b5d8a30061e0#eb962313c6fae7c558056a0c0ac2b5d8a30061e0"
 dependencies = [
  "accesskit",
  "async-task",
