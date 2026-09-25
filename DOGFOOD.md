@@ -1815,7 +1815,7 @@ functionally correct underneath.
 workaround exists (opacity/scale are inside the framework's
 popup panel).
 
-### r27-4: `.context_menu` does not open on a long press — no long-press binding (CLOSED r29 — recognizer exists and works; the remaining gap is that `context_menu` binds only the secondary button)
+### r27-4: `.context_menu` does not open on a long press — no long-press binding (hydrolysis#191 — recognizer works; `context_menu` must open on touch/pen press-and-hold, not a held mouse button)
 
 **Original claim was wrong in scope.** I grepped hydrolysis's own
 crate for a `LongPress` recognizer and found none, and reported
@@ -1860,12 +1860,13 @@ pointer — can open a context menu. `LongPressGesture` is
 app-bindable per view, but a gesture handler cannot open the
 framework-owned `.context_menu` popup: the popup's anchor point
 and lifetime are internal to the context-menu path, so the app
-cannot wire "long press → open that menu" itself. That binding —
-long press opens the same popup — is the missing piece and needs
-a framework decision (or a small new API such as
-`.context_menu(...).open_on_long_press()`); until it exists,
-touch long-press → context menu is unreachable on this backend.
-PARITY context-menu row keeps the caveat.
+cannot wire "long press → open that menu" itself. Filed as
+**hydrolysis#191** (r30): touch and pen press-and-hold must open
+`.context_menu`, matching every platform's convention; a held
+mouse button must not. It follows platform convention, so it is
+a bug, not an API decision — a fix is in progress. Until it
+lands, touch/pen long-press → context menu is unreachable on
+this backend. PARITY context-menu row keeps the caveat.
 
 ### r27-5: cli#183 + cli#184 verified fixed @ `314040e1` — workarounds dropped
 
@@ -2003,3 +2004,89 @@ which also got `pinned_id = 14` so the banner tap jumps) and
 `"Bob joined the group"` before Bob's first message. Tests:
 `pin_appends_service_row`, `service_row_not_selectable`,
 `service_rows_break_runs`.
+
+## r30: service-row spacing + photo thumbnails
+
+### r30-1: `List` clamps every row to the M3 one-line height floor (56 pt) — no opt-out (hydrolysis, noted)
+
+**Bounds evidence.** A service pill asked for ~24 pt (18 pt text
+line + 2×3 pt padding) but its list row was laid out ~56 pt tall
+— the user measured ≈55 px of empty space above and below the
+pill at 1400 px capture scale.
+
+**Root cause, traced through three layers:**
+
+- hydrolysis `src/renderer/render/measurement.rs:888`
+  (`measure_list_item_row_height`): row height =
+  `(intrinsic + vertical_inset * 2).max(one_line_row_height)` —
+  an unconditional `max` against the theme's one-line minimum;
+  `:831` applies the same floor to the whole-list intrinsic
+  answer.
+- The theme numbers are style-blind:
+  `theme.list_metrics()` (waterui-backend-core
+  `widget.rs:1527`) returns the same values for every `List`
+  regardless of how it is used; hydrolysis-m3
+  `theme/dimensions.rs:263` sets
+  `LIST_ONE_LINE_ROW_HEIGHT = 56.0` with
+  `LIST_HORIZONTAL_INSET = 16.0` and
+  `LIST_VERTICAL_INSET = 10.0` (:264-265).
+- No app-side opt-out exists: waterui `List`'s builder surface
+  (`src/component/list/mod.rs`) exposes only editing / on_delete
+  / on_move / scroll_controller / selection / multi_selection —
+  no style or row-height API; `ListItem` (:797-819) has
+  `new`/`deletable`/`section` only. There is no "compact" or
+  content-sized row mode on any platform.
+
+**Why this matters beyond service rows:** any List used as a
+chat/timeline where rows are *not* M3 list items pays a 56 pt
+minimum per row. Our bubble rows clear the floor so it was
+invisible until the ~24 pt pill hit it.
+
+**App resolution (not a workaround — a presentation change):**
+Desktop draws service events as interstitial lines inside the
+message timeline, at ~the gap of a bubble-run break — the same
+treatment day headers already get (they live inside a row, not
+as list items). `set_messages` now folds each service row into
+the following message row's `service_above` lines (a trailing
+run lands in the previous row's `service_below`), rendered as
+~24 pt pills inside that row's column — so the list sees only
+bubble rows and the service lines keep Desktop's rhythm. The
+`is_service` row type survives for a degenerate all-service
+list. Selection (`toggle_select`), sender-run breaks
+(`service_rows_break_runs`), and pin appends all keep working
+on the folded model. If upstream later grows a compact row
+mode (or a documented way to opt a row out of the one-line
+floor) this fold still reads correctly, but the floor is worth
+a look on its own for dense-timeline uses of `List`.
+
+### r30-2: photo messages render the actual image — implemented
+
+The demo seed now writes a procedural 640×360 PNG (stored-
+deflate zlib, generated in `demo_photo_png`, no codec dep)
+into the app data dir and seeds `files[1]`, so m17's
+`media_file = 1` resolves through `file_signal` and the
+existing `Photo` branch draws the real thumbnail instead of
+the file-card fallback — and the viewer overlay shows the
+image rather than "Downloading…". The real TDLib path is
+unchanged (downloaded photos always resolved this way; only
+the demo lacked bytes). Test: `demo_seeds_photo_file`.
+
+### r30-3: folded service lines vanished after the first `set_messages` — app bug, fixed
+
+Verification of r30-1 on the real renderer first showed the
+`service_above` pills painting in the semantic-tree probe but
+never on GPU — several wrong theories (overlay layer, Vec
+children, view structure) were chased before the data was
+checked. Root cause was in the fold itself: the first
+implementation reassigned `row.service_above` from the
+`pending` drain on *every* `set_messages` call, and
+`set_messages` re-runs from ~a dozen sites (`open_chat`,
+`jump_to_message`, edits, sends, `regroup_messages`). On the
+second run no `is_service` rows remain, `pending` is empty,
+and every folded line was silently overwritten with `[]` —
+the pills were never in the view tree to paint. `service_below`
+only survived because it was assigned solely when `pending`
+was non-empty at the end. The fold is now idempotent
+(prepend/extend guarded on `!pending.is_empty()`); pills paint
+on GPU at 1400/800/600. Not a framework defect — recorded here
+because earlier captures made it look like one.

@@ -1587,24 +1587,38 @@ fn bubble_tail_layer(outgoing: bool, fill: Color) -> AnyView {
     vstack((spacer(), row)).spacing(0.0).anyview()
 }
 
-/// Desktop service line ("X pinned a message", "joined the group"):
-/// a centered muted caption on a subtle pill — no bubble, no meta, no
-/// context menu, not multi-selectable.
-#[allow(needless_anyview)] // AnyView is the concrete type: `message_bubble`'s
-// tail returns AnyView, so `-> impl View` would not unify the two sites.
-fn service_line(row: &MessageRow) -> AnyView {
+/// One Desktop service line ("X pinned a message", "joined the
+/// group"): a centered muted caption on a subtle pill at ~the gap of a
+/// bubble run — no bubble, no meta.
+fn service_pill(line: Str) -> AnyView {
     hstack((
         spacer(),
-        text(row.text.clone())
+        text(line)
             .caption()
             .muted()
             .padding_with((2.0, 8.0))
             .background(RoundedRectangle::new(0.5).fill(SurfaceVariant)),
         spacer(),
     ))
+    .padding_with((4.0, 0.0))
     .anyview()
 }
 
+#[cfg(test)]
+pub(crate) fn service_pill_for_test() -> AnyView {
+    service_pill(Str::from("Alice pinned a message"))
+}
+
+/// Standalone service row — reached only when no message row exists to
+/// carry the line (set_messages folds them into neighbors otherwise).
+#[allow(needless_anyview)] // AnyView is the concrete type: `message_bubble`'s
+// tail returns AnyView, so `-> impl View` would not unify the two sites.
+fn service_line(row: &MessageRow) -> AnyView {
+    service_pill(row.text.clone())
+}
+
+#[allow(needless_anyview)] // AnyView is the concrete type: the tail's
+// `vstack(column)` must be AnyView to unify with `service_line` above.
 pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     if row.is_service {
         return service_line(&row);
@@ -1928,8 +1942,29 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     } else {
         hstack((bubble, spacer())).anyview()
     };
-    let placed = if row.unread_divider {
-        vstack((
+    // Desktop's vertical order inside a row: day divider, unread
+    // divider, folded service lines, the bubble, trailing service lines.
+    let mut column: Vec<AnyView> = Vec::new();
+    if row.day_header {
+        column.push(
+            zstack((
+                Color::from(BorderColor).height(1.0),
+                hstack((
+                    spacer(),
+                    text(row.day_label.clone())
+                        .caption()
+                        .muted()
+                        .padding_with((0.0, 6.0))
+                        .background(Surface),
+                    spacer(),
+                )),
+            ))
+            .padding_with((2.0, 4.0))
+            .anyview(),
+        );
+    }
+    if row.unread_divider {
+        column.push(
             zstack((
                 Color::from(BorderColor).height(1.0),
                 hstack((
@@ -1943,36 +1978,18 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                     spacer(),
                 )),
             ))
-            .padding_with((2.0, 4.0)),
-            placed,
-        ))
-        .spacing(0.0)
-        .anyview()
-    } else {
-        placed
-    };
-    if row.day_header {
-        vstack((
-            zstack((
-                Color::from(BorderColor).height(1.0),
-                hstack((
-                    spacer(),
-                    text(row.day_label.clone())
-                        .caption()
-                        .muted()
-                        .padding_with((0.0, 6.0))
-                        .background(Surface),
-                    spacer(),
-                )),
-            ))
-            .padding_with((2.0, 4.0)),
-            placed,
-        ))
-        .spacing(0.0)
-        .anyview()
-    } else {
-        placed
+            .padding_with((2.0, 4.0))
+            .anyview(),
+        );
     }
+    for line in &row.service_above {
+        column.push(service_pill(line.clone()));
+    }
+    column.push(placed);
+    for line in &row.service_below {
+        column.push(service_pill(line.clone()));
+    }
+    vstack(column).spacing(0.0).anyview()
 }
 
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools

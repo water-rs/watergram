@@ -49,7 +49,7 @@
 | 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
 | 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + `List` `ScrollController<usize>` 按索引精确滚动 + 气泡高亮 | — |
 | 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
-| 服务消息（置顶/入群/拉人，居中灰条） | ✅ | `MessagePinMessage`/`MessageChatAddMembers`/`MessageChatJoinBy*` → 居中 pill 行（"You"/发送者名前缀，拉人解析成员名）；不参与消息组、不可多选、无右键菜单；demo pin 路径同步追加服务行 | `pin_appends_service_row` / `service_row_not_selectable` / `service_rows_break_runs` |
+| 服务消息（置顶/入群/拉人，居中灰条） | ✅ | `MessagePinMessage`/`MessageChatAddMembers`/`MessageChatJoinBy*` → 居中 muted pill（"You"/发送者名前缀，拉人解析成员名）；折叠进相邻气泡行内渲染以避开 List 56pt 行高地板（service_above/service_below），Desktop 级间距；不参与消息组、不可多选、无右键菜单；demo pin 路径同步追加服务行 | `pin_appends_service_row` / `service_row_not_selectable` / `service_rows_break_runs` |
 | Reactions 展示（统一 pill 组件：气泡内气泡色派生 tint、已选 accent） | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
 | 发送中/失败状态 | ✅ | `updateMessageSendSucceeded`/`Failed` 行内图标；点 ✗ → `resendMessages` | `resend_failed_marks_pending` |
@@ -82,7 +82,7 @@
 | 视频消息 | ✅ | 播放：`video_player`；录制：GpuSurface/GpuView 直渲预览（device.clone → Arc，帧留 GPU）→ compute pass NV12 → waterkit-codec H.264 → VideoWriter mp4 → `inputMessageVideoNote`（VA-API 编码需 /dev/dri） | `nv12_layout`、`crop_square`、`video_note_handles_missing_camera` |
 | 贴纸 | ✅ | `getRecentStickers`/`searchStickers`/`getInstalledStickerSets`/`getStickerSet`（emoji 搜索+贴纸包浏览）→ `inputMessageSticker` | `sticker_picker_toggles` |
 | GIF | ✅ | `getSavedAnimations` + @gif inline bot `getInlineQueryResults` trending 搜索 → `inputMessageAnimation` | `sticker_picker_toggles` |
-| 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`、视频/动画 `video_player`、音频紧凑播放器 | `media_slot`、`media_play_fallback_row` |
+| 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`（圆角裁剪、max_width 320）、视频/动画 `video_player`、音频紧凑播放器；demo 种子含程序化 640×360 PNG 实图渲染验证 | `media_slot`、`media_play_fallback_row`、`demo_seeds_photo_file` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
 | 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭（占满会话面板；非全屏） | `media_viewer_overlay` |

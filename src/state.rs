@@ -219,8 +219,18 @@ pub struct MessageRow {
     /// Sender profile-photo small file id (0 → initials).
     pub sender_photo: i32,
     /// Service row (pin/join/etc.) — renders as a centered label, not a
-    /// bubble; excluded from sender runs and multi-select.
+    /// bubble; excluded from sender runs and multi-select. `set_messages`
+    /// folds these into the neighboring row's `service_above`/`service_below`
+    /// lines (Desktop draws them as interstitial lines, not list rows); a
+    /// service row reaches the view only when no message row exists to
+    /// carry it.
     pub is_service: bool,
+    /// Folded service lines rendered above this row's bubble, after the
+    /// day/unread dividers — chronological order.
+    pub service_above: Vec<Str>,
+    /// Folded service lines rendered below this row's bubble — only used
+    /// when a service event has no following message row to attach to.
+    pub service_below: Vec<Str>,
 }
 
 /// A single poll answer option as shown inside a poll bubble.
@@ -1031,6 +1041,15 @@ impl Store {
             FolderRow { id: 3, title: "Personal".into(), active: false },
         ]);
         self.set_messages(Self::demo_conversation());
+        // Seed the photo message's local file so its thumbnail renders —
+        // the demo path has no TDLib download pipeline, so `file_signal(1)`
+        // would otherwise stay empty and fall back to the file card.
+        if let Some(path) = demo_photo_png() {
+            self.files
+                .borrow_mut()
+                .insert(1, path.to_string_lossy().to_string());
+            self.files_version.add_assign(1);
+        }
         self.pinned_label.set_from("Alice: shipping it 🚀");
         self.pinned_id.set(14);
         self.sessions.set(vec![
@@ -1110,6 +1129,8 @@ impl Store {
             forwarded_from: Str::from(fwd.to_string()),
             poll: None,
             is_service: false,
+            service_above: Vec::new(),
+            service_below: Vec::new(),
         };
         let svc = |id: i64, text: &str| {
             let mut r = m(id, "", text, "", false, false, "", "", "", "");
@@ -1135,6 +1156,8 @@ impl Store {
         msgs.push(m(17, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
         // A real file id so tapping the media slot opens the viewer (demo
         // has no downloaded bytes, so the viewer shows "Downloading…").
+        // A real file id resolves via the seeded demo PNG (`demo_photo_png`)
+        // — the media slot draws the image and tapping opens the viewer.
         msgs.last_mut().unwrap().media_file = 1;
         msgs[2].unread_divider = true;
         msgs.push(svc(18, "Bob joined the group"));
@@ -1164,6 +1187,9 @@ impl Store {
         msgs.push(m(25, "Alice", "six distinct reactions", "09:53", false, false, "", "👍4 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
         msgs.push(m(26, "", "🚀🚀", "09:54", true, true, "", "👍1 ❤️1 🔥1", "", ""));
         msgs.push(m(27, "Alice", "👀", "09:55", false, false, "", "👍2 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
+        // Trailing service line — folds into m27's `service_below`, so the
+        // bottom of the chat exercises that path too.
+        msgs.push(svc(28, "Lexo created the group"));
         // A reply quote inside the visible window for live tap-to-jump
         // verification: m24 quotes m23.
         msgs[14].reply_excerpt = Str::from("single reaction on text");
@@ -1787,6 +1813,8 @@ impl Store {
             edited: m.edit_date != 0,
             poll,
             is_service,
+            service_above: Vec::new(),
+            service_below: Vec::new(),
         }
     }
 
@@ -2792,6 +2820,44 @@ impl Store {
     /// Sets `messages` after marking the first row of each distinct local
     /// day with `day_header` + `day_label` (the date pill).
     pub fn set_messages(&self, mut rows: Vec<MessageRow>) {
+        // Service events are interstitial chrome in Desktop's chat view
+        // (same treatment as day headers, which already live inside a
+        // row): fold each service row's text into the FOLLOWING message
+        // row's `service_above` — a trailing run goes into the previous
+        // row's `service_below`. The folded row never becomes a list
+        // item, so it doesn't take the list's one-line minimum height
+        // (DOGFOOD r30-1).
+        let mut folded: Vec<MessageRow> = Vec::with_capacity(rows.len());
+        let mut pending: Vec<MessageRow> = Vec::new();
+        for mut r in rows.drain(..) {
+            if r.is_service {
+                pending.push(r);
+            } else {
+                // Keep the fold idempotent: set_messages also re-runs on
+                // already-folded lists (regroup, edits, jumps), where
+                // `pending` is empty — clearing `service_above` there
+                // would silently drop every folded line.
+                if !pending.is_empty() {
+                    let mut lines: Vec<Str> =
+                        pending.drain(..).map(|s| s.text).collect();
+                    lines.append(&mut r.service_above);
+                    r.service_above = lines;
+                }
+                folded.push(r);
+            }
+        }
+        if pending.is_empty() {
+            rows = folded;
+        } else if let Some(last) = folded.last_mut() {
+            last.service_below
+                .extend(pending.drain(..).map(|s| s.text));
+            rows = folded;
+        } else {
+            // Nothing but service lines — keep them as standalone rows
+            // rather than dropping content.
+            folded.extend(pending);
+            rows = folded;
+        }
         let mut prev_day = 0i64;
         for r in &mut rows {
             r.day_header = r.day != prev_day;
@@ -2916,6 +2982,8 @@ impl Store {
                 show_avatar: false,
                 sender_photo: 0,
                 is_service: true,
+                service_above: Vec::new(),
+                service_below: Vec::new(),
             });
             self.set_messages(rows);
             return;
@@ -3477,13 +3545,14 @@ impl Store {
     /// Multi-selection: context-menu "Select" starts it, tapping a bubble
     /// toggles membership; an empty selection ends the mode.
     pub fn toggle_select(&self, message_id: i64) {
-        // Service rows (pins/joins) aren't real messages — nothing to
-        // delete/forward, and Desktop doesn't let you select them.
-        if self
+        // Only rows that exist as selectable messages can be selected —
+        // a folded service line's id, a missing id, or a service row
+        // itself all refuse (Desktop doesn't select service events).
+        if !self
             .messages
             .snapshot()
             .iter()
-            .any(|r| r.id == message_id && r.is_service)
+            .any(|r| r.id == message_id && !r.is_service)
         {
             return;
         }
@@ -6021,4 +6090,109 @@ impl Store {
         })
         .detach();
     }
+}
+
+/// Demo asset: writes a small procedural PNG into the app's data dir so
+/// the seeded photo message's `file_signal(1)` resolves a real path and
+/// the media slot renders the actual image (the demo path has no TDLib
+/// download pipeline). The zlib stream uses stored deflate blocks, so no
+/// codec dependency is needed to produce it.
+fn demo_photo_png() -> Option<PathBuf> {
+    const W: usize = 640;
+    const H: usize = 360;
+    // RGB dusk scene: vertical gradient sky, a sun disc, a darker
+    // shoreline with a soft sine edge.
+    let mut raw = Vec::with_capacity(H * (1 + W * 3));
+    for y in 0..H {
+        raw.push(0u8); // scanline filter: none
+        for x in 0..W {
+            let t = y as f32 / (H - 1) as f32;
+            let (mut r, mut g, mut b) = (28.0 + 110.0 * t, 52.0 + 70.0 * t, 150.0 - 70.0 * t);
+            let (dx, dy) = (x as f32 - 470.0, y as f32 - 130.0);
+            let sun = 1.0 - ((dx * dx + dy * dy).sqrt() / 58.0).min(1.0);
+            if sun > 0.0 {
+                r += 210.0 * sun;
+                g += 150.0 * sun;
+                b += 70.0 * sun;
+            }
+            if y > 250 {
+                let shore = 250.0 + (x as f32 / 18.0).sin() * 6.0;
+                if y as f32 > shore {
+                    r *= 0.45;
+                    g *= 0.6;
+                    b *= 0.9;
+                }
+            }
+            raw.extend_from_slice(&[
+                r.clamp(0.0, 255.0) as u8,
+                g.clamp(0.0, 255.0) as u8,
+                b.clamp(0.0, 255.0) as u8,
+            ]);
+        }
+    }
+    // zlib stream of stored (uncompressed) deflate blocks.
+    let mut z = Vec::with_capacity(raw.len() + raw.len() / 65535 * 5 + 16);
+    z.extend_from_slice(&[0x78, 0x01]);
+    let mut i = 0;
+    while i < raw.len() {
+        let n = (raw.len() - i).min(65535);
+        z.push(u8::from(i + n == raw.len()));
+        z.extend_from_slice(&(n as u16).to_le_bytes());
+        z.extend_from_slice(&(!(n as u16)).to_le_bytes());
+        z.extend_from_slice(&raw[i..i + n]);
+        i += n;
+    }
+    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let mut png = Vec::with_capacity(z.len() + 64);
+    png.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&(W as u32).to_be_bytes());
+    ihdr.extend_from_slice(&(H as u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit truecolor RGB
+    png_chunk(&mut png, b"IHDR", &ihdr);
+    png_chunk(&mut png, b"IDAT", &z);
+    png_chunk(&mut png, b"IEND", &[]);
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("watergram")
+        .join("demo");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("photo.png");
+    std::fs::write(&path, &png).ok()?;
+    Some(path)
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let mut crc_in = Vec::with_capacity(4 + data.len());
+    crc_in.extend_from_slice(kind);
+    crc_in.extend_from_slice(data);
+    out.extend_from_slice(&crc32(&crc_in).to_be_bytes());
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    const MOD: u32 = 65521;
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in data {
+        a = (a + u32::from(x)) % MOD;
+        b = (b + a) % MOD;
+    }
+    (b << 16) | a
 }
