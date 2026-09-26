@@ -2498,3 +2498,133 @@ Bob" bubble: **not app-drawn** — same photo-row overflow
 sliver as r31-2b/r33-2 (width matches the photo bubble;
 framework mechanism, no app-side suppression per the
 no-workaround rule).
+
+## r34: five parity picks — scroll anchor, list keynav, link card, peer taps, emoji autocomplete
+
+Picks (all implemented + tested):
+1. Opening a chat with unread lands on the **unread divider** row instead of
+   the tail (`scroll_to_open`); an incoming message while the divider is
+   pending does **not** yank the viewport, your own send always follows
+   (`follows_tail`).
+2. Chat-list **arrow-key navigation**: Up/Down/Home/End step the selection
+   via the framework's `navigate_list_row` (hydrolysis
+   `hit_test.rs:1889`) which writes the row's `selection` slot →
+   `on_change` → `select_chat`; Enter activates the focused row. Test
+   `keyboard_arrows_chat_list` now asserts focus→ArrowDown→open_chat=2→3,
+   ArrowUp→2, End→10, focus row 6 + Enter→open_chat=6 (was a write-only
+   probe before).
+3. **Link-preview card is tappable** → `open_link` (robius-open → system
+   browser; `link_opened` binding records the URL for tests). `link()`'
+   label requires `IntoLabel` — a card can't be a link label, so the tap
+   calls `robius_open` directly and the binding keeps it observable.
+4. **Peer taps → profile card**: sender avatar, sender name and the
+   "Forwarded from" badge open the peer's profile (`open_peer`; demo
+   synthesizes the card since `client_id==0`). Sender name already sits
+   above the reply quote (r33-5).
+5. **`:emoji` autocomplete**: a trailing `:token` (≥2 chars, whitespace or
+   start before the colon — `emoji_token`) shows a suggestion row above
+   the composer (`emoji_suggest`, ~120-entry `EMOJI_SHORTCODES` table);
+   tap → `apply_emoji` replaces the token. Matches Desktop's token rules.
+
+### r34-1: OS file drag-and-drop onto a window is inexpressible — two-layer framework gap
+
+Desktop: dragging files onto the chat window opens the send dialog with a
+caption field. Two gaps block it end to end:
+
+1. `waterui::drag_drop::DragData` (`src/interaction_support/drag_drop.rs:49`)
+   is `Text(Str) | Url(Str)` — there is no File/Path/Bytes payload variant,
+   so a `drop_destination` cannot express "a file was dropped".
+2. hydrolysis's drop machinery (`renderer/input/hit_test.rs`,
+   `ActiveDrag`/`call_drop_action` at :545-619) only routes **in-app**
+   drags started by `.draggable(...)`; winit's `WindowEvent::DroppedFile`
+   / `HoveredFile` are never translated into any event (zero occurrences in
+   `src/`).
+
+Minimal repro: a `.drop_destination(|data: DragData| …)` region can never
+see an OS file drop — `DragData` has no variant to carry it, and no event
+reaches the runtime. No app-side workaround exists (both layers are
+framework-owned).
+
+### r34-2: `ScrollController` is write-only — no offset/edge readback
+
+`ScrollController<T>` exposes `scroll_to(target)`, `target() -> Computed<T>`
+and `generation()` — i.e. the app can *command* a scroll but can never
+*read* where the viewport actually is. Two consequences:
+
+- "Is the user pinned to the bottom?" (Desktop's precondition for
+  auto-scroll on incoming messages + the "↓ N new messages" button) is
+  inexpressible — `follows_tail` uses the pending unread divider as the
+  anchor proxy instead.
+- Desktop's scroll-position memory per chat is also inexpressible.
+
+Minimal repro: `let s = ScrollController::<usize>::new();` — there is no
+`offset()`, `at_end()` or `position` API; `target()` returns what was last
+*requested*, not where the viewport sits.
+
+### r34-3: custom text-context-menu commands cannot read the selection
+
+`execute_text_context_menu_action` (hydrolysis
+`renderer/input/text_editing.rs:731`) dispatches
+`TextContextMenuAction::Custom(command)` via
+`call_action_discarding_result(&command.action, env)` — the environment
+carries no selected-text handle, so a custom "Bold selection"/"Quote" menu
+command cannot know which text is selected. Desktop's composer
+format-on-selection (B/I/U/S on a context menu) is therefore inexpressible
+through `selection_menu`; the format buttons in the composer row work
+through our own bindings instead. No app-side fix — the selection handle
+is framework-internal.
+
+### r34-4: ListRow keyboard navigation is unreachable via pointer input
+
+`navigate_list_row` (hydrolysis `src/renderer/input/hit_test.rs:1889`)
+moves the chat-list selection with ArrowDown/Up, but only when the node
+holding keyboard focus is the row's `AccessibilityActionTarget::ListRow`
+node. Rows register focus links for `row_interaction_base` and `+3` only
+(list.rs:971-977). A pointer click resolves the *innermost* actionable
+node — the `.on_tap` press slot inside our row content — and
+`set_keyboard_focus` (:844) lands there, not on the ListRow. From that
+focus position ArrowDown/Up are dead keys, and the rows are not
+Tab-reachable either, so a pointer-first or keyboard-only user can never
+reach arrow navigation. Live-verified on winit/X11: clicking a chat row
+then pressing Down/End leaves the selection highlight unmoved; driving
+the `Focus` accessibility action onto the `LIST_ITEM` node directly (as
+the headless test `keyboard_arrows_chat_list` does) makes the same keys
+work, which pins the gap to the pointer→focus mapping, not the nav code.
+
+Minimal repro: a `List` of `ListItem` rows whose content carries an
+`.on_tap` — click a row with the pointer, then ArrowDown: nothing moves.
+No app-side workaround: the app cannot re-target keyboard focus onto the
+ListRow node from view code.
+
+Observed collateral while capturing r34: the oscillating #210 photo-row
+extent makes live taps in its overflow region land on the wrong row
+(the media viewer opens on clicks painted over the forward badge /
+avatar below the photo). Presumably clears with the same fix.
+
+### r34-5: `.on_tap` + naming metadata duplicates a11y nodes on leaf views
+
+`text(name).on_tap(..).a11y_label(..).a11y_role(Button)` emits TWO
+identical `Button` nodes at the same bounds: the tap gesture emits one
+(`apply_gesture_observer`, metadata.rs:332-358) and the text leaf emits
+another, because the gesture's content walk does not strip naming
+metadata from the child environment — the container path does
+(`accessibility_container_child_environment`,
+accessibility_impl.rs:635-651 removes label/role/… before descending),
+the gesture path (`render_gesture_content`, metadata.rs:411-428)
+suppresses only when `AccessibilityChildren::excludes_descendants`.
+"Naming metadata is nearest-consumer" (:44) is thus violated for
+gesture-wrapped leaves. Found via `a11y_audit_chat` on the r34
+sender-name tap ("Open profile of Alice" twice per row).
+
+Minimal repro: `text("Hi").on_tap(|_| {}).a11y_label("Go").a11y_role(AccessibilityRole::Button)`
+in an `OffscreenApp` → two `Role(Button)` `Go` nodes at the same bounds.
+
+An `.a11y_hidden(true)` on the leaf silences it (used here), and a
+container between metadata and leaf (e.g. an `if`/`else` AnyView branch)
+routes naming through the container-claim path — but that container node
+registers with NO `Activate` action
+(`begin_accessibility_container_inner` passes `None`,
+accessibility_impl.rs:1231-1233), so the scope-claim suppresses the
+gesture's actionable node and the announced Button is dead for assistive
+activation. Both are framework-side semantics gaps; the leaf-hidden form
+is the only composition that yields one Button node carrying `Activate`.

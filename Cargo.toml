@@ -56,6 +56,8 @@ waterui-icons-material-icon = "0.5.1"
 waterui-backend-core = "0.5.2"
 waterui-barcode = "0.3.0"
 arboard = "3.6.1"
+# Opens message URLs in the system browser (same mechanism waterui::link).
+robius-open = "0.3"
 waterkit-audio = "0.1.4"
 waterkit-camera = "0.1.4"
 waterkit-codec = "0.1.4"
@@ -79,7 +81,7 @@ pollster = "1"
 # table applies, so hydrolysis's own [patch] is replicated here. Drop once a
 # release carries these.
 [patch.crates-io]
-hydrolysis = { git = "https://github.com/water-rs/hydrolysis", rev = "e00b1f04673ebd3c71aecc44367a2725aaf45579" }
+hydrolysis = { git = "https://github.com/water-rs/hydrolysis", rev = "a4b89a5525a44d7e99de76b620916bbd10a78105" }
 nami = { git = "https://github.com/water-rs/nami", rev = "6908aac816de14ee5aff23bfffd7d2b109d08fea" }
 nami-core = { git = "https://github.com/water-rs/nami", rev = "6908aac816de14ee5aff23bfffd7d2b109d08fea" }
 nami-derive = { git = "https://github.com/water-rs/nami", rev = "6908aac816de14ee5aff23bfffd7d2b109d08fea" }

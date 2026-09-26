@@ -33,6 +33,7 @@
 | 聊天文件夹（Chat Folders） | ✅ | `updateChatFolders` + `ChatList::Folder`/`loadChats` 侧栏 tab；`createChatFolder`/`editChatFolder`/`deleteChatFolder`（名称+联系人群组频道开关；不含逐聊包含/排除编辑） | `folder_tabs_render`、`folder_editor_opens` |
 | 已读回执标记 | ✅ | `viewMessages` + `UpdateChatReadOutbox` → ✓/✓✓ | `read_receipt_double_check` |
 | 已标记为未读 | ✅ | `toggleChatIsMarkedAsUnread` + `UpdateChatIsMarkedAsUnread` | `marked_unread_shows_dot` |
+| 列表键盘导航 | ✅ | Up/Down 逐行移动、Home/End 跳首末、Enter 激活 — 框架 `navigate_list_row` 写 `list_selection` → `select_chat`（r34） | `keyboard_arrows_chat_list` |
 
 ## 3. 会话与消息
 
@@ -54,7 +55,7 @@
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
 | 发送中/失败状态 | ✅ | `updateMessageSendSucceeded`/`Failed` 行内图标；点 ✗ → `resendMessages` | `resend_failed_marks_pending` |
 | 定时消息 / 静默发送 | ✅ | `sendMessage(MessageSendOptions{disable_notification,scheduling_state=SendAtDate})` — 发送按钮右键 | — (send_opt 路径） |
-| 链接预览 | ✅ | `MessageText.link_preview` → Desktop 式预览卡片：accent 竖条 + site·title·desc（外发气泡内 AccentForeground/内 Accent） | `link_preview_line_shows` `link_preview_card_shows_site_title_desc` |
+| 链接预览 | ✅ | `MessageText.link_preview` → Desktop 式预览卡片：accent 竖条 + site·title·desc（外发气泡内 AccentForeground/内 Accent）；点卡片经 `robius_open` 打开浏览器（`link_opened` 可观测） | `link_preview_line_shows` `link_preview_card_shows_site_title_desc` `link_card_opens_url` |
 | 剧透点按揭示 | ✅ | Spoiler 实体 → 遮掩态（masked 文本前景=气泡填充融入）+ 点按揭示（`revealed_spoilers` 切换 `.visible`，a11y Button「Hidden text — tap to reveal」揭示后隐藏） | `spoiler_tap_reveals` `spoiler_tap_reveals_offscreen` |
 | 富文本实体（粗/斜/剧透/超链） | ✅ | `FormattedText.entities` → `StyledStr`（粗/斜/下划/删除/剧透/代码/引用/链接，UTF-16→byte 映射+重叠合并） | `styled_entities_merge` |
 | 转发带出处徽标 | ✅ | `m.forward_info.origin`（User/HiddenUser/Chat/Channel 出处行内徽标） | — |
@@ -69,6 +70,10 @@
 | @提及/用户名补全 | ✅ | 输入框尾部 @token → `searchChatMembers`+`getUser`(username) 过滤弹层，选中回填 `@username ` | `mention_popup_filters_and_inserts`, `mention_token_parses` |
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
 | 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
+| 打开会话锚定未读分隔线 | ✅ | `scroll_to_open`：unread>0 且有分隔线 → 定位分隔线行；未读挂起期间收到新消息不动视口（`follows_tail`），自发消息仍跟随尾部 | `open_unread_anchors_divider` |
+| 发送者头像/名字、转发徽标点开资料 | ✅ | 气泡列头像、组内发送者名、「Forwarded from」徽标 → `open_peer` → Profile 卡（demo 合成卡） | `peer_taps_open_profiles` |
+| `:emoji` 短码补全 | ✅ | 输入框尾部 `:token`(≥2 字符) → `EMOJI_SHORTCODES` 前缀建议条（≤6 项），点选替换 token | `emoji_autocomplete_inserts` |
+| 拖拽文件进窗口发送 | ❌ | 框架双层缺口：waterui `DragData` 仅 Text|Url 无 File；hydrolysis 未桥接 winit DroppedFile/HoveredFile — DOGFOOD r34-1 | — |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
 | 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条并按对端 accent 色着色；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母色圆）；组末气泡底角尾巴为气泡背景层内 Path 楔形 + `.offset` 外推（同 fill 一体、接角方角、不占布局空间）；组间间距大于组内 | `set_messages_groups_runs` |
 
@@ -134,6 +139,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：87 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：0 项
+- 已实现 ✅：91 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：1 项（拖放文件发送，框架缺口 DOGFOOD r34-1）
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
-- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。
+- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。

@@ -198,6 +198,17 @@ pub struct MessageRow {
     pub link_desc: Str,
     /// "Forwarded from X" attribution, empty when not forwarded.
     pub forwarded_from: Str,
+    /// Sender peer for the avatar/name → profile tap: `sender_user` is a
+    /// TDLib user id, `sender_chat` a chat id for channel posts (0 = none).
+    pub sender_user: i64,
+    pub sender_chat: i64,
+    /// Forwarded-origin peer for the badge → source profile tap
+    /// (0 = none / hidden sender).
+    pub fwd_user: i64,
+    pub fwd_chat: i64,
+    /// URL the link-preview card opens when tapped (`link_preview.url`,
+    /// else the first URL/TextUrl entity); empty = card not tappable.
+    pub link_url: Str,
     pub failed: bool,
     pub pending: bool,
     /// Flash-highlighted after a jump-to-message.
@@ -262,6 +273,67 @@ pub struct SharedMediaRow {
     /// Fallback label (emoji or "GIF") while the file downloads.
     pub label: Str,
 }
+
+/// One `:shortcode` emoji-autocomplete suggestion row.
+#[derive(Clone, Identifiable)]
+pub struct EmojiSug {
+    /// Shortcode without colons (row key).
+    #[id]
+    pub name: Str,
+    pub emoji: Str,
+}
+
+/// Static `name → emoji` table for `:token` autocomplete (Desktop queries
+/// the server emoji index; a local set covers the common shortcodes).
+pub(crate) const EMOJI_SHORTCODES: &[(&str, &str)] = &[
+    ("smile", "😄"), ("smiley", "😃"), ("grin", "😁"), ("joy", "😂"),
+    ("rofl", "🤣"), ("wink", "😉"), ("blush", "😊"), ("yum", "😋"),
+    ("sunglasses", "😎"), ("heart_eyes", "😍"), ("kissing_heart", "😘"),
+    ("thinking", "🤔"), ("neutral_face", "😐"), ("expressionless", "😑"),
+    ("roll_eyes", "🙄"), ("smirk", "😏"), ("persevere", "😣"),
+    ("open_mouth", "😮"), ("zipper_mouth", "🤐"), ("hushed", "😯"),
+    ("sleepy", "😪"), ("tired_face", "😫"), ("sleeping", "😴"),
+    ("relieved", "😌"), ("stuck_out_tongue", "😛"), ("cry", "😢"),
+    ("sob", "😭"), ("scream", "😱"), ("triumph", "😤"), ("pensive", "😔"),
+    ("confused", "😕"), ("upside_down", "🙃"), ("money_mouth", "🤑"),
+    ("angry", "😠"), ("rage", "😡"), ("mask", "😷"), ("sneezing", "🤧"),
+    ("innocent", "😇"), ("clown", "🤡"), ("skull", "💀"), ("ghost", "👻"),
+    ("alien", "👽"), ("robot", "🤖"), ("poop", "💩"),
+    ("thumbsup", "👍"), ("thumbsdown", "👎"), ("clap", "👏"),
+    ("raised_hands", "🙌"), ("open_hands", "👐"), ("handshake", "🤝"),
+    ("pray", "🙏"), ("v", "✌️"), ("ok_hand", "👌"), ("wave", "👋"),
+    ("muscle", "💪"), ("writing_hand", "✍️"),
+    ("heart", "❤️"), ("orange_heart", "🧡"), ("yellow_heart", "💛"),
+    ("green_heart", "💚"), ("blue_heart", "💙"), ("purple_heart", "💜"),
+    ("black_heart", "🖤"), ("broken_heart", "💔"), ("two_hearts", "💕"),
+    ("fire", "🔥"), ("sparkles", "✨"), ("star", "⭐"), ("boom", "💥"),
+    ("100", "💯"), ("white_check_mark", "✅"), ("x", "❌"),
+    ("warning", "⚠️"), ("tada", "🎉"), ("confetti_ball", "🎊"),
+    ("gift", "🎁"), ("balloon", "🎈"), ("birthday", "🎂"),
+    ("trophy", "🏆"), ("soccer", "⚽"), ("basketball", "🏀"),
+    ("dart", "🎯"), ("video_game", "🎮"), ("game_die", "🎲"),
+    ("car", "🚗"), ("airplane", "✈️"), ("rocket", "🚀"), ("house", "🏠"),
+    ("iphone", "📱"), ("computer", "💻"), ("watch", "⌚"),
+    ("camera", "📷"), ("lock", "🔒"), ("key", "🔑"), ("bulb", "💡"),
+    ("pushpin", "📌"), ("pencil", "✏️"), ("memo", "📝"), ("book", "📖"),
+    ("mag", "🔍"), ("moneybag", "💰"), ("coffee", "☕"), ("pizza", "🍕"),
+    ("hamburger", "🍔"), ("apple", "🍎"), ("beer", "🍺"),
+    ("champagne", "🥂"), ("alarm_clock", "⏰"), ("calendar", "📅"),
+    ("earth_africa", "🌍"), ("moon", "🌙"), ("sunny", "☀️"),
+    ("rainbow", "🌈"), ("umbrella", "☔"), ("snowflake", "❄️"),
+    ("zap", "⚡"), ("cat", "🐱"), ("dog", "🐶"), ("mouse", "🐭"),
+    ("rabbit", "🐰"), ("fox", "🦊"), ("bear", "🐻"), ("panda", "🐼"),
+    ("koala", "🐨"), ("tiger", "🐯"), ("lion", "🦁"), ("cow", "🐮"),
+    ("pig", "🐷"), ("frog", "🐸"), ("monkey_face", "🐵"),
+    ("chicken", "🐔"), ("penguin", "🐧"), ("bird", "🐦"),
+    ("unicorn", "🦄"), ("bee", "🐝"), ("bug", "🐛"), ("butterfly", "🦋"),
+    ("snail", "🐌"), ("turtle", "🐢"), ("snake", "🐍"), ("octopus", "🐙"),
+    ("squid", "🦑"), ("shrimp", "🦐"), ("crab", "🦀"), ("fish", "🐟"),
+    ("dolphin", "🐬"), ("whale", "🐳"), ("shark", "🦈"),
+    ("crocodile", "🐊"), ("zebra", "🦓"), ("gorilla", "🦍"),
+    ("elephant", "🐘"), ("camel", "🐪"), ("giraffe", "🦒"),
+    ("horse", "🐎"), ("sheep", "🐑"), ("deer", "🦌"),
+];
 
 /// A three-cell row of the shared-media grid.
 #[derive(Clone, Identifiable)]
@@ -421,6 +493,9 @@ pub struct Store {
     pub active_folder: Binding<i32>,
     /// Peer profile card for the Profile route (None until loaded).
     pub profile: Binding<Option<ProfileCard>>,
+    /// Last URL `open_link` handed to the system browser (observability
+    /// for tests — headless runs have no browser to prove the open).
+    pub link_opened: Binding<Str>,
     /// Picked file for the own-avatar upload on Settings.
     pub avatar_pick: Binding<Vec<Url>>,
     /// Chat avatar picker (group admin section).
@@ -773,6 +848,39 @@ pub(crate) fn styled_from_formatted_mask(ft: &types::FormattedText, mask: Option
     styled
 }
 
+/// Demo sender name → stable fake user id, so the avatar/name → profile
+/// tap resolves in the seeded conversation (0 = outgoing/system).
+fn demo_user_id(sender: &str) -> i64 {
+    match sender {
+        "Alice" => 101,
+        "Bob" => 102,
+        "Carol" => 103,
+        _ => 0,
+    }
+}
+
+/// First link target a `FormattedText` points at: a `TextUrl`'s url, or a
+/// `Url` entity sliced out of the text (entity offsets are UTF-16 units).
+fn first_url_entity(ft: &types::FormattedText) -> Option<Str> {
+    for e in &ft.entities {
+        match &e.r#type {
+            enums::TextEntityType::TextUrl(u) => {
+                return Some(Str::from(u.url.clone()));
+            }
+            enums::TextEntityType::Url => {
+                let units: Vec<u16> = ft.text.encode_utf16().collect();
+                let s = e.offset.max(0) as usize;
+                let t = (e.offset + e.length).max(0) as usize;
+                if s < units.len() && t <= units.len() {
+                    return Some(Str::from(String::from_utf16_lossy(&units[s..t])));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Convenience: entities rendered with spoiler spans masked by `mask`.
 pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
     styled_from_formatted_mask(ft, Some(Color::from(Srgb::BLACK)))
@@ -928,6 +1036,7 @@ impl Store {
             folders: Binding::<Vec<FolderRow>>::default(),
             active_folder: Binding::i32(0),
             profile: Binding::default(),
+            link_opened: Binding::container(Str::from("")),
             avatar_pick: Binding::<Vec<Url>>::default(),
             chat_avatar_pick: Binding::<Vec<Url>>::default(),
             sticker_query: Binding::<Str>::default(),
@@ -1152,6 +1261,11 @@ impl Store {
             link_title: Str::from(""),
             link_desc: Str::from(""),
             forwarded_from: Str::from(fwd.to_string()),
+            sender_user: demo_user_id(sender),
+            sender_chat: 0,
+            fwd_user: 0,
+            fwd_chat: 0,
+            link_url: Str::from(""),
             poll: None,
             is_service: false,
         };
@@ -1174,6 +1288,8 @@ impl Store {
         msgs[3].link_site = Str::from("waterui.dev");
         msgs[3].link_title = Str::from("WaterUI — native apps in Rust");
         msgs[3].link_desc = Str::from("One Rust codebase for iOS, Android, web and desktop — declarative views, fine-grained reactive state, native widgets.");
+        // The card opens the URL on tap (Desktop: the whole card is a link).
+        msgs[3].link_url = Str::from("https://waterui.dev");
         msgs[1].reply_to_id = 10;
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
         // Service rows (Desktop's centered grey lines): the pin that put
@@ -1191,6 +1307,8 @@ impl Store {
         // A second named sender exercises per-peer colors on the sender name
         // and the run avatar in group chats.
         msgs.push(m(19, "Bob", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
+        // The forward badge opens the source channel's profile (demo chat 4).
+        msgs.last_mut().unwrap().fwd_chat = 4;
         {
             let mut poll_msg = m(20, "Alice", "", "09:48", false, false, "", "", "", "");
             poll_msg.poll = Some(PollRow {
@@ -1748,7 +1866,7 @@ impl Store {
                 .map(|c| m.id <= c.last_read_outbox_message_id)
                 .unwrap_or(false);
         let (reactions, my_reaction) = Self::reactions_info(m);
-        let (styled, styled_open, has_spoiler, link_site, link_title, link_desc) =
+        let (styled, styled_open, has_spoiler, link_site, link_title, link_desc, link_url) =
             if let enums::MessageContent::MessageText(t) = &m.content {
                 let mask = if m.is_outgoing {
                     Color::from(AccentForeground)
@@ -1769,12 +1887,17 @@ impl Store {
                     t.link_preview.as_ref().map(|p| {
                         p.description.text.clone().into()
                     }).unwrap_or_default(),
+                    t.link_preview.as_ref().map(|p| Str::from(p.url.clone()))
+                        .filter(|u: &Str| !u.is_empty())
+                        .or_else(|| first_url_entity(&t.text))
+                        .unwrap_or_default(),
                 )
             } else {
                 (
                     StyledStr::empty(),
                     StyledStr::empty(),
                     false,
+                    Str::from(""),
                     Str::from(""),
                     Str::from(""),
                     Str::from(""),
@@ -1802,6 +1925,22 @@ impl Store {
                 }
             })
             .unwrap_or_else(|| Str::from(""));
+        // Peer ids behind the sender name/avatar and the forward badge —
+        // Desktop opens the profile / source channel on tap.
+        let (sender_user, sender_chat) = match &m.sender_id {
+            enums::MessageSender::User(u) => (u.user_id, 0),
+            enums::MessageSender::Chat(c) => (0, c.chat_id),
+        };
+        let (fwd_user, fwd_chat) = m
+            .forward_info
+            .as_ref()
+            .map(|f| match &f.origin {
+                enums::MessageOrigin::User(u) => (u.sender_user_id, 0),
+                enums::MessageOrigin::HiddenUser(_) => (0, 0),
+                enums::MessageOrigin::Chat(c) => (0, c.sender_chat_id),
+                enums::MessageOrigin::Channel(c) => (0, c.chat_id),
+            })
+            .unwrap_or((0, 0));
         let poll = match &m.content {
             enums::MessageContent::MessagePoll(mp) => {
                 let p = &mp.poll;
@@ -1856,7 +1995,12 @@ impl Store {
             link_site,
             link_title,
             link_desc,
+            link_url,
             forwarded_from,
+            sender_user,
+            sender_chat,
+            fwd_user,
+            fwd_chat,
             can_edit: m.is_outgoing,
             reply_excerpt,
             reply_to_id,
@@ -2227,10 +2371,13 @@ impl Store {
                     let row = self.message_row(&m);
                     let mut list = self.messages.snapshot();
                     if !list.iter().any(|r| r.id == row.id) {
+                        let outgoing = row.outgoing;
                         list.push(row);
                         list.sort();
                         self.set_messages(list);
-                        self.scroll_bottom();
+                        if self.follows_tail(outgoing) {
+                            self.scroll_bottom();
+                        }
                     }
                     if !m.is_outgoing {
                         let (client, chat_id, mid) = (self.client_id.get(), m.chat_id, m.id);
@@ -2733,8 +2880,24 @@ impl Store {
         if self.client_id.get() == 0 {
             // Unit-test/demo store: no TDLib — reinstall the seeded
             // conversation so clicking chats in the demo isn't an empty pane.
-            self.set_messages(Self::demo_conversation());
-            self.scroll_bottom();
+            let mut msgs = Self::demo_conversation();
+            // Same rule as `apply_unread_divider`: only a chat with unread
+            // gets the "Unread messages" divider row.
+            if self
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == chat_id)
+                .map(|r| r.unread)
+                .unwrap_or(0)
+                == 0
+            {
+                for r in msgs.iter_mut() {
+                    r.unread_divider = false;
+                }
+            }
+            self.set_messages(msgs);
+            self.scroll_to_open(chat_id);
             return;
         }
         let client = self.client_id.get();
@@ -2747,6 +2910,7 @@ impl Store {
             store.load_history(chat_id, 0, 0).await;
             store.refresh_pinned(chat_id).await;
             store.apply_unread_divider(chat_id);
+            store.scroll_to_open(chat_id);
         })
         .detach();
     }
@@ -2996,7 +3160,12 @@ impl Store {
                 link_site: Str::from(""),
                 link_title: Str::from(""),
                 link_desc: Str::from(""),
+                link_url: Str::from(""),
                 forwarded_from: Str::from(""),
+                sender_user: 0,
+                sender_chat: 0,
+                fwd_user: 0,
+                fwd_chat: 0,
                 failed: false,
                 pending: false,
                 highlighted: false,
@@ -3696,6 +3865,143 @@ impl Store {
     pub(crate) fn scroll_bottom(&self) {
         let last = self.messages.snapshot().len().saturating_sub(1);
         self.scroll.scroll_to(last);
+    }
+
+    /// Whether a newly arrived row pulls the viewport to the tail: your own
+    /// send always does; an incoming row only when the chat has no pending
+    /// unread divider — Telegram Desktop anchors you in unread context
+    /// instead of yanking to the tail. (DOGFOOD r34-2: a true viewport
+    /// anchor needs a scroll-offset readback `ScrollController` does not
+    /// expose, so the divider is the available proxy.)
+    pub(crate) fn follows_tail(&self, outgoing: bool) -> bool {
+        outgoing || !self.messages.snapshot().iter().any(|r| r.unread_divider)
+    }
+
+    /// Telegram Desktop's open position: a chat with unread messages lands
+    /// on the "Unread messages" divider row; a fully read chat lands on the
+    /// newest message.
+    pub(crate) fn scroll_to_open(&self, chat_id: i64) {
+        let unread = self
+            .chats
+            .snapshot()
+            .iter()
+            .find(|r| r.id == chat_id)
+            .map(|r| r.unread)
+            .unwrap_or(0);
+        if unread > 0 {
+            let list = self.messages.snapshot();
+            if let Some(pos) = list.iter().position(|r| r.unread_divider) {
+                self.scroll.scroll_to(pos);
+                return;
+            }
+        }
+        self.scroll_bottom();
+    }
+
+    /// Open a peer's profile card — Desktop fires this from a sender's
+    /// avatar/name and from a "Forwarded from" badge. `user_id` covers
+    /// users, `chat_id` channels/chats (hidden senders carry neither and
+    /// are no-ops). A store without a TDLib client (demo/tests)
+    /// synthesizes the card from the display name.
+    pub fn open_peer(&self, user_id: i64, chat_id: i64, name: Str) {
+        if self.client_id.get() == 0 {
+            if user_id == 0 && chat_id == 0 {
+                return;
+            }
+            self.profile.set(Some(ProfileCard {
+                user_id,
+                name,
+                ..Default::default()
+            }));
+            self.nav.push(Route::Profile);
+            return;
+        }
+        if user_id != 0 {
+            self.open_profile(user_id);
+            return;
+        }
+        if chat_id == 0 {
+            return;
+        }
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            let mut card = ProfileCard {
+                name,
+                ..Default::default()
+            };
+            if let Ok(enums::Chat::Chat(c)) = functions::get_chat(chat_id, client).await {
+                card.name = c.title.into();
+            }
+            store.profile.set(Some(card));
+            store.nav.push(Route::Profile);
+        })
+        .detach();
+    }
+
+    /// Open a message URL in the system handler (robius-open — the same
+    /// mechanism `waterui::link` uses). `link_opened` records the request
+    /// so tests can assert it without a browser.
+    pub fn open_link(&self, url: Str) {
+        if url.is_empty() {
+            return;
+        }
+        self.link_opened.set(url.clone());
+        if let Err(e) = robius_open::Uri::new(url.as_str()).open() {
+            error!("open_link {url}: {e:?}");
+        }
+    }
+
+    /// Trailing `:token` (≥2 chars) in the composer draft — Desktop's
+    /// `:smile` emoji autocomplete trigger. Same scan as `mention_token`.
+    pub fn emoji_token(s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        let mut i = b.len();
+        while i > 0 {
+            let c = b[i - 1];
+            if c == b':' {
+                return if (i == 1 || b[i - 2].is_ascii_whitespace()) && s.len() - i >= 2 {
+                    Some(s[i..].to_string())
+                } else {
+                    None
+                };
+            }
+            if !c.is_ascii_lowercase() && c != b'_' {
+                return None;
+            }
+            i -= 1;
+        }
+        None
+    }
+
+    /// `:token` → matching shortcode suggestions (prefix match on the
+    /// static table).
+    pub fn emoji_suggest(s: &str) -> Vec<EmojiSug> {
+        let Some(tok) = Self::emoji_token(s) else {
+            return Vec::new();
+        };
+        EMOJI_SHORTCODES
+            .iter()
+            .filter(|(name, _)| name.starts_with(tok.as_str()))
+            .take(6)
+            .map(|(name, emoji)| EmojiSug {
+                name: Str::from(*name),
+                emoji: Str::from(*emoji),
+            })
+            .collect()
+    }
+
+    /// Replace the trailing `:token` in the composer with `emoji`.
+    pub fn apply_emoji(&self, emoji: &str) {
+        let cur = self.composer.snapshot().to_string();
+        if let Some(tok) = Self::emoji_token(&cur) {
+            let at = cur.len() - tok.len() - 1;
+            let mut s = String::with_capacity(at + emoji.len() + 1);
+            s.push_str(&cur[..at]);
+            s.push_str(emoji);
+            s.push(' ');
+            self.composer.set_from(s);
+        }
     }
 
     pub fn send(&self) {

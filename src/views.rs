@@ -46,7 +46,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{AccountRow, ChatRow, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{AccountRow, ChatRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use mdi::folder_plus;
 use mdi::account_group;
 use mdi::alert_circle;
@@ -837,6 +837,13 @@ pub(crate) fn chat_column(store: Store) -> impl View {
     let mention_show = mention_sig
         .map(|v: Vec<MemberRow>| !v.is_empty())
         .distinct();
+    // `:shortcode` emoji completion: same trailing-token surface as
+    // @mention, sourced from the static shortcode table.
+    let emoji_sig = store
+        .composer
+        .map(|q: Str| Store::emoji_suggest(&q));
+    let emoji_rows = SignalCollection::new(emoji_sig.clone());
+    let emoji_show = emoji_sig.map(|v: Vec<EmojiSug>| !v.is_empty()).distinct();
     let poll_open = store.poll_open.clone();
     let store_for_poll = store.clone();
     // Modal Escape scopes, cloned before `store` moves into the `when`
@@ -1320,6 +1327,25 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             .background(Surface)
             .clip(RoundedRectangle::new(0.12))
         }),
+        when(emoji_show, move || {
+            VStack::for_each(emoji_rows.clone(), move |s: EmojiSug| {
+                let emo = s.emoji.to_string();
+                hstack((
+                    text(s.emoji.clone()).body(),
+                    text!(":{n}:", n = s.name.clone()).caption().muted(),
+                    spacer(),
+                ))
+                .spacing(8.0)
+                .padding_with((6.0, 12.0))
+                .on_tap(move |store: Store| store.apply_emoji(&emo))
+                .a11y_label(Str::from(format!("Insert :{}:", s.name)))
+                .a11y_role(AccessibilityRole::Button)
+            })
+            .spacing(0.0)
+            .padding_with((4.0, 0.0))
+            .background(Surface)
+            .clip(RoundedRectangle::new(0.12))
+        }),
         when(poll_open, {
             let st = store_for_poll.clone();
             move || poll_creator(st.clone())
@@ -1678,18 +1704,37 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
 
     let mut parts: Vec<AnyView> = Vec::new();
     if has_fwd {
+        // Desktop: the "Forwarded from X" badge opens the source
+        // user/channel profile on tap (no-op for hidden senders).
+        let (fu, fc) = (row.fwd_user, row.fwd_chat);
+        let fwd_name = fwd
+            .as_str()
+            .strip_prefix("Forwarded from ")
+            .unwrap_or(fwd.as_str())
+            .to_string();
         parts.push(muted_parts(
             text(fwd.clone()).italic(true).caption().line_limit(ONE).anyview(),
-        ));
+        )
+        .a11y_hidden(true)
+        .on_tap(move |store: Store| store.open_peer(fu, fc, Str::from(fwd_name.clone())))
+        .a11y_label(Str::from(format!("Open profile of {}", fwd.as_str().strip_prefix("Forwarded from ").unwrap_or(fwd.as_str()))))
+        .a11y_role(AccessibilityRole::Button)
+        .anyview());
     }
     // Desktop orders the sender's name above the quoted reply inside a
-    // reply bubble (r33-5).
+    // reply bubble (r33-5). Tapping it opens the sender profile.
     if row.group_first && !row.outgoing && !sender.is_empty() {
+        let (su, sc) = (row.sender_user, row.sender_chat);
+        let sender_name = sender.to_string();
         parts.push(
             text(sender.clone())
                 .caption()
                 .bold()
                 .foreground(peer_color(row.sender_accent, sender.as_str()))
+                .a11y_hidden(true)
+                .on_tap(move |store: Store| store.open_peer(su, sc, Str::from(sender_name.clone())))
+                .a11y_label(Str::from(format!("Open profile of {sender}")))
+                .a11y_role(AccessibilityRole::Button)
                 .anyview(),
         );
     }
@@ -1811,11 +1856,24 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
                 text(link_desc.clone()).caption().line_limit(TWO).anyview(),
             ));
         }
-        parts.push(
-            hstack((card_color.width(2.0), vstack(card).spacing(1.0).leading()))
-                .spacing(6.0)
-                .anyview(),
-        );
+        let card_row = hstack((card_color.width(2.0), vstack(card).spacing(1.0).leading()))
+            .spacing(6.0)
+            .anyview();
+        // Desktop: the whole preview card is the link — tapping it opens
+        // the URL in the system browser.
+        if row.link_url.is_empty() {
+            parts.push(card_row);
+        } else {
+            let url = row.link_url.clone();
+            let site = link_site.clone();
+            parts.push(
+                card_row
+                    .on_tap(move |store: Store| store.open_link(url.clone()))
+                    .a11y_label(Str::from(format!("Open link {site}")))
+                    .a11y_role(AccessibilityRole::Button)
+                    .anyview(),
+            );
+        }
     }
     // Reactions and the meta row overlay the bubble's bottom inset on two
     // separate lines: chips sit on the zone right under the content
@@ -2052,7 +2110,14 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         // so a run's bubbles stay aligned; the avatar itself shows only on
         // the run's last row, bottom-aligned (Telegram Desktop).
         let slot: AnyView = if row.show_avatar {
-            avatar(store.clone(), row.sender_photo, row.sender.as_str(), 32.0, row.sender_accent).anyview()
+            // Desktop: tapping a group sender's avatar opens their profile.
+            let (su, sc) = (row.sender_user, row.sender_chat);
+            let sender_name = row.sender.to_string();
+            avatar(store.clone(), row.sender_photo, row.sender.as_str(), 32.0, row.sender_accent)
+                .on_tap(move |store: Store| store.open_peer(su, sc, Str::from(sender_name.clone())))
+                .a11y_label(Str::from(format!("Open profile of {}", row.sender)))
+                .a11y_role(AccessibilityRole::Button)
+                .anyview()
         } else {
             Color::from(Surface).size(32.0, 32.0).anyview()
         };

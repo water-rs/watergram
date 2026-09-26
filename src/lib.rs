@@ -245,7 +245,12 @@ mod tests {
             link_site: "".into(),
             link_title: "".into(),
             link_desc: "".into(),
+            link_url: "".into(),
             forwarded_from: "".into(),
+            sender_user: 0,
+            sender_chat: 0,
+            fwd_user: 0,
+            fwd_chat: 0,
             poll: None,
             group_first: true,
             group_last: true,
@@ -3298,8 +3303,10 @@ mod tests {
         );
     }
 
-    /// Arrow keys in the chat-list: documents desktop arrow navigation.
-    /// Telegram Desktop moves the selection with Up/Down.
+    /// r34 pick 2: Up/Down on a focused chat-list row steps the selection
+    /// through the framework's `navigate_list_row` (it writes the row's
+    /// `selection` slot → `on_change` → `select_chat`), Home/End jump to
+    /// the ends, and Enter activates the focused row's press target.
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn keyboard_arrows_chat_list(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
@@ -3309,14 +3316,171 @@ mod tests {
             .viewport(340, 700)
             .mount(move || views::sidebar_view(inner.clone()).state(&inner));
         app.settle();
+        let rows = app.query().role(Role::LIST_ITEM).all();
+        assert!(rows.len() >= 5, "chat list exposed {} rows", rows.len());
+        rows[0].focus(&mut app);
+        app.settle();
         app.press_named_key("ArrowDown");
         app.settle();
-        let moved = store.selected.snapshot().is_some();
-        std::fs::write(
-            "/tmp/kb_arrows.txt",
-            format!("after ArrowDown selected={moved:?}\n"),
-        )
-        .unwrap();
+        assert_eq!(store.open_chat.get(), 2, "ArrowDown did not open chat 2");
+        app.press_named_key("ArrowDown");
+        app.settle();
+        assert_eq!(store.open_chat.get(), 3, "ArrowDown did not open chat 3");
+        app.press_named_key("ArrowUp");
+        app.settle();
+        assert_eq!(store.open_chat.get(), 2, "ArrowUp did not move back to chat 2");
+        // End jumps to the last row; its selection write opens that chat.
+        app.press_named_key("End");
+        app.settle();
+        assert_eq!(store.open_chat.get(), 10, "End did not open the last chat");
+        // Enter on a focused row activates its press target.
+        let rows = app.query().role(Role::LIST_ITEM).all();
+        rows[5].focus(&mut app);
+        app.settle();
+        app.press_named_key("Enter");
+        app.settle();
+        assert_eq!(store.open_chat.get(), 6, "Enter did not activate the focused row");
+    }
+
+    /// r34 pick 1: opening a chat with unread lands on the "Unread
+    /// messages" divider row instead of the tail; a fully read chat still
+    /// lands on the newest row. New incoming rows anchor at the divider
+    /// (no tail-yank), your own sends always follow.
+    #[test]
+    fn open_unread_anchors_divider() {
+        let store = store();
+        store.seed_demo();
+        // Demo chat 1 "WaterUI devs" is unread=3; the seed marks msgs[2]
+        // (index 2) as the divider row.
+        store.select_chat(1);
+        assert_eq!(
+            store.scroll.target().snapshot(),
+            2,
+            "unread chat did not open on the divider row"
+        );
+        assert!(
+            !store.follows_tail(false),
+            "incoming rows must not yank while the divider is pending"
+        );
+        assert!(store.follows_tail(true), "own sends always follow the tail");
+        // A fully-read demo chat (Alice, unread=0) lands on the tail.
+        store.select_chat(2);
+        let last = store.messages.snapshot().len() - 1;
+        assert_eq!(
+            store.scroll.target().snapshot(),
+            last,
+            "read chat did not open on the newest row"
+        );
+        assert!(store.follows_tail(false));
+    }
+
+    /// r34 pick 3: the link-preview card is a tappable control that opens
+    /// the URL (robius-open → system browser; `link_opened` records it).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn link_card_opens_url(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.settle();
+        app.query()
+            .role(Role::BUTTON)
+            .label("Open link waterui.dev")
+            .tap();
+        assert_eq!(
+            store.link_opened.snapshot().as_str(),
+            "https://waterui.dev",
+            "tapping the card did not request the preview URL"
+        );
+    }
+
+    /// r34 pick 4: sender avatar/name and the "Forwarded from" badge open
+    /// the peer's profile card (Desktop behavior).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn peer_taps_open_profiles(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.settle();
+        // Several incoming bubbles carry the same label — tap the first.
+        let alices = app
+            .query()
+            .role(Role::BUTTON)
+            .label("Open profile of Alice")
+            .all();
+        assert!(
+            !alices.is_empty(),
+            "sender name/avatar did not expose a profile tap"
+        );
+        alices[0].tap(&mut app);
+        app.settle();
+        assert_eq!(
+            store.profile.snapshot().map(|c| c.name.to_string()),
+            Some("Alice".to_string()),
+            "avatar tap did not open Alice's profile"
+        );
+        store.nav.pop();
+        app.settle();
+        let fwd = app
+            .query()
+            .role(Role::BUTTON)
+            .label("Open profile of Telegram News")
+            .all();
+        assert!(
+            !fwd.is_empty(),
+            "forward badge did not expose a profile tap"
+        );
+        fwd[0].tap(&mut app);
+        app.settle();
+        assert_eq!(
+            store.profile.snapshot().map(|c| c.name.to_string()),
+            Some("Telegram News".to_string()),
+            "forward badge tap did not open the source channel profile"
+        );
+    }
+
+    /// r34 pick 5: `:shortcode` emoji autocomplete — a trailing `:token`
+    /// (≥2 chars) shows the suggestion row above the composer; tapping a
+    /// suggestion replaces the token with the emoji.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn emoji_autocomplete_inserts(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.selected.set(Some(1));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(660, 700)
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        app.settle();
+        // One char after ':' is not a token yet (matches Desktop).
+        store.composer.set_from("hi :s");
+        app.settle();
+        app.query()
+            .label("Insert :smile:")
+            .assert_not_exists();
+        store.composer.set_from("hi :smi");
+        app.settle();
+        app.query()
+            .role(Role::BUTTON)
+            .label("Insert :smile:")
+            .tap();
+        assert_eq!(
+            store.composer.snapshot().as_str(),
+            "hi 😄 ",
+            "suggestion tap did not replace the :token"
+        );
+        // After the insert there is no trailing token → row hides.
+        app.settle();
+        app.query()
+            .label("Insert :smile:")
+            .assert_not_exists();
     }
 
     /// Minimal modal-Escape probe: one button inside a `ModalInteraction`
