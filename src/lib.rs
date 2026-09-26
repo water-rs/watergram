@@ -185,7 +185,6 @@ mod tests {
     use waterui::accessibility::AccessibilityRole;
     use waterui::layout::frame::Frame;
     use waterui::prelude::*;
-    use waterui::id::IdentifiableExt;
     use waterui::reactive::collection::SignalCollection;
     use waterui_testing::{Role, Styled, UiBuilder};
 
@@ -703,9 +702,12 @@ mod tests {
             );
             dump_bounds("/tmp/probe_menu.txt", app.semantic_mut());
         };
+        // r33-3: the quick-reaction strip is the menu's `accessory`
+        // (waterui#1245) — hydrolysis doesn't present preview/accessory on
+        // Linux yet (#200), so only the command items are in the popup.
         for item in [
-            "React 👍", "React ❤️", "React 🔥", "React 😂", "React 😮", "Reply",
-            "Edit", "Copy text", "Pin message", "Forward", "Select", "Delete",
+            "Reply", "Edit", "Copy text", "Pin message", "Forward", "Select",
+            "Delete",
         ] {
             let store = store();
             store.open_chat.set(7);
@@ -725,14 +727,47 @@ mod tests {
                 "Forward" => assert!(store.forward_message.snapshot().is_some()),
                 "Select" => assert_eq!(store.selected_msgs.snapshot(), vec![1]),
                 "Delete" => assert!(store.messages.snapshot().is_empty()),
-                r if r.starts_with("React") => {
-                    let chips = &store.messages.snapshot()[0].reaction_chips;
-                    assert_eq!(chips.len(), 1);
-                    assert!(chips[0].chosen);
-                }
                 _ => {}
             }
         }
+    }
+
+    /// r33-3: the bubble menu is built through `ContextMenu::new` with the
+    /// bubble as `preview` and the reaction strip as `accessory`
+    /// (waterui#1245). hydrolysis presents only the items on Linux until
+    /// #200 lands, so the item list — including `Delete`'s destructive
+    /// role — is asserted on the constructed menu value.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn context_menu_items_and_roles(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::component::menu::{CommandRole, MenuItem, MenuView};
+        use waterui::metadata::context_menu::ContextMenu;
+        // The menu carries the bubble as preview and the strip as accessory.
+        let _ = ui;
+        let outgoing = msg(1, "mine", true);
+        let menu = ContextMenu::new(views::bubble_menu_items(&outgoing, false))
+            .accessory(views::reaction_strip_for_test(&outgoing));
+        assert!(menu.accessory.is_some());
+        let items = menu.items.snapshot();
+        let commands: Vec<&waterui::component::menu::Command> = items
+            .iter()
+            .filter_map(|i| match i {
+                MenuItem::Command(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands.len(), 7); // Reply Edit Copy Pin Forward Select Delete
+        assert_eq!(items.iter().filter(|i| matches!(i, MenuItem::Divider)).count(), 1);
+        let delete = commands.last().unwrap();
+        assert_eq!(delete.role, CommandRole::Destructive);
+        // Incoming rows omit Edit (own messages only).
+        let incoming = msg(2, "theirs", false);
+        let items = views::bubble_menu_items(&incoming, false)
+            .into_menu_items()
+            .snapshot();
+        assert_eq!(
+            items.iter().filter(|i| matches!(i, MenuItem::Command(_))).count(),
+            6
+        );
     }
 
     /// r27: the Edit command only exists on own (outgoing) messages — an
@@ -1629,33 +1664,6 @@ mod tests {
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_strips.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_strips.png");
-    }
-
-    /// r31-2a minimal reproduction: a List row whose content's intrinsic
-    /// height changes after first measure must be re-measured. The row's
-    /// extent is cached in `VirtualExtentIndex` (hydrolysis
-    /// src/widgets/layout/list.rs:1163-1176) and the index is only reset by
-    /// the contents-watch (list.rs:354-358 / 492-517) — a signal-driven
-    /// intrinsic change touches neither, so the row keeps its stale extent.
-    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
-    fn probe_list_row_remeasure(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
-        use waterui::component::list::{List, ListItem};
-        let tall = Binding::bool(false);
-        let t = tall.clone();
-        let size = t.map(|t| if t { 160.0f64 } else { 20.0 });
-        let rows = Binding::container(vec![1_u64.self_id()]);
-        let mut app = ui.viewport(400, 700).mount_offscreen(move || {
-            let size = size.clone();
-            List::for_each(SignalCollection::new(rows.clone()), move |_id: _| {
-                ListItem::new(text("growing row").size(size.clone()))
-            })
-        });
-        app.semantic_mut().settle();
-        dump_bounds("/tmp/rems_before.txt", app.semantic_mut());
-        tall.set(true);
-        app.semantic_mut().settle();
-        dump_bounds("/tmp/rems_after.txt", app.semantic_mut());
-        let _ = app.snapshot().save_png("/tmp/rems_after.png");
     }
 
     /// r13-2b bisect: same structure as the row's preview line —

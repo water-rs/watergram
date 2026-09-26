@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use waterui_backend_core::widget::ModalInteraction;
 use waterui::component::list::{List, ListItem};
+use waterui::component::menu::MenuView;
 use waterui::layout::frame::Frame;
 use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
@@ -922,8 +923,21 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 })
                 .padding_with([pad_top, pad_bottom, 12.0, 12.0]),
             )
+            // waterui#1252: a service row is sized to its content plus
+            // these insets (`.list_min_row_height(0.0)` below), so the
+            // pill keeps Desktop's compact spacing. Bubble rows keep the
+            // theme's row insets.
+            .insets(if is_service {
+                EdgeInsets::symmetric(2.0, 0.0)
+            } else {
+                EdgeInsets::all(0.0)
+            })
         })
-        .scroll_controller(&scroller),
+        .scroll_controller(&scroller)
+        // 0.0 sizes each row to its content plus its insets (waterui#1252)
+        // — this lifts the theme's one-line row-height floor that padded
+        // service pills to 56 pt (r31-1).
+        .list_min_row_height(0.0),
     )),
     when(store.members_open.clone(), move || {
         vstack((
@@ -1590,7 +1604,7 @@ fn bubble_tail_layer(outgoing: bool, fill: Color) -> AnyView {
 /// One Desktop service line ("X pinned a message", "joined the
 /// group"): a centered muted caption on a subtle pill at ~the gap of a
 /// bubble run — no bubble, no meta.
-fn service_pill(line: Str) -> AnyView {
+fn service_pill(line: Str) -> impl View {
     hstack((
         spacer(),
         text(line)
@@ -1601,27 +1615,29 @@ fn service_pill(line: Str) -> AnyView {
         spacer(),
     ))
     .padding_with((4.0, 0.0))
-    .anyview()
 }
 
 #[cfg(test)]
 pub(crate) fn service_pill_for_test() -> AnyView {
-    service_pill(Str::from("Alice pinned a message"))
+    service_pill(Str::from("Alice pinned a message")).anyview()
+}
+
+#[cfg(test)]
+pub(crate) fn reaction_strip_for_test(row: &MessageRow) -> AnyView {
+    reaction_strip(row)
 }
 
 /// Standalone service row — every service event is its own List row.
 #[allow(needless_anyview)] // AnyView is the concrete type: `message_bubble`'s
 // tail returns AnyView, so `-> impl View` would not unify the two sites.
 fn service_line(row: &MessageRow) -> AnyView {
-    service_pill(row.text.clone())
+    service_pill(row.text.clone()).anyview()
 }
 
-#[allow(needless_anyview)] // AnyView is the concrete type: the tail's
-// `vstack(column)` must be AnyView to unify with `service_line` above.
-pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
-    if row.is_service {
-        return service_line(&row);
-    }
+/// The bubble's visual content. Extracted from `message_bubble` so the
+/// context menu can mount a second copy as its lifted `preview`
+/// (waterui#1245 — `AnyView` isn't `Clone`).
+fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     let reply_excerpt = row.reply_excerpt.clone();
     let has_reply = !reply_excerpt.is_empty();
     let body_text = row.text.clone();
@@ -1637,13 +1653,8 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let chips = row.reaction_chips.clone();
     let has_reactions = !chips.is_empty();
     let time = row.time.clone();
-    let media = media_slot(&store, &row);
+    let media = media_slot(store, row);
     let sender = row.sender.clone();
-    let r1 = row.clone();
-    let r2 = row.clone();
-    let r3 = row.clone();
-    let r4 = row.clone();
-    let r5 = row.id;
     let r_view = row.clone();
 
     // Secondary text inside the bubble: `MutedForeground` on a plain
@@ -1670,6 +1681,17 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         parts.push(muted_parts(
             text(fwd.clone()).italic(true).caption().line_limit(ONE).anyview(),
         ));
+    }
+    // Desktop orders the sender's name above the quoted reply inside a
+    // reply bubble (r33-5).
+    if row.group_first && !row.outgoing && !sender.is_empty() {
+        parts.push(
+            text(sender.clone())
+                .caption()
+                .bold()
+                .foreground(peer_color(row.sender_accent, sender.as_str()))
+                .anyview(),
+        );
     }
     if has_reply {
         // Desktop's quote block: accent bar + excerpt; tapping it jumps to
@@ -1701,15 +1723,6 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             .anyview(),
         );
     }
-    if row.group_first && !row.outgoing && !sender.is_empty() {
-        parts.push(
-            text(sender.clone())
-                .caption()
-                .bold()
-                .foreground(peer_color(row.sender_accent, sender.as_str()))
-                .anyview(),
-        );
-    }
     if has_media {
         parts.push(
             media
@@ -1732,10 +1745,10 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             parts.push(text(body_text.clone()).size(size).anyview());
         } else if has_styled {
             if row.has_spoiler {
-                // Desktop masks spoiler spans until tapped. The masked
-                // styled carries the spoiler text in the bubble-fill
-                // color (hydrolysis drops per-span background — r32-2),
-                // so it disappears into the bubble until revealed.
+                // Desktop masks spoiler spans until tapped. The mask is a
+                // span `TextStyle.background` in the text color —
+                // hydrolysis drops per-span backgrounds until #207 lands,
+                // so the spoiler text shows unmasked for now (r32-2).
                 let masked = store.spoiler_masked(row.id);
                 let masked_styled = body_styled.clone();
                 let open_styled = row.styled_open.clone();
@@ -1833,7 +1846,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     };
     let chip_views: Vec<AnyView> = chips
         .iter()
-        .map(|c| reaction_chip(&row, c, chip_surface))
+        .map(|c| reaction_chip(row, c, chip_surface))
         .collect();
     // Bottom-anchored with the meta band reserved beneath: the chips occupy
     // the zone between the content and the meta line.
@@ -1852,10 +1865,11 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         if row.pending {
             clock_outline().size(11.0, 11.0).anyview()
         } else if row.failed {
+            let rid = row.id;
             alert_circle()
                 .tint(Error)
                 .size(11.0, 11.0)
-                .on_tap(move |store: Store| store.resend_failed(row.id))
+                .on_tap(move |store: Store| store.resend_failed(rid))
                 .a11y_label("Resend failed message")
                 .a11y_role(AccessibilityRole::Button)
                 .anyview()
@@ -1911,9 +1925,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             // joins so fill and wedge read as one outline.
             let (bl, br) = if row.outgoing { (0.18, 0.0) } else { (0.0, 0.18) };
             zstack((
-                UnevenRoundedRectangle::new(0.18, 0.18, bl, br)
-                    .fill(bubble_fill.clone())
-                    .anyview(),
+                UnevenRoundedRectangle::new(0.18, 0.18, bl, br).fill(bubble_fill.clone()),
                 bubble_tail_layer(row.outgoing, bubble_fill),
             ))
             .anyview()
@@ -1931,62 +1943,106 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             .anyview()
     };
 
-    let react_label: &'static str = if row.my_reaction == "👍" {
-        "Remove 👍"
-    } else {
-        "React 👍"
-    };
-    let pinned = store.pinned_id.get() == row.id;
+    bubble
+}
+
+/// The context menu's accessory (waterui#1245): Desktop's quick-reaction
+/// strip — five emoji in a pill floating above the lifted bubble. A tap
+/// applies the reaction and dismisses the menu through the
+/// `DismissContextMenu` the accessory's environment carries. The chosen
+/// reaction reads highlighted.
+/// The bubble's context-menu items in Telegram Desktop order (r33-3):
+/// Reply / Edit (own messages) / Copy text / Pin·Unpin / Forward /
+/// Select / Delete — the last with `CommandRole::Destructive`. The
+/// quick-reaction strip rides as the menu's `accessory` instead
+/// (waterui#1245).
+pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool) -> impl MenuView {
+    let r1 = row.clone();
+    let r2 = row.clone();
+    let r3 = row.clone();
+    let r4 = row.clone();
+    let r5 = row.id;
+    let rid = row.id;
+    let r11 = row.id;
     let pin_label: &'static str = if pinned {
         "Unpin message"
     } else {
         "Pin message"
     };
-    let r6 = row.clone();
-    let r7 = row.clone();
-    let r8 = row.clone();
-    let r9 = row.clone();
-    let r10 = row.clone();
-    let r11 = row.id;
-    let my_reaction = row.my_reaction.clone();
-    // Telegram Desktop order: a quick-reaction block on top, then the
-    // message actions. `MenuItem` carries commands/dividers/submenus only —
-    // a horizontal emoji strip inside the popup isn't expressible, so the
-    // quick reactions stay flat commands with the chosen one marked
-    // (DOGFOOD r27-1). Edit applies to own messages only. Tuple form
-    // evaluates through a single computed since waterui#1247 (r27-6).
-    let bubble = bubble
-        .context_menu((
-            react_label
-                .action(move |store: Store| store.toggle_reaction(&r6, "👍"))
-                .selected(my_reaction == "👍"),
-            "React ❤️"
-                .action(move |store: Store| store.toggle_reaction(&r7, "❤️"))
-                .selected(my_reaction == "❤️"),
-            "React 🔥"
-                .action(move |store: Store| store.toggle_reaction(&r8, "🔥"))
-                .selected(my_reaction == "🔥"),
-            "React 😂"
-                .action(move |store: Store| store.toggle_reaction(&r9, "😂"))
-                .selected(my_reaction == "😂"),
-            "React 😮".action(move |store: Store| store.toggle_reaction(&r10, "😮")),
-            Divider,
-            "Reply".action(move |store: Store| store.start_reply(&r1)),
-            row.outgoing
-                .then(|| "Edit".action(move |store: Store| store.start_edit(&r4))),
-            "Copy text".action(move |store: Store| store.copy_message(&r3)),
-            pin_label.action(move |store: Store| {
-                if pinned {
-                    store.unpin_message(row.id)
-                } else {
-                    store.pin_message(row.id)
-                }
-            }),
-            "Forward".action(move |store: Store| store.start_forward(&r2)),
-            "Select".action(move |store: Store| store.toggle_select(r11)),
-            Divider,
-            "Delete".action(move |store: Store| store.delete_message(r5)),
-        ))
+    (
+        "Reply".action(move |store: Store| store.start_reply(&r1)),
+        row.outgoing
+            .then(|| "Edit".action(move |store: Store| store.start_edit(&r4))),
+        "Copy text".action(move |store: Store| store.copy_message(&r3)),
+        pin_label.action(move |store: Store| {
+            if pinned {
+                store.unpin_message(rid)
+            } else {
+                store.pin_message(rid)
+            }
+        }),
+        "Forward".action(move |store: Store| store.start_forward(&r2)),
+        "Select".action(move |store: Store| store.toggle_select(r11)),
+        Divider,
+        "Delete"
+            .command()
+            .action(move |store: Store| store.delete_message(r5))
+            .destructive(),
+    )
+}
+
+fn reaction_strip(row: &MessageRow) -> AnyView {
+    let strip: Vec<AnyView> = ["👍", "❤️", "🔥", "😂", "😮"]
+        .iter()
+        .map(|e| {
+            let r = row.clone();
+            let e = *e;
+            let tint = if row.my_reaction == e {
+                Color::from(AccentContainer)
+            } else {
+                Color::from(WithOpacity::new(SurfaceVariant, 0.0))
+            };
+            text(e)
+                .size(18.0)
+                .padding_with((3.0, 6.0))
+                .background(Circle.fill(tint))
+                .on_tap(
+                    move |store: Store, Use(dismiss): Use<DismissContextMenu>| {
+                        store.toggle_reaction(&r, e);
+                        dismiss.dismiss();
+                    },
+                )
+                .a11y_role(AccessibilityRole::Button)
+                .a11y_label(Str::from(format!("React {e}")))
+                .anyview()
+        })
+        .collect();
+    hstack(strip)
+        .spacing(2.0)
+        .padding_with((3.0, 4.0))
+        .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+        .anyview()
+}
+
+#[allow(needless_anyview)] // AnyView is the concrete type: the tail's
+// `vstack(column)` must be AnyView to unify with `service_line` above.
+pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
+    if row.is_service {
+        return service_line(&row);
+    }
+    let pinned = store.pinned_id.get() == row.id;
+    // waterui#1245: the menu lifts a second copy of the bubble as `preview`
+    // and floats the quick-reaction strip above it as `accessory`; a tap
+    // there applies the reaction and dismisses via `DismissContextMenu`.
+    // `Delete` carries `CommandRole::Destructive`. On Linux the lifted
+    // presentation is still in progress (hydrolysis#200), so the backend
+    // shows a plain popup for now.
+    let bubble = bubble_view(&store, &row)
+        .context_menu(
+            ContextMenu::new(bubble_menu_items(&row, pinned))
+                .preview(bubble_view(&store, &row))
+                .accessory(reaction_strip(&row)),
+        )
         .anyview();
 
     let placed = if row.outgoing {
@@ -1996,7 +2052,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         // so a run's bubbles stay aligned; the avatar itself shows only on
         // the run's last row, bottom-aligned (Telegram Desktop).
         let slot: AnyView = if row.show_avatar {
-            avatar(store.clone(), row.sender_photo, sender.as_str(), 32.0, row.sender_accent).anyview()
+            avatar(store.clone(), row.sender_photo, row.sender.as_str(), 32.0, row.sender_accent).anyview()
         } else {
             Color::from(Surface).size(32.0, 32.0).anyview()
         };

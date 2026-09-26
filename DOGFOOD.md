@@ -2116,6 +2116,10 @@ again, which means each one pays the 56 pt one-line floor
 above and below the pill at 1400/800/600 (r31chat*.png). No
 other spacing change was made.
 
+**Resolved in r33** — waterui#1252 shipped `ListItem::insets`
++ `.list_min_row_height`; service rows now measure 34.06 pt
+through the real APIs (r33-1).
+
 ### r31-2a: `List` never re-measures a row whose content changed size — hydrolysis defect (minimal reproduction)
 
 **Filed as water-rs/hydrolysis#199** — fix in progress. Keep
@@ -2188,6 +2192,11 @@ not route around the framework — do not want to
 over-provision `max_height` on every row — so the fix
 belongs upstream. Blocks the r31 photo row until then.
 
+**Outcome on e00b1f0 (r33-2):** the #202 per-frame
+re-measure landed and runs, but the photo row still clips —
+the decoded image's size never reaches the transient
+intrinsic measure. Follow-up gap documented in r33-2.
+
 ### r31-2b: two stray 1 px horizontal lines — same defect, not a divider
 
 The two hairlines under Bob's forwarded bubble and under the
@@ -2225,7 +2234,8 @@ defect: no overflow → nothing to reveal → no strips. The fix
 is the same upstream re-measure as r31-2a — both entries are
 covered by **water-rs/hydrolysis#199**; suppressing them
 app-side would mean hiding the overflow with another layout
-hack — not done per the no-workaround rule.
+hack — not done per the no-workaround rule. On e00b1f0 the
+seam sliver persists (r33-2); still blocked upstream.
 
 ### r32-2: per-span `background` is dropped by the text service — spoiler mask reads as plain text
 
@@ -2335,3 +2345,156 @@ List::for_each(rows, |row| ListItem::new(
 
 in a list tall enough to virtualize, launched fresh, then a
 real pointer click on the "tap me" glyphs.
+
+## r33: repin to e00b1f0 + waterui dev — insets/min-row-height, context_menu preview+accessory, TextStyle.background spoilers
+
+Pins: hydrolysis `e00b1f0467` (carries #199 re-measure via
+3d49bf2/#202, #201/#1249 row metrics via 9366b1b/#204, #203
+theme), waterui* `98cb7f34` (carries #1245 context-menu API,
+#1249/#1252 `ListItem::insets` + `.list_min_row_height`),
+hydrolysis-m3 `7ea75913`, nami* `6908aac8`, cli `4c71570b`.
+
+### r33-1: waterui#1252 verified — service pills get Desktop spacing through the real APIs
+
+`ListItem::insets(EdgeInsets)` (waterui `list/mod.rs:798`,
+`:839`) and `.list_min_row_height(f32)` (`view.rs:1110`)
+landed and are adopted:
+
+```rust
+ListItem::new(row_view)
+    .insets(if is_service {
+        EdgeInsets::symmetric(2.0, 0.0)
+    } else {
+        EdgeInsets::all(0.0)
+    })
+// List ends: .scroll_controller(&scroller).list_min_row_height(0.0)
+```
+
+`.list_min_row_height(0.0)` removes the m3 56 pt one-line
+floor (r30-1/r31-1) — rows size to content plus insets.
+Bounds-verified live: service rows measure **34.0625 pt**
+(the pill content) instead of 56, seams pack flush
+(`row.y1 == next.y0` throughout the extent index). Pills
+render compact at 1400/800/600 (r33chat*.png). r31-1 is
+**resolved** — no fold, no spacers.
+
+Note: `.scroll_controller` is an inherent `List` method and
+`.list_min_row_height` returns an env wrapper (`With<V,T>`),
+so the controller must be applied first — ordering
+constraint of the API, documented for app authors.
+
+### r33-2: hydrolysis#199 outcome — re-measure landed, but the photo row still clips (new adjacent defect)
+
+e00b1f0's `render_list_parts` now calls
+`measure_transient_view_intrinsic` on every window row each
+frame and writes `set_measured` (hydrolysis
+`src/widgets/layout/list.rs:1149+`). The stale-extent
+mechanism of r31-2a is gone for content that *re-measures
+to a new value* — but the photo row still clips, so the
+answer to "is it gone" is **no**.
+
+a11y bounds on e00b1f0 (full list mounted, jumped to the
+row):
+
+```
+#17 Role(ListItem) bounds=(0, 937.25, 1400, 84.8125)
+    └─ Role(Image) bounds=(-162, 967.31, 640, 360)
+       — paints at natural 640×360, overflowing ~305 pt
+         below the row's extent into the rows beneath
+```
+
+Every frame the row re-measures and every frame the
+transient intrinsic returns ~84.8 pt: the decoded image's
+natural size never reaches `measure_transient_view_intrinsic`
+— either `Photo` reports its placeholder/post-decode
+intrinsic only through the semantic layer, or the `when(has,
+image)` node measures its inactive branch. The paint path
+disagrees with the measure path: `Role(Image)` semantic
+bounds are 640×360 while the row's measured extent stays at
+the pre-image value.
+
+Minimal repro shape: a `List` row whose media slot is
+`when(file_ready, Photo::new(path).max_width(320).clip(..))`
+where `file_ready` flips true after the row's first measure —
+the row extent sticks at the placeholder height while the
+image paints at natural size through the row seams.
+
+Consequence: the bubble is still cut mid-image at
+1400/800/600 (r33chat*_photo.png), and the overflow sliver
+still leaks through the 1 px row-fill seams — the hairline
+above the forwarded bubble at 1400 (~336 px wide, the photo
+bubble's width) is that sliver, **not** app-drawn chrome
+(the app draws no rules there; verified by pixel scan at
+600/800/1400 — the line's width tracks the photo bubble,
+not the pane). r31-2b stands; both symptoms block on the
+same measure-path gap upstream of #202.
+
+### r33-3: context menu adopted — `ContextMenu` preview + accessory (hydrolysis#200 pending)
+
+`waterui#1245` landed; `message_bubble` now uses:
+
+```rust
+bubble_view(&store, &row).context_menu(
+    ContextMenu::new(bubble_menu_items(&row, pinned))
+        .preview(bubble_view(&store, &row))
+        .accessory(reaction_strip(&row)),
+)
+```
+
+- `bubble_menu_items` is the tuple `MenuView`: Reply, Edit
+  (own messages only), Copy text, Pin/Unpin, Forward,
+  Select, Divider, Delete — Delete via
+  `.command().action(..).destructive()` →
+  `CommandRole::Destructive`.
+- `reaction_strip` (the accessory) is a five-emoji pill;
+  each entry's tap applies the reaction and dismisses via
+  `Use(dismiss): Use<DismissContextMenu>` —
+  `dismiss.dismiss()`. The multi-extractor handler form
+  `move |store: Store, Use(dismiss): Use<DismissContextMenu>|`
+  works as designed.
+
+Live on Linux: `apply_context_menu` (hydrolysis
+`src/runtime/metadata.rs:548`) registers only
+`value.items` — preview and accessory are **not presented**
+yet (hydrolysis#200, lifted presentation in progress). The
+plain popup opens next to the pointer with all commands
+(r33_ctx800.png); clicking **Pin message** dispatches —
+pinned banner changed to "📌 single reaction on text"
+(r33_ctx800_pin.png). The accessory exists in the
+constructed `ContextMenu` (test
+`context_menu_items_and_roles` asserts
+`accessory.is_some()`, 7 commands, 1 divider, last role
+Destructive, incoming = 6 commands) but cannot be mounted
+headlessly — `DismissContextMenu`'s constructor is private
+(`metadata.rs`), so tap+dismiss is construction-verified
+only until #200 lands.
+
+### r33-4: spoiler mask now uses `TextStyle.background` — shows unmasked until hydrolysis#207
+
+Per instruction the foreground-equals-bubble-fill masking is
+removed. `styled_from_formatted_mask` (state.rs:675) now sets
+`st.background(mask)` on spoiler chunks — mask = the bubble
+foreground colour (`Foreground` incoming,
+`AccentForeground` outgoing). This is exactly how the mask
+should be written. Until **hydrolysis#207** (per-span
+`background` dropped at `ResolvedTextStyleSpec`,
+text_service.rs:351-358) lands, hydrolysis discards the
+background and the span renders as ordinary text — spoiler
+text is fully readable in r33chat*.png. Tap-to-reveal state
+(`revealed_spoilers` + dual `.visible` zstack) and all
+spoiler tests are unchanged and pass; the reveal is a
+visual no-op on GPU until the background paints.
+
+### r33-5: reply bubbles — sender name moved above the quote
+
+Desktop order is sender name, then the quoted-reply block.
+`bubble_view` (views.rs:1641+) now emits the sender caption
+before the reply quote (was quote-first). Verified live:
+"Alice" sits above "earlier history, not loaded" at
+1400/800/600 (r33chat*.png, r33chat600_mid.png).
+
+The hairlines above/below the forwarded "Telegram News /
+Bob" bubble: **not app-drawn** — same photo-row overflow
+sliver as r31-2b/r33-2 (width matches the photo bubble;
+framework mechanism, no app-side suppression per the
+no-workaround rule).

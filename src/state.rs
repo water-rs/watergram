@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
 use waterui::color::Srgb;
-use waterui::theme::color::{Accent, SurfaceVariant};
+use waterui::theme::color::{AccentForeground, Foreground};
 use waterui::form::secure::Secure;
 use waterui::text::styled::{Style, StyledStr};
 use waterui::layout::{Rect, ScrollController, Size};
@@ -668,10 +668,12 @@ fn fmt_day_label(day: i64) -> Str {
 
 /// Convert a TDLib `FormattedText` (UTF-16 entity offsets) into a
 /// `StyledStr`: bold/italic/underline/strike/mono, links in accent blue,
-/// quotes on a light background. `mask`: spoiler chunks get `foreground =
-/// mask` so the text disappears into the bubble fill until revealed
-/// (hydrolysis drops per-span `background`, so a black-on-black box is
-/// not possible — see DOGFOOD r32-2). `None` leaves spoiler text visible.
+/// quotes on a light background. `mask`: spoiler chunks get `background =
+/// mask` — a span background in the text's own color hides the glyphs
+/// inside a solid block until revealed (Telegram Desktop). hydrolysis
+/// drops per-span `background` until #207 lands, so the text shows
+/// unmasked for now — see DOGFOOD r32-2. `None` leaves spoiler text
+/// visible.
 pub(crate) fn styled_from_formatted_mask(ft: &types::FormattedText, mask: Option<Color>) -> StyledStr {
     let mut styled = StyledStr::empty();
     if ft.entities.is_empty() {
@@ -761,7 +763,7 @@ pub(crate) fn styled_from_formatted_mask(ft: &types::FormattedText, mask: Option
         if spoiler
             && let Some(mask) = &mask
         {
-            st = st.foreground((*mask).clone());
+            st = st.background((*mask).clone());
         }
         if quote {
             st = st.background(Srgb::try_from_hex("#E8E8E8").unwrap());
@@ -1232,7 +1234,7 @@ impl Store {
             spoiler_msg.has_spoiler = true;
             spoiler_msg.styled = styled_from_formatted_mask(
                 &ft,
-                Some(Color::from(SurfaceVariant)),
+                Some(Color::from(Foreground)),
             );
             spoiler_msg.styled_open = styled_from_formatted_mask(&ft, None);
             msgs.push(spoiler_msg);
@@ -1749,9 +1751,9 @@ impl Store {
         let (styled, styled_open, has_spoiler, link_site, link_title, link_desc) =
             if let enums::MessageContent::MessageText(t) = &m.content {
                 let mask = if m.is_outgoing {
-                    Color::from(Accent)
+                    Color::from(AccentForeground)
                 } else {
-                    Color::from(SurfaceVariant)
+                    Color::from(Foreground)
                 };
                 let spoiler = has_spoiler_entity(&t.text);
                 (
