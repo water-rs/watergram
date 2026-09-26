@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
 use waterui::color::Srgb;
-use waterui::theme::color::{AccentForeground, Foreground};
+use waterui::theme::color::{AccentContainer, AccentForeground, Foreground};
 use waterui::form::secure::Secure;
 use waterui::text::styled::{Style, StyledStr};
 use waterui::layout::{Rect, ScrollController, Size};
@@ -130,11 +130,41 @@ pub struct ChatRow {
     pub typing: bool,
     pub online: bool,
     pub kind_icon: Str,
+    /// r35: sidebar-search highlight variants (empty = render the plain
+    /// `title`/`preview`). Built in the filtered map, not on the wire path.
+    pub title_styled: StyledStr,
+    pub preview_styled: StyledStr,
 }
 
+/// Style metadata isn't `PartialEq`, so styled fields compare by plain text
+/// and chunk count — enough for the empty↔highlighted transitions we produce.
+fn styled_row_eq(a: &StyledStr, b: &StyledStr) -> bool {
+    a.to_plain() == b.to_plain() && a.chunks().len() == b.chunks().len()
+}
+
+// Structural equality: the list diff skips rows that compare equal, so an
+// id-only `eq` would freeze every field update (unread badges, typing, …).
 impl PartialEq for ChatRow {
     fn eq(&self, o: &Self) -> bool {
         self.id == o.id
+            && self.title == o.title
+            && self.preview == o.preview
+            && self.draft == o.draft
+            && self.order == o.order
+            && self.unread == o.unread
+            && self.unread_mentions == o.unread_mentions
+            && self.pinned == o.pinned
+            && self.muted == o.muted
+            && self.marked_unread == o.marked_unread
+            && self.in_archive == o.in_archive
+            && self.photo_file == o.photo_file
+            && self.accent == o.accent
+            && self.time == o.time
+            && self.typing == o.typing
+            && self.online == o.online
+            && self.kind_icon == o.kind_icon
+            && styled_row_eq(&self.title_styled, &o.title_styled)
+            && styled_row_eq(&self.preview_styled, &o.preview_styled)
     }
 }
 impl Eq for ChatRow {}
@@ -151,7 +181,7 @@ impl Ord for ChatRow {
 
 /// One emoji on a message's reaction strip — emoji, total count, and
 /// whether the current user chose it (Desktop highlights the chosen pill).
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ReactionChip {
     pub emoji: Str,
     pub count: i32,
@@ -213,6 +243,13 @@ pub struct MessageRow {
     pub pending: bool,
     /// Flash-highlighted after a jump-to-message.
     pub highlighted: bool,
+    /// In-chat search: this row matched the query; `search_styled` is the
+    /// body with every occurrence highlighted (span `background`).
+    pub search_hit: bool,
+    pub search_styled: StyledStr,
+    /// The message mentions the current user — drives the floating `@`
+    /// jump button over the chat (Telegram Desktop parity).
+    pub mentions_me: bool,
     /// Render the "Unread messages" divider above this row (first incoming
     /// message after `last_read_inbox_message_id`).
     pub unread_divider: bool,
@@ -246,7 +283,7 @@ pub struct MessageRow {
 }
 
 /// A single poll answer option as shown inside a poll bubble.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PollOptRow {
     /// Option index (the `option_ids` value `setPollAnswer` expects).
     pub ix: usize,
@@ -256,7 +293,7 @@ pub struct PollOptRow {
 }
 
 /// Renderable form of `messagePoll`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PollRow {
     pub question: Str,
     pub options: Vec<PollOptRow>,
@@ -354,9 +391,55 @@ pub struct ViewerRow {
     pub from: Str,
 }
 
+// Structural equality — see `ChatRow`'s `PartialEq` for why id-only would
+// freeze live row updates (reaction chips, read marks, spoiler reveal, …).
 impl PartialEq for MessageRow {
     fn eq(&self, o: &Self) -> bool {
         self.id == o.id
+            && self.sender == o.sender
+            && self.sender_accent == o.sender_accent
+            && self.text == o.text
+            && self.time == o.time
+            && self.outgoing == o.outgoing
+            && self.read_out == o.read_out
+            && self.can_edit == o.can_edit
+            && self.reply_excerpt == o.reply_excerpt
+            && self.reply_to_id == o.reply_to_id
+            && self.media_file == o.media_file
+            && self.play_file == o.play_file
+            && self.media_label == o.media_label
+            && self.reaction_chips == o.reaction_chips
+            && self.my_reaction == o.my_reaction
+            && styled_row_eq(&self.styled, &o.styled)
+            && styled_row_eq(&self.styled_open, &o.styled_open)
+            && self.has_spoiler == o.has_spoiler
+            && self.link_site == o.link_site
+            && self.link_title == o.link_title
+            && self.link_desc == o.link_desc
+            && self.forwarded_from == o.forwarded_from
+            && self.sender_user == o.sender_user
+            && self.sender_chat == o.sender_chat
+            && self.fwd_user == o.fwd_user
+            && self.fwd_chat == o.fwd_chat
+            && self.link_url == o.link_url
+            && self.failed == o.failed
+            && self.pending == o.pending
+            && self.highlighted == o.highlighted
+            && self.search_hit == o.search_hit
+            && styled_row_eq(&self.search_styled, &o.search_styled)
+            && self.mentions_me == o.mentions_me
+            && self.unread_divider == o.unread_divider
+            && self.day == o.day
+            && self.day_header == o.day_header
+            && self.day_label == o.day_label
+            && self.edited == o.edited
+            && self.poll == o.poll
+            && self.group_first == o.group_first
+            && self.group_last == o.group_last
+            && self.avatar_col == o.avatar_col
+            && self.show_avatar == o.show_avatar
+            && self.sender_photo == o.sender_photo
+            && self.is_service == o.is_service
     }
 }
 impl Eq for MessageRow {}
@@ -448,6 +531,10 @@ pub struct Store {
     pub chat_search_open: Binding<bool>,
     pub chat_search: Binding<Str>,
     pub chat_search_results: Binding<Vec<MessageRow>>,
+    /// In-chat search: matched message ids in row order plus the index the
+    /// "n/N" counter sits on — both drive the prev/next match buttons.
+    pub chat_match_ids: Binding<Vec<i64>>,
+    pub chat_search_pos: Binding<usize>,
     /// file_id -> download progress 0-100 for in-flight downloads.
     pub file_progress: Rc<RefCell<HashMap<i32, i32>>>,
     /// Sidebar is showing the Archive list instead of Main.
@@ -886,6 +973,43 @@ pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
     styled_from_formatted_mask(ft, Some(Color::from(Srgb::BLACK)))
 }
 
+/// Return `base` with every case-insensitive occurrence of `q` given a span
+/// `background` (r35: in-chat + sidebar search highlighting). Byte-offset
+/// matching runs on the lowercased copy, which is only safe while
+/// lowercasing preserves byte length — otherwise fall back to a
+/// case-sensitive match so offsets never mis-slice the original.
+pub(crate) fn highlight_styled(base: &StyledStr, q: &str, hl: Color) -> StyledStr {
+    if q.is_empty() {
+        return base.clone();
+    }
+    let ql = q.to_lowercase();
+    let mut out = StyledStr::empty();
+    for (chunk, style) in base.chunks() {
+        let text = chunk.as_str();
+        let lower = text.to_lowercase();
+        let (hay, needle) = if lower.len() == text.len() {
+            (lower.as_str(), ql.as_str())
+        } else {
+            (text, q)
+        };
+        let mut at = 0usize;
+        while let Some(p) = hay[at..].find(needle) {
+            let (s, e) = (at + p, at + p + needle.len());
+            if s > at {
+                out.push(text[at..s].to_string(), style.clone());
+            }
+            let mut hit = style.clone();
+            hit.background = Some(hl.clone());
+            out.push(text[s..e].to_string(), hit);
+            at = e;
+        }
+        if at < text.len() {
+            out.push(text[at..].to_string(), style.clone());
+        }
+    }
+    out
+}
+
 /// True when `ft` carries at least one spoiler entity.
 pub(crate) fn has_spoiler_entity(ft: &types::FormattedText) -> bool {
     ft.entities
@@ -1009,6 +1133,8 @@ impl Store {
             chat_search_open: Binding::bool(false),
             chat_search: Binding::container(Str::from("")),
             chat_search_results: Binding::<Vec<MessageRow>>::default(),
+            chat_match_ids: Binding::<Vec<i64>>::default(),
+            chat_search_pos: Binding::usize(0),
             file_progress: Rc::new(RefCell::new(HashMap::new())),
             archive_mode: Binding::bool(false),
             members_open: Binding::bool(false),
@@ -1145,6 +1271,8 @@ impl Store {
                 typing,
                 online,
                 kind_icon: Str::from(icon.to_string()),
+                title_styled: StyledStr::empty(),
+                preview_styled: StyledStr::empty(),
             }
         };
         // kind_icon mirrors the real path's values (state.rs `kind_icon`
@@ -1164,6 +1292,9 @@ impl Store {
         // Demo draft on a visible row (Telegram Desktop shows "Draft: …").
         self.set_draft(3, Some("release notes proofread".into()));
         self.update_chat_row(5, |r| r.unread_mentions = 2);
+        // r35: chat 1 carries one unread mention so the floating `@` jump
+        // button is exercisable in the demo.
+        self.update_chat_row(1, |r| r.unread_mentions = 1);
         // Mirrors TDLib `chatFolders`: only user-created folders — the
         // built-in All/Archive lists are synthesized by the sidebar itself.
         self.folders.set(vec![
@@ -1257,6 +1388,9 @@ impl Store {
             styled: StyledStr::empty(),
             styled_open: StyledStr::empty(),
             has_spoiler: false,
+            search_hit: false,
+            search_styled: StyledStr::empty(),
+            mentions_me: false,
             link_site: Str::from(""),
             link_title: Str::from(""),
             link_desc: Str::from(""),
@@ -1291,6 +1425,9 @@ impl Store {
         // The card opens the URL on tap (Desktop: the whole card is a link).
         msgs[3].link_url = Str::from("https://waterui.dev");
         msgs[1].reply_to_id = 10;
+        // r35: the first message mentions us — the floating `@` button
+        // jumps to it.
+        msgs[0].mentions_me = true;
         msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
         // Service rows (Desktop's centered grey lines): the pin that put
         // m14 on the banner, and a member join before Bob's first message.
@@ -2012,6 +2149,9 @@ impl Store {
             failed,
             pending,
             highlighted: false,
+            search_hit: false,
+            search_styled: StyledStr::empty(),
+            mentions_me: false,
             unread_divider: false,
             group_first: true,
             group_last: true,
@@ -2109,6 +2249,8 @@ impl Store {
             typing: false,
             online,
             kind_icon: kind_icon.into(),
+            title_styled: StyledStr::empty(),
+            preview_styled: StyledStr::empty(),
         };
         let mut list = self.chats.snapshot();
         match list.iter().position(|r| r.id == chat.id) {
@@ -3169,6 +3311,9 @@ impl Store {
                 failed: false,
                 pending: false,
                 highlighted: false,
+                search_hit: false,
+                search_styled: StyledStr::empty(),
+                mentions_me: false,
                 unread_divider: false,
                 day,
                 day_header: false,
@@ -3290,6 +3435,79 @@ impl Store {
     }
 
     /// In-chat message search via `searchChatMessages`.
+    /// Mark every loaded row whose text contains `q` (case-insensitive)
+    /// `search_hit` and build its `search_styled` highlight variant.
+    /// Returns the matched ids in row order — the prev/next buttons and
+    /// the "n/N" counter index into it.
+    pub(crate) fn mark_search_hits(&self, q: &str) -> Vec<i64> {
+        let lower_q = q.to_lowercase();
+        let mut list = self.messages.snapshot();
+        let mut ids = Vec::new();
+        for r in list.iter_mut() {
+            let hit = !lower_q.is_empty()
+                && r.text.to_lowercase().contains(&lower_q);
+            r.search_hit = hit;
+            r.search_styled = if hit {
+                let base = if r.styled.is_empty() {
+                    StyledStr::plain(r.text.clone())
+                } else {
+                    r.styled.clone()
+                };
+                highlight_styled(&base, q, Color::from(AccentContainer))
+            } else {
+                StyledStr::empty()
+            };
+            if hit {
+                ids.push(r.id);
+            }
+        }
+        self.set_messages(list);
+        ids
+    }
+
+    /// r35: jump the scroll to the previous/next search match and flash it
+    /// (Telegram Desktop's ^ up/down match navigation).
+    pub fn chat_search_next(&self) {
+        let ids = self.chat_match_ids.snapshot();
+        if ids.is_empty() {
+            return;
+        }
+        let pos = (self.chat_search_pos.snapshot() + 1) % ids.len();
+        self.chat_search_pos.set(pos);
+        self.jump_to_message(ids[pos]);
+    }
+
+    pub fn chat_search_prev(&self) {
+        let ids = self.chat_match_ids.snapshot();
+        if ids.is_empty() {
+            return;
+        }
+        let pos = (self.chat_search_pos.snapshot() + ids.len() - 1) % ids.len();
+        self.chat_search_pos.set(pos);
+        self.jump_to_message(ids[pos]);
+    }
+
+    /// r35: the floating `@` button jumps to the first unread mention in
+    /// the open chat and clears its mention count (Desktop parity).
+    pub fn mention_jump(&self) {
+        let target = self
+            .messages
+            .snapshot()
+            .iter()
+            .find(|r| r.mentions_me)
+            .map(|r| r.id);
+        if let Some(id) = target {
+            self.jump_to_message(id);
+        }
+        let open = self.open_chat.get();
+        self.update_chat_row(open, |r| r.unread_mentions = 0);
+    }
+
+    /// r35: Desktop's double-tap quick-react — toggles the default ❤️.
+    pub fn quick_react(&self, row: &MessageRow) {
+        self.toggle_reaction(row, "❤️");
+    }
+
     pub fn run_chat_search(&self, query: Str) {
         self.chat_search.set(query.clone());
         let chat_id = self.open_chat.get();
@@ -3298,7 +3516,30 @@ impl Store {
         }
         if query.is_empty() {
             self.chat_search_results.set(Vec::new());
-        self.members.set(Vec::new());
+            self.members.set(Vec::new());
+            self.chat_match_ids.set(Vec::new());
+            self.chat_search_pos.set(0);
+            self.mark_search_hits("");
+            return;
+        }
+        // Highlight every match inside the loaded window (Desktop keeps all
+        // matches lit and navigates between them); match ids feed the n/N
+        // counter + prev/next buttons.
+        let ids = self.mark_search_hits(&query);
+        self.chat_match_ids.set(ids.clone());
+        self.chat_search_pos.set(0);
+        if let Some(&first) = ids.first() {
+            self.jump_to_message(first);
+        }
+        if self.client_id.get() == 0 {
+            // Demo store: the local pass already found every match in the
+            // loaded window; mirror them into the dropdown result rows.
+            let list = self.messages.snapshot();
+            self.chat_search_results.set(
+                list.into_iter()
+                    .filter(|r| ids.contains(&r.id))
+                    .collect(),
+            );
             return;
         }
         let client = self.client_id.get();
@@ -6352,6 +6593,8 @@ impl Store {
             time: "".into(),
             typing: false,
             online: false,
+            title_styled: StyledStr::empty(),
+            preview_styled: StyledStr::empty(),
             kind_icon: "person".into(),
         };
         let mut list = self.server_results.snapshot();

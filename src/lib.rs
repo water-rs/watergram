@@ -211,6 +211,8 @@ mod tests {
             marked_unread: false,
             in_archive: false,
             accent: -1,
+            title_styled: waterui::text::styled::StyledStr::empty(),
+            preview_styled: waterui::text::styled::StyledStr::empty(),
         }
     }
 
@@ -241,6 +243,9 @@ mod tests {
             my_reaction: "".into(),
             styled: waterui::text::styled::StyledStr::empty(),
             styled_open: waterui::text::styled::StyledStr::empty(),
+            search_hit: false,
+            search_styled: waterui::text::styled::StyledStr::empty(),
+            mentions_me: false,
             has_spoiler: false,
             link_site: "".into(),
             link_title: "".into(),
@@ -1817,6 +1822,8 @@ mod tests {
                     online: false,
                     kind_icon: "group".into(),
                     accent: -1,
+                    title_styled: waterui::text::styled::StyledStr::empty(),
+                    preview_styled: waterui::text::styled::StyledStr::empty(),
                 },
             )
         });
@@ -1824,6 +1831,51 @@ mod tests {
         dump_bounds("/tmp/probe_chatrow.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_chatrow.png");
         app.query().label("12").assert_exists();
+    }
+
+    /// DOGFOOD r35-3: a `List` row whose *fields* change while its `#[id]`
+    /// stays the same must repaint with the new content. The headless
+    /// `mount_offscreen` path materializes rows fresh each settle (this probe
+    /// passes — kept enabled as a semantic guard); the live retained/virtualized
+    /// path does not — `VisibleSubviewCache` keys subviews by id alone and
+    /// `List`'s flush discards the freshly-built item view for a cached id
+    /// (hydrolysis widgets/layout/list.rs:1625, renderer/tree/nodes.rs:428).
+    /// Live evidence: a35/a_mention captures — the sidebar `@` badge persisted
+    /// after `mention_jump` cleared `unread_mentions` (the `when`-driven
+    /// floating button over the same field hid correctly).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_list_row_content_update(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        use waterui::Identifiable;
+        #[derive(Clone, Identifiable)]
+        struct Row {
+            #[id]
+            id: i64,
+            label: Str,
+        }
+        let mk = |i: i64| Row {
+            id: i,
+            label: if i == 0 { "before".into() } else { format!("row{i}").into() },
+        };
+        let rows = Binding::container((0..50).map(&mk).collect::<Vec<_>>());
+        let for_list = rows.clone();
+        let mut app = ui.viewport(300, 200).mount_offscreen(move || {
+            List::for_each(
+                SignalCollection::new(for_list.clone()),
+                |row: Row| ListItem::new(text(row.label.clone())),
+            )
+        });
+        app.semantic_mut().settle();
+        app.query().label("before").assert_exists();
+        rows.set(
+            (0..50)
+                .map(|i| Row {
+                    id: i,
+                    label: if i == 0 { "after".into() } else { format!("row{i}").into() },
+                })
+                .collect(),
+        );
+        app.semantic_mut().settle();
+        app.query().label("after").assert_exists();
     }
 
     /// Unread-mention badge: a row with `unread_mentions > 0` shows the "@"
@@ -1852,6 +1904,8 @@ mod tests {
                     online: false,
                     kind_icon: "group".into(),
                     accent: -1,
+                    title_styled: waterui::text::styled::StyledStr::empty(),
+                    preview_styled: waterui::text::styled::StyledStr::empty(),
                 },
             )
         });
@@ -3481,6 +3535,124 @@ mod tests {
         app.query()
             .label("Insert :smile:")
             .assert_not_exists();
+    }
+
+    /// r35 pick: in-chat search marks every hit, paints the matched range
+    /// with a span `background` highlight, and clears on an empty query.
+    #[test]
+    fn chat_search_marks_and_clears() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.run_chat_search(Str::from("the"));
+        let ids = store.chat_match_ids.snapshot();
+        assert!(!ids.is_empty(), "no search hits marked");
+        let rows = store.messages.snapshot();
+        let hit = rows.iter().find(|r| r.search_hit).unwrap();
+        assert!(
+            hit.search_styled
+                .chunks()
+                .iter()
+                .any(|(_, s)| s.background.is_some()),
+            "matched range has no highlight background"
+        );
+        assert_eq!(store.highlight_msg.snapshot(), ids[0], "did not jump to first match");
+        store.run_chat_search(Str::from(""));
+        assert!(store.messages.snapshot().iter().all(|r| !r.search_hit));
+        assert!(store.chat_match_ids.snapshot().is_empty());
+    }
+
+    /// r35 pick: prev/next cycle the match position and re-anchor the
+    /// scroll target (Desktop's n/N controls).
+    #[test]
+    fn chat_search_next_prev_cycle() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.run_chat_search(Str::from("e"));
+        let n = store.chat_match_ids.snapshot().len();
+        assert!(n > 1, "need multiple hits to cycle");
+        assert_eq!(store.chat_search_pos.snapshot(), 0);
+        store.chat_search_next();
+        assert_eq!(store.chat_search_pos.snapshot(), 1);
+        store.chat_search_prev();
+        assert_eq!(store.chat_search_pos.snapshot(), 0);
+        store.chat_search_prev();
+        assert_eq!(store.chat_search_pos.snapshot(), n - 1, "prev did not wrap");
+    }
+
+    /// r35 pick: the floating `@` button jumps to the first unread mention
+    /// and clears the row's mention badge.
+    #[test]
+    fn mention_jump_targets_and_clears() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        assert_eq!(store.chats.snapshot()[0].unread_mentions, 1);
+        store.mention_jump();
+        assert_eq!(store.chats.snapshot()[0].unread_mentions, 0);
+        let target = store.highlight_msg.snapshot();
+        assert!(target > 0, "mention jump did not flash a row");
+        assert!(
+            store.messages.snapshot().iter().any(|r| r.id == target && r.mentions_me),
+            "mention jump did not land on the mentioning row"
+        );
+    }
+
+    /// r35 pick: sidebar search highlighting splits the matched substring
+    /// onto a highlighted span.
+    #[test]
+    fn sidebar_search_highlight_splits() {
+        use crate::state::highlight_styled;
+        use waterui::text::styled::StyledStr;
+        use waterui::theme::color::AccentContainer;
+        let s = highlight_styled(
+            &StyledStr::plain("Alice Wu"),
+            "wu",
+            Color::from(AccentContainer),
+        );
+        let chunks = s.chunks();
+        assert!(
+            chunks
+                .iter()
+                .any(|(t, st)| t.as_str() == "Wu" && st.background.is_some()),
+            "matched substring not highlighted: {chunks:?}"
+        );
+        // A query that doesn't match leaves the text plain.
+        let none = highlight_styled(
+            &StyledStr::plain("Alice Wu"),
+            "zzz",
+            Color::from(AccentContainer),
+        );
+        assert!(none.chunks().iter().all(|(_, st)| st.background.is_none()));
+    }
+
+    /// r35 pick: double-tap quick-react applies the ❤️ on the bubble.
+    #[test]
+    fn quick_react_applies_heart() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| !r.outgoing && !r.is_service)
+            .unwrap();
+        store.quick_react(&row);
+        let now = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == row.id)
+            .unwrap();
+        assert_eq!(now.my_reaction.as_str(), "❤️");
+        assert!(
+            now.reaction_chips
+                .iter()
+                .any(|c| c.emoji.as_str() == "❤️" && c.chosen),
+            "no chosen ❤️ chip after quick-react"
+        );
     }
 
     /// Minimal modal-Escape probe: one button inside a `ModalInteraction`

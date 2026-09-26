@@ -4,7 +4,6 @@
 //! `store: Store` as a `#[state]` extractor injected once at the root.
 
 use std::num::NonZeroUsize;
-use std::time::Duration;
 
 
 use waterui_backend_core::widget::ModalInteraction;
@@ -46,7 +45,8 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{AccountRow, ChatRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{highlight_styled, AccountRow, ChatRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::account_group;
 use mdi::alert_circle;
@@ -55,6 +55,9 @@ use mdi::camera;
 use mdi::check;
 use mdi::microphone;
 use mdi::file_gif_box;
+use mdi::at;
+use mdi::chevron_down;
+use mdi::chevron_up;
 use mdi::close;
 use mdi::delete_sweep;
 use mdi::account_plus;
@@ -69,6 +72,7 @@ use mdi::menu;
 use mdi::paperclip;
 use mdi::pin;
 use mdi::poll;
+use mdi::reply;
 use mdi::plus;
 use mdi::send;
 use mdi::share_variant;
@@ -311,15 +315,35 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         store
             .chats
             .zip(&store.search)
-            .map(|(rows, q)| {
+            .map(|(mut rows, q)| {
                 let q = q.to_lowercase();
                 if q.is_empty() {
+                    for r in &mut rows {
+                        r.title_styled = StyledStr::empty();
+                        r.preview_styled = StyledStr::empty();
+                    }
                     rows
                 } else {
+                    // r35: Desktop highlights the matched substring in the
+                    // title/preview (span `background` — hydrolysis#212).
                     rows.into_iter()
                         .filter(|r| {
                             r.title.to_lowercase().contains(&q)
                                 || r.preview.to_lowercase().contains(&q)
+                        })
+                        .map(|mut r| {
+                            let hl = Color::from(AccentContainer);
+                            r.title_styled = highlight_styled(
+                                &StyledStr::plain(r.title.clone()),
+                                &q,
+                                hl.clone(),
+                            );
+                            r.preview_styled = highlight_styled(
+                                &StyledStr::plain(r.preview.clone()),
+                                &q,
+                                hl,
+                            );
+                            r
                         })
                         .collect()
                 }
@@ -327,7 +351,10 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
     );
     let server_results = SignalCollection::new(store.server_results.clone());
     let show_results = store.server_results.map(|v| !v.is_empty()).distinct();
-    let debounced = store.search.debounce(Duration::from_millis(400));
+    // Was `store.search.debounce(400ms)` — the debounced signal never
+    // re-emitted on hydrolysis, so sidebar search never ran (DOGFOOD r35-4).
+    // Filtering a handful of local rows is cheap.
+    let search_now = store.search.clone();
     let rows_store = store.clone();
     let res_store = store.clone();
     let folder_tabs = store
@@ -560,7 +587,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             })
         },
     ))
-    .on_change(&debounced, |q: Str, store: Store| store.run_search(q))
+    .on_change(&search_now, |q: Str, store: Store| store.run_search(q))
     .on_change(&store.list_selection, |v: Option<i64>, store: Store| {
         if let Some(id) = v {
             store.select_chat(id)
@@ -663,11 +690,21 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         ))
         .spacing(0.0)
         .anyview(),
-        _ => text(row.preview.clone())
-            .caption()
-            .line_limit(ONE)
-            .muted()
-            .anyview(),
+        _ => {
+            if row.preview_styled.is_empty() {
+                text(row.preview.clone())
+                    .caption()
+                    .line_limit(ONE)
+                    .muted()
+                    .anyview()
+            } else {
+                text(row.preview_styled.clone())
+                    .caption()
+                    .line_limit(ONE)
+                    .muted()
+                    .anyview()
+            }
+        }
     };
     // Unread-mention "@" badge: same M3 badge pill as the unread count,
     // sitting to its left (Telegram Desktop's row layout).
@@ -720,10 +757,17 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         vstack((
             hstack((
                 kind_icon(&row.kind_icon),
-                text(row.title.clone())
-                    .body()
-                    .line_limit(ONE)
-                    .foreground(Foreground),
+                if row.title_styled.is_empty() {
+                    text(row.title.clone())
+                        .body()
+                        .line_limit(ONE)
+                        .foreground(Foreground)
+                } else {
+                    text(row.title_styled.clone())
+                        .body()
+                        .line_limit(ONE)
+                        .foreground(Foreground)
+                },
                 spacer(),
                 when(row.online, || text("●").caption().foreground(Accent)),
                 text(row.time.clone()).caption().muted(),
@@ -792,6 +836,17 @@ pub(crate) fn chat_column(store: Store) -> impl View {
     let search_open = store.chat_search_open.clone();
     let search_b = store.chat_search.clone();
     let search_results_b = store.chat_search_results.clone();
+    // Desktop's "n/N" match counter beside the in-chat search field.
+    let match_label = store
+        .chat_search_pos
+        .zip(&store.chat_match_ids)
+        .map(|(p, ids)| {
+            if ids.is_empty() {
+                Str::from("")
+            } else {
+                Str::from(format!("{}/{}", p + 1, ids.len()))
+            }
+        });
     let stickers_open = store.stickers_open.clone();
     let sticker_items = store.sticker_items.clone();
     let store_cells = store.clone();
@@ -852,8 +907,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
     let esc_scheduled = modal_escape(store.clone(), |s| s.scheduled_open.set(false));
     let esc_search = modal_escape(store.clone(), |s| {
         s.chat_search_open.set(false);
-        s.chat_search.set_from("");
-        s.chat_search_results.set(Vec::new());
+        s.run_chat_search(Str::from(""));
     });
     let esc_stickers = modal_escape(store.clone(), |s| s.stickers_open.set(false));
             vstack((
@@ -1075,10 +1129,16 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 field("Search in chat", &search_b)
                     .prompt("Search in this chat")
                     .hide_label(),
+                text!("{m}", m = match_label.clone()).caption().muted(),
+                icon_button(chevron_up(), "Previous match", |store: Store| {
+                    store.chat_search_prev()
+                }),
+                icon_button(chevron_down(), "Next match", |store: Store| {
+                    store.chat_search_next()
+                }),
                 icon_button(close(), "Close search", |store: Store| {
                     store.chat_search_open.set(false);
-                    store.chat_search.set_from("");
-                    store.chat_search_results.set(Vec::new());
+                    store.run_chat_search(Str::from(""));
                 }),
             ))
             .spacing(6.0)
@@ -1406,7 +1466,10 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
 
     let composer_b = store.composer.clone();
     let search_open2 = store.chat_search_open.clone();
-    let search_debounced = store.chat_search.debounce(Duration::from_millis(400));
+    // Debounce was `chat_search.debounce(400ms)`; the debounced signal never
+    // re-emitted on hydrolysis, so marks/counter never appeared — see
+    // DOGFOOD r35-4. The loaded-window search is a cheap snapshot scan.
+    let search_live = store.chat_search.clone();
     let viewer_open = store.viewer.is_some().distinct();
     let store_for_viewer = store.clone();
     let store_for_info = store.clone();
@@ -1420,6 +1483,19 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         .zip(&store.win_frame)
         .map(|(open, f)| open && f.width() < 1120.0)
         .distinct();
+    // r35: the open chat's unread-mention count drives the floating `@`
+    // jump button (Telegram Desktop's bottom-right quick-jump).
+    let open_mentions = store
+        .chats
+        .zip(&store.selected)
+        .map(|(rows, open)| {
+            open.and_then(|id| {
+                rows.iter().find(|r| r.id == id).map(|r| r.unread_mentions)
+            })
+            .unwrap_or(0)
+        })
+        .distinct();
+    let has_mentions = open_mentions.is_positive().distinct();
     let store_for_info_overlay = store.clone();
     // Honest reproduction: `when(a).otherwise(b)` (WhenComplete) panics at
     // mount on the shipped renderers — nami#23, DOGFOOD r11-4a. Kept in this
@@ -1449,9 +1525,29 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 ))
             }
         }),
+        when(has_mentions, move || {
+            vstack((
+                spacer(),
+                hstack((
+                    spacer(),
+                    at()
+                        .tint(AccentForeground)
+                        .size(20.0, 20.0)
+                        .padding_with(10.0)
+                        .background(Circle.fill(Accent))
+                        // hydrolysis#221 workaround: hide the leaf so the
+                        // gesture emits the single named Button node.
+                        .a11y_hidden(true)
+                        .on_tap(|store: Store| store.mention_jump())
+                        .a11y_label("Jump to the unread mention")
+                        .a11y_role(AccessibilityRole::Button),
+                )),
+            ))
+            .padding_with([0.0, 84.0, 0.0, 16.0])
+        }),
         when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
     ))
-    .on_change(&search_debounced, |q: Str, store: Store| store.run_chat_search(q))
+    .on_change(&search_live, |q: Str, store: Store| store.run_chat_search(q))
     .on_change(&composer_b, |_: Str, store: Store| {
         store.typing_ping();
         store.maybe_load_members();
@@ -1712,6 +1808,8 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             .strip_prefix("Forwarded from ")
             .unwrap_or(fwd.as_str())
             .to_string();
+        // hydrolysis#221 workaround: hide the leaf so the gesture, not the
+        // leaf, emits the single named Button node (remove with the fix).
         parts.push(muted_parts(
             text(fwd.clone()).italic(true).caption().line_limit(ONE).anyview(),
         )
@@ -1726,6 +1824,8 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     if row.group_first && !row.outgoing && !sender.is_empty() {
         let (su, sc) = (row.sender_user, row.sender_chat);
         let sender_name = sender.to_string();
+        // hydrolysis#221 workaround: hide the leaf so the gesture, not the
+        // leaf, emits the single named Button node (remove with the fix).
         parts.push(
             text(sender.clone())
                 .caption()
@@ -1788,6 +1888,10 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
                 26.0
             };
             parts.push(text(body_text.clone()).size(size).anyview());
+        } else if row.search_hit && !row.search_styled.is_empty() {
+            // In-chat search match: the body renders with every occurrence
+            // highlighted via span `background` (Desktop parity; r35).
+            parts.push(text(row.search_styled.clone()).body().anyview());
         } else if has_styled {
             if row.has_spoiler {
                 // Desktop masks spoiler spans until tapped. The mask is a
@@ -2095,16 +2199,39 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     // `Delete` carries `CommandRole::Destructive`. On Linux the lifted
     // presentation is still in progress (hydrolysis#200), so the backend
     // shows a plain popup for now.
+    // r35: hover reveals Desktop's quick-reply button beside the bubble,
+    // and a double-tap on the bubble applies the quick ❤️ reaction.
+    let hov = Binding::bool(false);
+    let r_quick = row.clone();
+    let r_dbl = row.clone();
+    let quick_reply = when(hov.clone(), move || {
+        let rr = r_quick.clone();
+        reply()
+            .tint(MutedForeground)
+            .size(18.0, 18.0)
+            .padding_with(6.0)
+            .background(Circle.fill(SurfaceVariant))
+            // hydrolysis#221 workaround: hide the leaf so the gesture, not
+            // the leaf, emits the single named Button node.
+            .a11y_hidden(true)
+            .on_tap(move |store: Store| store.start_reply(&rr))
+            .a11y_label("Quick reply")
+            .a11y_role(AccessibilityRole::Button)
+            .anyview()
+    });
+
     let bubble = bubble_view(&store, &row)
         .context_menu(
             ContextMenu::new(bubble_menu_items(&row, pinned))
                 .preview(bubble_view(&store, &row))
                 .accessory(reaction_strip(&row)),
         )
+        .on_tap_gesture_count(2, move |store: Store| store.quick_react(&r_dbl))
         .anyview();
 
     let placed = if row.outgoing {
-        hstack((spacer(), bubble)).anyview()
+        // The button appears in the spacer zone — the bubble stays put.
+        hstack((spacer(), quick_reply, bubble)).spacing(4.0).anyview()
     } else if row.avatar_col {
         // Groups/channels reserve a leading avatar column on incoming rows
         // so a run's bubbles stay aligned; the avatar itself shows only on
@@ -2121,12 +2248,17 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
         } else {
             Color::from(Surface).size(32.0, 32.0).anyview()
         };
-        hstack((vstack((spacer(), slot)).spacing(0.0), bubble, spacer()))
+        hstack((vstack((spacer(), slot)).spacing(0.0), bubble, quick_reply, spacer()))
             .spacing(4.0)
             .anyview()
     } else {
-        hstack((bubble, spacer())).anyview()
+        hstack((bubble, quick_reply, spacer())).spacing(4.0).anyview()
     };
+    let placed = placed
+        .on_hover_enter(|State(h): State<Binding<bool>>| h.set(true))
+        .on_hover_exit(|State(h): State<Binding<bool>>| h.set(false))
+        .state(&hov)
+        .anyview();
     // Desktop's vertical order inside a row: day divider, unread
     // divider, then the bubble itself.
     let mut column: Vec<AnyView> = Vec::new();

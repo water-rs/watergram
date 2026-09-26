@@ -2628,3 +2628,172 @@ accessibility_impl.rs:1231-1233), so the scope-claim suppresses the
 gesture's actionable node and the announced Button is dead for assistive
 activation. Both are framework-side semantics gaps; the leaf-hidden form
 is the only composition that yields one Button node carrying `Activate`.
+
+## r35 — repin hydrolysis 1076084 / waterui b956632 (verifications + two new defects)
+
+Re-verified on the new pins (Mesa 26.2.3 lavapipe, wolfi container):
+
+- **#207 (via hydrolysis#212) VERIFIED**: spoiler spans now paint their
+  `TextStyle.background` mask — the trailing spoiler text renders as an
+  opaque block before reveal at 1400/800/600 (r35_chat1400). No app change.
+- **#208 (via hydrolysis#214) VERIFIED**: in-row gesture regions align
+  with painted content after virtualization; taps on the painted bounds
+  of spoiler/fwd-badge hit the right target (r32-3 closed).
+- **#210 (via hydrolysis#216) VERIFIED**: row extents re-measure — at
+  1400/800/600 message rows carry their full content; the 1px hairlines
+  at row seams and the clipped first bubble are gone. `probe_list_row_
+  remeasure` still guards the regression until removed.
+- **#211 (via hydrolysis#213) VERIFIED**: winit synthetic focus-replay
+  keystrokes no longer double-fire; composer typing via xdotool
+  windowfocus+type lands exactly once.
+
+### r35-1: inserting a `when(…)` → `VStack::for_each(SignalCollection, …)`
+subtree blanks every color-emoji glyph in the window permanently
+
+Observed live on hydrolysis 1076084 + waterui b956632, wolfi Mesa 26.2.3
+lavapipe (also on a4b89a5 — first seen in r34_emoji_600):
+- Fresh launch: chips 👍❤️🔥🎉👀🚀 and emoji-only messages paint fine.
+- Type `@a` in the composer → the mention suggestion popup (a `when` over
+  a `SignalCollection::for_each`) appears; from that frame every emoji in
+  the window is blank forever — chips show bare counts, emoji-only
+  messages leave empty space, and the popup's own `text(s.emoji)` glyphs
+  never appear. Non-emoji text keeps painting. Identical for the `:smi`
+  emoji-suggestion popup.
+- Control: the sticker/emoji picker — also a `when` subtree but a plain
+  `vstack`/`HStack::for_each` grid — opens with every emoji painting and
+  does NOT blank anything. Removing the popup's `.clip(RoundedRectangle)`
+  changed nothing (rebuilt + retested).
+- Broader trigger confirmed in this session: blanking also struck when
+  the in-chat search bar (a `when(search_open)` insertion, no for_each)
+  appeared, and on plain `field` typing with no popup — so the common
+  factor is a *subtree insertion or text-layout mutation* after the
+  first emoji pass, not the for_each path specifically. The same event
+  also wiped a decoded photo texture in one frame (Alice's photo bubble
+  rendered its rounded shell with no image), so the invalidation is not
+  emoji-specific either.
+- In one launch emoji were blank from the very first frame (flaky —
+  never painted at all), so the corruption may also occur without the
+  trigger.
+- This defect fully explains the three r34_emoji_600 anomalies asked
+  about: chips showing bare counts (emoji span blanked), the 09:54
+  bubble rendering only its reaction row (its text was an emoji-only
+  message whose glyphs vanished), and the `:smi` list showing no glyph
+  next to each shortcode (`text(s.emoji)` blanked by its own popup's
+  insertion). The "empty band" under the search field is unrelated — it
+  is the result-row `for_each` region when the query has no hits yet.
+
+Minimal repro (app-level): a `List` of rows containing `text("👍 …")`
+plus a `when(popup, || VStack::for_each(sig_rows, |r| text(r)))` —
+assert popup opens, then re-shoot: all emoji gone.
+
+Pointers: glyph scenes are cached per layout
+(`glyph_scene_with`, renderer/render/text_service.rs:245-279) and encode
+via `scene.draw_glyphs(font).brush(..)` (measurement.rs:490-527); color
+emoji ride glifo's bitmap atlas with deferred `PendingBitmapUpload`s and
+`pending_clear_rects` drained after eviction (`maintain`,
+vello-glifo atlas/cache.rs:74-135) — an insert-time ordering bug there
+(clear landing after the upload, or the uploaded bitmap never reaching
+the captured subtree) is the likely site, but the exact line is
+upstream's to pin down.
+
+### r35-2: `.background(Surface)` does not paint on `when(…) → VStack::for_each(…)`
+
+Both suggestion popups carry `VStack::for_each(rows, …)` +
+`.spacing(0).padding_with((4,0)).background(Surface).clip(Rounded…)`.
+The rows paint; the background never does — the popup is bare text over
+the chat (pixel-verified: popup region #141218 == chat bg; the composer's
+static `hstack().background(Surface)` paints #36343B in the same frame).
+Removing `.clip` doesn't help; the sticker picker's per-cell
+`background(shape.fill())` form DOES paint, so the failure is specific to
+the `when`→for_each→`.background(color)` path (likely the background
+measuring/painting against the collection's bounds). Minimal repro:
+`when(c, || VStack::for_each(rows, |r| text(r)).background(Surface))` on
+a colored background → expect a Surface rect, observe none.
+
+### r35-3: retained `List`/`for_each` rows never rebuild when a same-`id` item's fields change
+
+`SignalCollection` emits a new snapshot with updated row fields;
+`nami::Binding::set` notifies unconditionally (nami binding.rs:1072) and
+`SignalCollection::watch` forwards the whole `Rc<[T]>` (nami
+collection.rs:328+) — so the update DOES reach the view layer. It is
+dropped there:
+
+- `VisibleSubviewCache::entry` keys subviews by `CollectionItemId` only
+  and `or_insert_with` builds each row view exactly once
+  (hydrolysis 1076084 renderer/tree/nodes.rs:428-435). `List`'s flush
+  calls `cache.entry(row_id, || content)` (widgets/layout/list.rs:1625)
+  — the freshly-materialized view for an already-cached id is discarded.
+- `prepare_rows` (list.rs:493) resets `extent_index`/`sections` on
+  `rows_dirty` but never evicts `item_cache`, so even a `set` that only
+  changes fields leaves stale subviews.
+- Non-virtualized `CollectionNode::reconcile` (renderer/tree/
+  collection.rs:599-609) reuses the `previous` node for live ids without
+  calling `get_view`, so the same staleness hits plain
+  `VStack::for_each` collections.
+
+Effect: every row-field update is invisible while the row stays mounted
+— unread badges, typing indicators, reaction-chip counts, edits,
+spoiler reveal, search-highlight spans, the `@` mention badge. Only
+signal-driven content inside the row repaints.
+
+Live evidence (this session, hydrolysis 1076084):
+- `mention_jump` clears `unread_mentions` in state (unit-tested). The
+  `when(has_mentions)`-driven floating `@` button hid immediately, but
+  the sidebar row's `@` badge kept painting across many frames
+  (r35_mention_after800.png — "Rust China" still shows "@12").
+- Sidebar search: the `zip`/`map` filter narrows the list correctly
+  ("rus" → 2 rows) and `highlight_styled` computes mark spans
+  (unit-tested), yet survivors' titles never repaint — no mark on
+  "Rus" even after a resize (r35_side1400.png). Sidebar rows are
+  fixed-width so resize does not re-materialize them; chat rows are
+  variable-width, which is why in-chat marks DID appear after a resize
+  (r35_search800.png) — same defect, opposite accident.
+- Consequence: double-tap quick-react and reaction toggles are
+  unverifiable live — chips don't repaint until the row is evicted.
+
+`probe_list_row_content_update` (src/lib.rs) is the minimal repro: a
+50-row `List::for_each(SignalCollection)` in a 200px viewport, flip a
+same-id row's label — it PASSES headless because `mount_offscreen`
+materializes rows fresh each settle; the defect is retained-path-only.
+Kept enabled as a semantic guard.
+
+To fix this properly, rows also need structural equality so a future
+replace-detection pass can tell same-id updates apart: this round adds
+`PartialEq` for `ChatRow`/`MessageRow`/`ReactionChip`/`PollOptRow`/
+`PollRow` (styled fields compare via `to_plain()` + chunk count —
+`styled_row_eq`, src/state.rs:139-169).
+
+### r35-4: `SignalExt::debounce` never re-emits on hydrolysis
+
+`store.chat_search.debounce(400ms)` feeding
+`.on_change(.., run_chat_search)` produced nothing live — no n/N
+counter, no marks, no result rows — while the identical `on_change` on
+the raw `Binding` works immediately (r35_search1400.png shows "1/8" +
+results). Same story for the sidebar's `store.search.debounce` →
+`run_search`, which is why "Search chats" never filtered before.
+
+Verified chain links (all present, so the broken link is inside them):
+- `nami::async_signal::Debounce::watch` spawns
+  `executor.spawn_local(async { sleep(d).await; watchers.notify(ctx) })`
+  (nami 6908aac async_signal/debounce.rs:120-145); `sleep` is
+  `nami::utils::sleep` → `async_io::Timer::after` (support/utils.rs:142).
+- The winit local executor is installed
+  (`winit_runner.rs:549` `try_init_local_executor`), `spawn_local` posts
+  `PollLocalTasks` (:190) and `user_event` drains the queue
+  (:748-750). Plain `spawn_local` futures do run live (TDLib calls,
+  photo decode complete).
+- Headless probes cannot isolate it: the test executor parks runnables
+  (hydrolysis renderer/tests/mod.rs:136-152), so any timer-backed
+  assertion would vacuously fail there.
+
+Suspect: `async_io::Timer`'s wake → `runnable.schedule()` →
+`PollLocalTasks` → `watchers.notify` — possibly the wake never schedules
+(waker captured on async-io's reactor thread, proxy event dropped), or
+`Debounce`'s own `watchers`/`timer` Rc bookkeeping drops the
+subscription. Needs a real event loop to bisect — reported as a live
+defect with the chain mapped.
+
+App impact handled without a workaround: both searches watch the raw
+binding (`search_now`/`search_live`) — local filtering of a snapshot is
+cheap; debounce was only an optimization. DOGFOOD stands: the API is
+broken on this backend.

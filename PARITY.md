@@ -47,7 +47,7 @@
 | 回复 / 引用（含点击引用跳转原消息） | ✅ | `inputMessageReplyTo` + `jump_to_message`（本地命中直接高亮+滚动，未加载走 `getMessage`+历史） | `reply_banner_shows` / `reply_quote_jumps_to_loaded_message` |
 | 复制文本 | ✅ | `getMessage` + 剪贴板 | — |
 | 已读标记（拉取后回执） | ✅ | `viewMessages` | — |
-| 消息内搜索 | ✅ | `searchChatMessages`（输入防抖 400ms） | `chat_search_panel_opens` |
+| 消息内搜索 | ✅ | `searchChatMessages` + 本地窗口全量命中高亮（`search_hit`→AccentContainer span）+ n/N 计数 + ^/v 逐条跳转 + 结果行列表（防抖移除：nami debounce 在 hydrolysis 不发射，DOGFOOD r35-4，直接监听 binding） | `chat_search_panel_opens` `chat_search_marks_and_clears` `chat_search_next_prev_cycle` |
 | 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + `List` `ScrollController<usize>` 按索引精确滚动 + 气泡高亮 | — |
 | 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
 | 服务消息（置顶/入群/拉人，居中灰条） | ✅ | `MessagePinMessage`/`MessageChatAddMembers`/`MessageChatJoinBy*` → 居中 muted pill（"You"/发送者名前缀，拉人解析成员名）；独立 List 行，`ListItem::insets`+`.list_min_row_height(0)` 给 Desktop 间距（34pt 实测，waterui#1252 已落地）；不参与消息组、不可多选、无右键菜单；demo pin 路径同步追加服务行 | `pin_appends_service_row` / `service_row_not_selectable` / `service_rows_break_runs` |
@@ -73,6 +73,10 @@
 | 打开会话锚定未读分隔线 | ✅ | `scroll_to_open`：unread>0 且有分隔线 → 定位分隔线行；未读挂起期间收到新消息不动视口（`follows_tail`），自发消息仍跟随尾部 | `open_unread_anchors_divider` |
 | 发送者头像/名字、转发徽标点开资料 | ✅ | 气泡列头像、组内发送者名、「Forwarded from」徽标 → `open_peer` → Profile 卡（demo 合成卡） | `peer_taps_open_profiles` |
 | `:emoji` 短码补全 | ✅ | 输入框尾部 `:token`(≥2 字符) → `EMOJI_SHORTCODES` 前缀建议条（≤6 项），点选替换 token | `emoji_autocomplete_inserts` |
+| @提及跳转按钮 | ✅ | `unread_mentions>0` → 右下浮动 @ 圆钮 → `mention_jump`：跳转 `mentions_me` 消息并清未读提及 | `chat_row_mention_badge` `mention_jump_targets_and_clears` |
+| 悬停快捷回复钮 | ✅ | 指针悬停气泡 → 旁侧 ↩ 圆钮 → 一键回复（Telegram Desktop hover affordance） | 实测截图（r35_hover1400/800/600） |
+| 双击快捷回应 | ✅ | 双击气泡 → `quick_react` 切换 ❤️（Desktop 默认快反应） | `quick_react_applies_heart` |
+| 侧边栏搜索命中高亮 | ✅ | `title_styled`/`preview_styled` = 命中子串 AccentContainer span 标记；行级重绘受 DOGFOOD r35-3 保留路径缺陷所限 | `sidebar_search_highlight_splits` |
 | 拖拽文件进窗口发送 | ❌ | 框架双层缺口：waterui `DragData` 仅 Text|Url 无 File；hydrolysis 未桥接 winit DroppedFile/HoveredFile — DOGFOOD r34-1 | — |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
 | 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条并按对端 accent 色着色；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母色圆）；组末气泡底角尾巴为气泡背景层内 Path 楔形 + `.offset` 外推（同 fill 一体、接角方角、不占布局空间）；组间间距大于组内 | `set_messages_groups_runs` |
@@ -139,6 +143,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：91 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：1 项（拖放文件发送，框架缺口 DOGFOOD r34-1）
+- 已实现 ✅：95 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：1 项（拖放文件发送，框架缺口 DOGFOOD r34-1）
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
-- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。
+- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。r35 补录：消息内搜索 n/N+^/v+命中高亮、@提及跳转钮、悬停↩快捷回复、双击❤️快反应、侧边栏搜索命中高亮。
