@@ -210,6 +210,7 @@ mod tests {
             kind_icon: "".into(),
             marked_unread: false,
             in_archive: false,
+            folder_id: 0,
             accent: -1,
             title_styled: waterui::text::styled::StyledStr::empty(),
             preview_styled: waterui::text::styled::StyledStr::empty(),
@@ -740,7 +741,12 @@ mod tests {
                 "Pin message" => assert_eq!(store.pinned_id.get(), 1),
                 "Forward" => assert!(store.forward_message.snapshot().is_some()),
                 "Select" => assert_eq!(store.selected_msgs.snapshot(), vec![1]),
-                "Delete" => assert!(store.messages.snapshot().is_empty()),
+                // r38: Delete now arms the confirm card first (Desktop's
+                // "Delete N messages?" dialog), it does not drop the row.
+                "Delete" => {
+                    assert_eq!(store.confirm_delete.snapshot().unwrap().ids, vec![1]);
+                    store.dismiss_delete();
+                }
                 _ => {}
             }
         }
@@ -1469,8 +1475,8 @@ mod tests {
     fn folder_tabs_render(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.folders.set(vec![
-            crate::state::FolderRow { id: 5, title: "Work".into(), active: false },
-            crate::state::FolderRow { id: 9, title: "Chats".into(), active: false },
+            crate::state::FolderRow { id: 5, title: "Work".into(), active: false, unread: 0 },
+            crate::state::FolderRow { id: 9, title: "Chats".into(), active: false, unread: 0 },
         ]);
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
         app.query().label("Work").assert_exists();
@@ -1515,6 +1521,7 @@ mod tests {
             id: 2,
             title: "Work".into(),
             active: false,
+            unread: 0,
         }]);
         store.folder_open.set(true);
         let mut app =
@@ -1820,6 +1827,7 @@ mod tests {
                     muted: false,
                     marked_unread: false,
                     in_archive: false,
+                    folder_id: 0,
                     photo_file: 0,
                     time: "14:32".into(),
                     typing: false,
@@ -1902,6 +1910,7 @@ mod tests {
                     muted: false,
                     marked_unread: false,
                     in_archive: false,
+                    folder_id: 0,
                     photo_file: 0,
                     time: "14:32".into(),
                     typing: false,
@@ -3396,7 +3405,9 @@ mod tests {
         // End jumps to the last row; its selection write opens that chat.
         app.press_named_key("End");
         app.settle();
-        assert_eq!(store.open_chat.get(), 10, "End did not open the last chat");
+        // Chat 10 (TDLib) is archived in the demo roster — the All list's
+        // last row is 9 ("nokhwa nokhwa").
+        assert_eq!(store.open_chat.get(), 9, "End did not open the last chat");
         // Enter on a focused row activates its press target.
         let rows = app.query().role(Role::LIST_ITEM).all();
         rows[5].focus(&mut app);
@@ -4106,6 +4117,116 @@ mod tests {
             !hov.snapshot(),
             "on_hover_exit never ran when the pointer left the row"
         );
+    }
+
+    /// r38 pick: the sidebar search fills the "Messages" section — the demo
+    /// path scans the seeded corpus; the real path calls `searchMessages`.
+    #[test]
+    fn global_message_search_demo() {
+        let store = store();
+        store.seed_demo();
+        store.run_search(Str::from("hydrolysis"));
+        let hits = store.msg_results.snapshot();
+        assert_eq!(hits.len(), 1, "expected one corpus hit");
+        assert_eq!(hits[0].chat_id, 5);
+        assert_eq!(hits[0].title.as_str(), "Rust China");
+        // Tapping a hit opens the chat and flash-highlights the message
+        // (the seeded id 16 lives in the demo window).
+        store.open_hit(&hits[0]);
+        assert_eq!(store.selected.snapshot(), Some(5));
+        assert_eq!(store.highlight_msg.snapshot(), 16);
+        // Sender matches too ("Wei").
+        store.run_search(Str::from("wei"));
+        assert_eq!(store.msg_results.snapshot().len(), 1);
+        store.run_search(Str::from(""));
+        assert!(store.msg_results.snapshot().is_empty());
+        assert!(store.server_results.snapshot().is_empty());
+    }
+
+    /// r38 pick: the delete-confirm card carries the message ids, offers
+    /// "Also delete for <peer>" only on private chats, and Cancel clears.
+    #[test]
+    fn delete_confirm_card_flow() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(2); // Alice — private chat
+        store.ask_delete_message(14);
+        let ask = store.confirm_delete.snapshot().expect("card not armed");
+        assert_eq!(ask.ids, vec![14]);
+        assert_eq!(ask.peer.as_str(), "Alice", "private chat offers revoke");
+        assert!(!store.delete_revoke.snapshot(), "revoke defaults off");
+        store.delete_revoke.set(true);
+        store.dismiss_delete();
+        assert!(store.confirm_delete.snapshot().is_none());
+        // A group chat asks without the peer checkbox.
+        store.select_chat(1);
+        store.ask_delete_message(10);
+        let ask = store.confirm_delete.snapshot().expect("card not armed");
+        assert!(ask.peer.is_empty());
+        store.confirm_delete_now();
+        assert!(store.confirm_delete.snapshot().is_none());
+        // Demo drops the rows the way `updateDeleteMessages` would.
+        assert!(!store.messages.snapshot().iter().any(|r| r.id == 10));
+    }
+
+    /// r38 pick: the floating "N unread ↓" chip scrolls to the tail and
+    /// clears the open chat's badges (then the folder recount follows).
+    #[test]
+    fn catch_up_chip_marks_read() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(5); // Rust China: unread 12, 2 mentions
+        assert_eq!(
+            store.chats.snapshot().iter().find(|r| r.id == 5).unwrap().unread,
+            12
+        );
+        store.catch_up();
+        let row = store.chats.snapshot().into_iter().find(|r| r.id == 5).unwrap();
+        assert_eq!(row.unread, 0);
+        assert_eq!(row.unread_mentions, 0);
+        // "All" badge drops from 3 unread chats (1, 5, 8) to 2.
+        assert_eq!(store.folder_unreads.snapshot().get(&0), Some(&2));
+    }
+
+    /// r38 pick: folder chips carry the per-list unread-chat count (TDLib
+    /// `updateUnreadChatCount` semantics; demo counts the seeded roster).
+    #[test]
+    fn folder_unread_badges() {
+        let store = store();
+        store.seed_demo();
+        let badges = store.folder_unreads.snapshot();
+        assert_eq!(badges.get(&0), Some(&3), "All: chats 1, 5, 8");
+        assert_eq!(badges.get(&2), Some(&1), "Work: WaterUI devs");
+        assert_eq!(badges.get(&3), Some(&1), "Personal: Mom");
+        assert_eq!(badges.get(&-1), Some(&0), "Archive: TDLib has none");
+        // Folder switch filters the list against the roster (incl. the
+        // archived chat leaving "All").
+        store.set_list(3);
+        let ids: Vec<i64> = store.chats.snapshot().iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![2, 6, 8]);
+        store.set_list(-1);
+        assert_eq!(
+            store.chats.snapshot().iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![10]
+        );
+        store.set_list(0);
+        assert_eq!(store.chats.snapshot().len(), 9);
+    }
+
+    /// r38 pick: muting flips the row's muted flag — the row dims its
+    /// title and shows the bell-off glyph (view side), and unmute
+    /// restores it. Demo path; real path writes notification settings.
+    #[test]
+    fn mute_toggles_row_style() {
+        let store = store();
+        store.seed_demo();
+        assert!(!store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().muted);
+        store.toggle_mute(1);
+        assert!(store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().muted);
+        // Seeded-muted chat 4 unmutes the same way.
+        assert!(store.chats.snapshot().iter().find(|r| r.id == 4).unwrap().muted);
+        store.toggle_mute(4);
+        assert!(!store.chats.snapshot().iter().find(|r| r.id == 4).unwrap().muted);
     }
 
 }

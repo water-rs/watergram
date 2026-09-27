@@ -132,6 +132,8 @@ pub struct ChatRow {
     pub marked_unread: bool,
     /// Has a position in the Archive list.
     pub in_archive: bool,
+    /// TDLib `ChatList::Folder` membership (0 = no user folder).
+    pub folder_id: i32,
     pub photo_file: i32,
     /// TDLib `accent_color_id` for the peer (−1 = none) — seeds the
     /// userpic color slot.
@@ -167,6 +169,7 @@ impl PartialEq for ChatRow {
             && self.muted == o.muted
             && self.marked_unread == o.marked_unread
             && self.in_archive == o.in_archive
+            && self.folder_id == o.folder_id
             && self.photo_file == o.photo_file
             && self.accent == o.accent
             && self.time == o.time
@@ -550,6 +553,23 @@ pub struct Store {
     pub connection: Binding<Str>,
     pub chats: Binding<Vec<ChatRow>>,
     pub server_results: Binding<Vec<ChatRow>>,
+    /// Sidebar search "Messages" section (`searchMessages` results, or the
+    /// demo corpus on a clientless store).
+    pub msg_results: Binding<Vec<MsgHit>>,
+    /// Destructive-delete confirmation card: the ids pending deletion and
+    /// the revoke checkbox's current value.
+    pub confirm_delete: Binding<Option<DeleteAsk>>,
+    pub delete_revoke: Binding<bool>,
+    /// Unread-chat count per sidebar list (TDLib `updateUnreadChatCount`):
+    /// key 0 = Main (All), -1 = Archive, n = folder id.
+    pub folder_unreads: Binding<HashMap<i32, i32>>,
+    /// Demo store: full chat roster `set_list` filters (chat_rows live in
+    /// `chats`; `chat_objs` stays empty without TDLib).
+    pub demo_roster: Rc<RefCell<Vec<ChatRow>>>,
+    /// Demo global-search corpus: (chat_id, message_id, sender, text).
+    /// Message ids are real `demo_conversation` ids so a hit's jump lands
+    /// the highlight on the seeded row.
+    pub demo_corpus: Rc<RefCell<Vec<DemoCorpusEntry>>>,
     pub search: Binding<Str>,
     pub selected: Binding<Option<i64>>,
     /// Selection the `List` owns (waterui#1233): pointer taps and arrow-key
@@ -787,7 +807,40 @@ pub struct FolderRow {
     pub title: Str,
     /// Currently selected tab (drives accent styling).
     pub active: bool,
+    /// Unread chats in this list (TDLib `updateUnreadChatCount`), shown
+    /// as a badge on the chip like Telegram Desktop's folder bar.
+    pub unread: i32,
 }
+
+/// One hit in the sidebar's global "Messages" search section
+/// (`searchMessages`); tapping opens the chat and jumps to the message.
+#[derive(Clone, Identifiable)]
+pub struct MsgHit {
+    /// Unique key: chat_id shifted, message ids repeat across chats.
+    #[id]
+    pub key: i64,
+    pub chat_id: i64,
+    pub message_id: i64,
+    /// Chat title the hit belongs to.
+    pub title: Str,
+    /// Sender display name (empty for channel posts / outgoing).
+    pub sender: Str,
+    pub snippet: Str,
+    pub time: Str,
+}
+
+/// A destructive message delete awaiting user confirmation — the card
+/// shows the count and, for private chats, the "Also delete for <peer>"
+/// checkbox that maps to `deleteMessages`' `revoke` flag.
+#[derive(Clone, PartialEq)]
+pub struct DeleteAsk {
+    pub ids: Vec<i64>,
+    /// Peer display name; empty = no revoke option offered.
+    pub peer: Str,
+}
+
+/// (chat_id, msg_id, sender, text) — the searchable demo message set.
+pub type DemoCorpusEntry = (i64, i64, Str, Str);
 
 /// An installed sticker pack for the picker.
 #[derive(Clone, Identifiable)]
@@ -1260,6 +1313,12 @@ impl Store {
             connection: Binding::container(Str::from("")),
             chats: Binding::<Vec<ChatRow>>::default(),
             server_results: Binding::<Vec<ChatRow>>::default(),
+            msg_results: Binding::<Vec<MsgHit>>::default(),
+            confirm_delete: Binding::<Option<DeleteAsk>>::default(),
+            delete_revoke: Binding::bool(false),
+            folder_unreads: Binding::<HashMap<i32, i32>>::default(),
+            demo_roster: Rc::new(RefCell::new(Vec::new())),
+            demo_corpus: Rc::new(RefCell::new(Vec::new())),
             search: Binding::container(Str::from("")),
             selected: Binding::default(),
             list_selection: Binding::default(),
@@ -1451,6 +1510,7 @@ impl Store {
                 muted,
                 marked_unread: false,
                 in_archive: false,
+                folder_id: 0,
                 photo_file: 0,
                 accent: -1,
                 time: Str::from("14:32"),
@@ -1463,7 +1523,7 @@ impl Store {
         };
         // kind_icon mirrors the real path's values (state.rs `kind_icon`
         // mapping): saved/person/group/channel — never an emoji.
-        self.chats.set(vec![
+        let mut roster = vec![
             mk(1, "WaterUI devs", "Lexo: preview lands on GpuSurface now", 100, 3, true, false, false, false, "group"),
             mk(2, "Alice", "typing…", 90, 0, false, false, true, true, "person"),
             mk(3, "Saved Messages", "git bundle sha256 a6d3c8…", 80, 0, false, false, false, false, "saved"),
@@ -1474,7 +1534,28 @@ impl Store {
             mk(8, "Mom", "call me when free", 30, 1, false, false, false, false, "person"),
             mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "channel"),
             mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, "person"),
-        ]);
+        ];
+        // Folder membership (Work = 2 groups/channels, Personal = 3
+        // contacts) and one archived row so every chip has content.
+        for r in &mut roster {
+            match r.id {
+                1 | 9 => r.folder_id = 2,
+                2 | 6 | 8 => r.folder_id = 3,
+                10 => r.in_archive = true,
+                _ => {}
+            }
+        }
+        *self.demo_roster.borrow_mut() = roster.clone();
+        // Chip badges come from the same recount the real path gets from
+        // `updateUnreadChatCount` (All = 3, Work = 1, Personal = 1).
+        self.demo_recount_folders();
+        self.chats.set(
+            roster
+                .iter()
+                .filter(|r| !r.in_archive)
+                .cloned()
+                .collect(),
+        );
         // Demo draft on a visible row (Telegram Desktop shows "Draft: …").
         self.set_draft(3, Some("release notes proofread".into()));
         self.update_chat_row(5, |r| r.unread_mentions = 2);
@@ -1484,8 +1565,8 @@ impl Store {
         // Mirrors TDLib `chatFolders`: only user-created folders — the
         // built-in All/Archive lists are synthesized by the sidebar itself.
         self.folders.set(vec![
-            FolderRow { id: 2, title: "Work".into(), active: false },
-            FolderRow { id: 3, title: "Personal".into(), active: false },
+            FolderRow { id: 2, title: "Work".into(), active: false, unread: 0 },
+            FolderRow { id: 3, title: "Personal".into(), active: false, unread: 0 },
         ]);
         self.set_messages(Self::demo_conversation());
         // Seed the photo message's local file so its thumbnail renders —
@@ -1498,6 +1579,21 @@ impl Store {
             self.files_version.add_assign(1);
         }
         self.demo_seed_pinned(1);
+        // Global-search demo corpus (chat_id, message_id, sender, text).
+        // Ids are `demo_conversation` ids so `jump_to_message` highlights
+        // the seeded row after the chat opens.
+        *self.demo_corpus.borrow_mut() = vec![
+            (1, 10, "Alice".into(), "morning! did the camera filters example work?".into()),
+            (1, 11, "Lexo".into(), "device.clone() into Arc, preview straight on the GpuSurface".into()),
+            (1, 12, "Alice".into(), "nice. and the NV12 conversion?".into()),
+            (2, 14, "Alice".into(), "shipping it 🚀 — GPU filters all pass".into()),
+            (4, 21, "".into(), "Telegram Desktop adds GPU-accelerated previews".into()),
+            (5, 12, "Fan".into(), "nice. and the NV12 conversion?".into()),
+            (5, 16, "Wei".into(), "hydrolysis on wayland works now".into()),
+            (6, 19, "Bob".into(), "see you at the rust meetup".into()),
+            (8, 10, "Mom".into(), "call me when free".into()),
+            (10, 11, "TDLib".into(), "updateAuthorizationState received".into()),
+        ];
         self.sessions.set(vec![
             SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
             SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
@@ -2431,6 +2527,14 @@ impl Store {
             .as_ref()
             .map(|m| fmt_time(m.date))
             .unwrap_or_default();
+        let folder_id = chat
+            .positions
+            .iter()
+            .find_map(|p| match &p.list {
+                enums::ChatList::Folder(f) => Some(f.chat_folder_id),
+                _ => None,
+            })
+            .unwrap_or(0);
         let row = ChatRow {
             id: chat.id,
             title: chat.title.clone().into(),
@@ -2448,6 +2552,7 @@ impl Store {
             muted,
             marked_unread: chat.is_marked_as_unread,
             in_archive: position_in(&chat, &enums::ChatList::Archive).is_some(),
+            folder_id,
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
             accent: chat.accent_color_id,
             time,
@@ -2474,12 +2579,38 @@ impl Store {
     }
 
     fn update_chat_row(&self, chat_id: i64, f: impl Fn(&mut ChatRow)) {
+        // Keep the demo roster authoritative too so `set_list` rebuilds
+        // keep the same field values.
+        if let Some(r) = self
+            .demo_roster
+            .borrow_mut()
+            .iter_mut()
+            .find(|r| r.id == chat_id)
+        {
+            f(r);
+        }
         let mut list = self.chats.snapshot();
         if let Some(r) = list.iter_mut().find(|r| r.id == chat_id) {
             f(r);
             list.sort();
             self.chats.set(list);
         }
+    }
+
+    /// Recount the demo folder chips from the roster — the real path gets
+    /// the same numbers from `updateUnreadChatCount`.
+    fn demo_recount_folders(&self) {
+        if self.client_id.get() != 0 {
+            return;
+        }
+        let roster = self.demo_roster.borrow();
+        let mut map = HashMap::new();
+        for r in roster.iter() {
+            let key = if r.in_archive { -1 } else { r.folder_id };
+            *map.entry(key).or_insert(0) += i32::from(r.unread > 0 || r.marked_unread);
+        }
+        map.insert(0, roster.iter().filter(|r| !r.in_archive && (r.unread > 0 || r.marked_unread)).count() as i32);
+        self.folder_unreads.set(map);
     }
 
     fn update_message_row(&self, message_id: i64, f: impl Fn(&mut MessageRow)) {
@@ -2555,6 +2686,7 @@ impl Store {
                             id: f.id,
                             title: f.name.text.text.clone().into(),
                             active: false,
+                            unread: 0,
                         })
                         .collect(),
                 );
@@ -2607,6 +2739,16 @@ impl Store {
                 if u.chat_id == self.open_chat.get() {
                     self.apply_unread_divider(u.chat_id);
                 }
+            }
+            enums::Update::UnreadChatCount(u) => {
+                let key = match &u.chat_list {
+                    enums::ChatList::Main => 0,
+                    enums::ChatList::Archive => -1,
+                    enums::ChatList::Folder(f) => f.chat_folder_id,
+                };
+                let mut map = self.folder_unreads.snapshot();
+                map.insert(key, u.unread_count);
+                self.folder_unreads.set(map);
             }
             enums::Update::ChatReadOutbox(u) => {
                 if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
@@ -3187,7 +3329,8 @@ impl Store {
             // snap-back write is deferred one task turn: this select_chat ran
             // inside `list_selection`'s on_change dispatch, and writing the
             // same signal re-entrantly panics on the handler RefCell
-            // (on_change.rs:84).
+            // (on_change.rs:84) — water-rs/waterui#1297, DOGFOOD r37-1; revert
+            // to a plain `set` once the fix lands.
             self.syncing_selection.set(true);
             let sel = self.selected.snapshot();
             let st = self.clone();
@@ -3952,6 +4095,13 @@ impl Store {
 
     /// Mark a chat unread/read manually.
     pub fn toggle_mark_unread(&self, chat_id: i64) {
+        if self.client_id.get() == 0 {
+            // Demo: flip the flag locally the way
+            // `updateChatIsMarkedAsUnread` would, then recount badges.
+            self.update_chat_row(chat_id, |r| r.marked_unread = !r.marked_unread);
+            self.demo_recount_folders();
+            return;
+        }
         let current = self
             .chat_objs
             .borrow()
@@ -4132,6 +4282,11 @@ impl Store {
             self.set_messages(list);
             self.highlight_msg.set(message_id);
             self.scroll.scroll_to(pos);
+            return;
+        }
+        if self.client_id.get() == 0 {
+            // Demo: the id isn't in the seeded window — a real client would
+            // fetch a window around it; there is nothing to fetch.
             return;
         }
         let store = self.clone();
@@ -4550,19 +4705,10 @@ impl Store {
         self.selected_msgs.set(Vec::new());
     }
 
-    /// Batch-delete the selected messages (revoke for everyone).
+    /// Batch-delete the selected messages — through the same confirmation
+    /// card as single deletes (Desktop asks before every delete).
     pub fn delete_selected(&self) {
-        let chat_id = self.open_chat.get();
-        let ids = self.selected_msgs.snapshot();
-        self.selected_msgs.set(Vec::new());
-        if chat_id == 0 || ids.is_empty() {
-            return;
-        }
-        let client = self.client_id.get();
-        spawn_local(async move {
-            let _ = functions::delete_messages(chat_id, ids, true, client).await;
-        })
-        .detach();
+        self.ask_delete_selected();
     }
 
     /// Stage the selected batch for forwarding; the next chat tap delivers
@@ -5433,22 +5579,73 @@ impl Store {
         .detach();
     }
 
-    pub fn delete_message(&self, message_id: i64) {
+    /// Telegram Desktop never deletes silently: every delete goes through
+    /// a confirmation card that, in private chats, offers "Also delete for
+    /// <peer>" (the `deleteMessages` `revoke` flag). The card carries the
+    /// pending ids; `confirm_delete_now` runs the delete.
+    pub fn ask_delete(&self, ids: Vec<i64>) {
+        if ids.is_empty() {
+            return;
+        }
+        // The peer checkbox only makes sense in a private chat; groups and
+        // channels revoke own messages without asking.
+        let peer = self
+            .chats
+            .snapshot()
+            .iter()
+            .find(|r| r.id == self.open_chat.get())
+            .filter(|r| r.kind_icon.as_str() == "person")
+            .map(|r| r.title.clone())
+            .unwrap_or_default();
+        self.delete_revoke.set(false);
+        self.confirm_delete.set(Some(DeleteAsk { ids, peer }));
+    }
+
+    pub fn ask_delete_message(&self, message_id: i64) {
+        self.ask_delete(vec![message_id]);
+    }
+
+    /// Ask first (the batch bar's trash icon). The selection survives the
+    /// card so the card can report "Delete N messages?" — cleared on
+    /// confirm/cancel.
+    pub fn ask_delete_selected(&self) {
+        self.ask_delete(self.selected_msgs.snapshot());
+    }
+
+    pub fn dismiss_delete(&self) {
+        self.confirm_delete.set(None);
+        self.selected_msgs.set(Vec::new());
+    }
+
+    /// Run the pending delete with the checkbox's `revoke` value.
+    pub fn confirm_delete_now(&self) {
+        let Some(ask) = self.confirm_delete.snapshot() else {
+            return;
+        };
+        let revoke = self.delete_revoke.snapshot();
+        self.confirm_delete.set(None);
+        self.selected_msgs.set(Vec::new());
         let chat_id = self.open_chat.get();
-        let client = self.client_id.get();
-        if client == 0 {
-            // Demo: no TDLib client, so drop the row the way a real
-            // updateDeleteMessages would.
+        if self.client_id.get() == 0 {
+            // Demo: drop the rows the way a real updateDeleteMessages would.
             let mut msgs = self.messages.snapshot();
-            msgs.retain(|r| r.id != message_id);
+            msgs.retain(|r| !ask.ids.contains(&r.id));
             self.messages.set(msgs);
             return;
         }
+        let client = self.client_id.get();
         spawn_local(async move {
             let _ =
-                functions::delete_messages(chat_id, vec![message_id], true, client).await;
+                functions::delete_messages(chat_id, ask.ids, revoke, client).await;
         })
         .detach();
+    }
+
+    /// Direct delete kept for tests and non-interactive paths: goes through
+    /// the same revoke plumbing with Desktop's default (revoke for
+    /// everyone in private chats is user-chosen via `ask_delete`).
+    pub fn delete_message(&self, message_id: i64) {
+        self.ask_delete_message(message_id);
     }
 
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
@@ -5562,6 +5759,12 @@ impl Store {
     }
 
     pub fn toggle_mute(&self, chat_id: i64) {
+        if self.client_id.get() == 0 {
+            // Demo: no notification settings to round-trip — flip the
+            // badge style the way `updateChatNotificationSettings` would.
+            self.update_chat_row(chat_id, |r| r.muted = !r.muted);
+            return;
+        }
         let Some(settings) = self
             .chat_objs
             .borrow()
@@ -5582,6 +5785,17 @@ impl Store {
     }
 
     pub fn mark_read(&self, chat_id: i64) {
+        if self.client_id.get() == 0 {
+            // Demo: no `viewMessages` — clear the badges the way the
+            // server-side update would.
+            self.update_chat_row(chat_id, |r| {
+                r.unread = 0;
+                r.unread_mentions = 0;
+                r.marked_unread = false;
+            });
+            self.demo_recount_folders();
+            return;
+        }
         let Some(last) = self
             .chat_objs
             .borrow()
@@ -5595,6 +5809,26 @@ impl Store {
             let _ = functions::view_messages(chat_id, vec![last], None, true, client).await;
         })
         .detach();
+    }
+
+    /// Floating "N unread ↓" catch-up chip: scroll the open chat to its
+    /// newest message and mark everything read (Telegram Desktop's
+    /// bottom-right button while the chat carries unread).
+    pub fn catch_up(&self) {
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        self.scroll_bottom();
+        // Clear the chip locally so it hides on tap rather than on the
+        // server round-trip (the `updateChatReadInbox` that follows agrees).
+        self.update_chat_row(chat_id, |r| {
+            r.unread = 0;
+            r.unread_mentions = 0;
+            r.marked_unread = false;
+        });
+        self.demo_recount_folders();
+        self.mark_read(chat_id);
     }
 
     pub fn leave(&self, chat_id: i64) {
@@ -5632,6 +5866,22 @@ impl Store {
         }
         self.active_folder.set(list_id);
         self.archive_mode.set(list_id == -1);
+        if self.client_id.get() == 0 {
+            // Demo: `chat_objs` is empty — filter the seeded roster by
+            // `folder_id`/`in_archive` like TDLib's per-list positions do.
+            let roster = self.demo_roster.borrow().clone();
+            self.chats.set(
+                roster
+                    .into_iter()
+                    .filter(|r| match list_id {
+                        -1 => r.in_archive,
+                        0 => !r.in_archive,
+                        n => r.folder_id == n,
+                    })
+                    .collect(),
+            );
+            return;
+        }
         self.chats.set(Vec::new());
         let chats: Vec<types::Chat> = self.chat_objs.borrow().values().cloned().collect();
         for c in chats {
@@ -7204,10 +7454,48 @@ impl Store {
     pub fn run_search(&self, query: Str) {
         if query.is_empty() {
             self.server_results.set(Vec::new());
+            self.msg_results.set(Vec::new());
             return;
         }
         let client = self.client_id.get();
+        if client == 0 {
+            // Demo/tests: scan the seeded corpus; the real path fires
+            // `searchMessages` for the same "Messages" section.
+            self.server_results.set(Vec::new());
+            let q = query.to_lowercase();
+            let rows = self.chats.snapshot();
+            let roster = self.demo_roster.borrow().clone();
+            let title_of = |id: i64| {
+                rows.iter()
+                    .chain(roster.iter())
+                    .find(|r| r.id == id)
+                    .map(|r| r.title.clone())
+                    .unwrap_or_default()
+            };
+            self.msg_results.set(
+                self.demo_corpus
+                    .borrow()
+                    .iter()
+                    .filter(|(_, _, sender, text)| {
+                        text.to_lowercase().contains(&q)
+                            || sender.to_lowercase().contains(&q)
+                    })
+                    .map(|(chat_id, msg_id, sender, text)| MsgHit {
+                        key: chat_id * 1_000_000 + msg_id,
+                        chat_id: *chat_id,
+                        message_id: *msg_id,
+                        title: title_of(*chat_id),
+                        sender: sender.clone(),
+                        snippet: text.clone(),
+                        time: "".into(),
+                    })
+                    .collect(),
+            );
+            return;
+        }
         let store = self.clone();
+        let q_msgs = query.to_string();
+        let store_msgs = self.clone();
         spawn_local(async move {
             if let Ok(enums::Chats::Chats(c)) =
                 functions::search_chats_on_server(query.to_string(), 20, client).await
@@ -7226,6 +7514,69 @@ impl Store {
             }
         })
         .detach();
+        // "Messages" section — TDLib `searchMessages` over the Main list
+        // (the in-chat path uses `searchChatMessages` instead).
+        spawn_local(async move {
+            if let Ok(enums::FoundMessages::FoundMessages(found)) = functions::search_messages(
+                Some(enums::ChatList::Main),
+                q_msgs,
+                String::new(),
+                20,
+                Some(enums::SearchMessagesFilter::Empty),
+                None,
+                0,
+                0,
+                client,
+            )
+            .await
+            {
+                let mut hits = Vec::new();
+                for m in &found.messages {
+                    let title = {
+                        let cached = store_msgs
+                            .chat_objs
+                            .borrow()
+                            .get(&m.chat_id)
+                            .map(|c| c.title.clone());
+                        match cached {
+                            Some(t) => t,
+                            None => match functions::get_chat(m.chat_id, client).await {
+                                Ok(enums::Chat::Chat(c)) => {
+                                    store_msgs
+                                        .chat_objs
+                                        .borrow_mut()
+                                        .insert(m.chat_id, c.clone());
+                                    c.title
+                                }
+                                _ => String::new(),
+                            },
+                        }
+                    };
+                    let snippet = store_msgs.preview_text(m);
+                    let sender = store_msgs.sender_name(&m.sender_id);
+                    hits.push(MsgHit {
+                        key: m.chat_id.saturating_mul(1_000_000).saturating_add(m.id % 1_000_000),
+                        chat_id: m.chat_id,
+                        message_id: m.id,
+                        title: title.into(),
+                        sender,
+                        snippet,
+                        time: fmt_time(m.date),
+                    });
+                }
+                store_msgs.msg_results.set(hits);
+            }
+        })
+        .detach();
+    }
+
+    /// Sidebar "Messages" hit: open the chat and land on the message with
+    /// the same flash-highlight `jump_to_message` uses for quote taps.
+    pub fn open_hit(&self, hit: &MsgHit) {
+        let chat_id = hit.chat_id;
+        let message_id = hit.message_id;
+        self.select_chat(chat_id);
+        self.jump_to_message(message_id);
     }
 
     fn upsert_result_row(&self, chat: types::Chat) {
@@ -7248,6 +7599,14 @@ impl Store {
             muted: false,
             marked_unread: false,
             in_archive: position_in(&chat, &enums::ChatList::Archive).is_some(),
+            folder_id: chat
+                .positions
+                .iter()
+                .find_map(|p| match &p.list {
+                    enums::ChatList::Folder(f) => Some(f.chat_folder_id),
+                    _ => None,
+                })
+                .unwrap_or(0),
             photo_file: chat.photo.as_ref().map(|p| p.small.id).unwrap_or(0),
             accent: chat.accent_color_id,
             time: "".into(),

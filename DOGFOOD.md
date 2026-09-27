@@ -2941,6 +2941,10 @@ tripwire. #251 can be closed.
 
 ### r37-1: writing a signal inside its own `on_change` watcher panics — `RefCell already borrowed` — with no documented deferral path
 
+**Filed as water-rs/waterui#1297; the `spawn_local` deferral in
+`state.rs::select_chat` is tied to it and reverts to a plain `set` once
+the fix lands.**
+
 Observed live on hydrolysis `6edbe148` / waterui `9971190d`: tapping a
 chat row while `forward_ids` was non-empty ran `select_chat` inside
 `list_selection`'s `on_change` dispatch; the forward branch then wrote
@@ -2979,3 +2983,31 @@ headlessly. Two app sites that lacked a `has`-gate — the playable-media
 thumbnail (`views.rs` bubble `otherwise`) and the album grid cells — are
 now gated on the resolved path like every other site; latent crash fixed
 in the app.
+
+### r38-1: a context-menu item over a straddling photo row loses the click to the photo's gesture region — media viewer opens instead of the command
+
+Observed on hydrolysis `ad9165d` / waterui `927f5d3` at 600pt width
+(captures: `shots/r38_ctx600b.png` showing the menu, `shots/r38_del600.png`
+showing the photo viewer that opened instead). A message bubble's
+`.context_menu` popup renders its items over the chat list; the `Delete`
+item at that anchor happens to overlay the photo-album row below, which
+straddles the scroll viewport's bottom edge. Clicking the item delivered
+the press to the photo's `.on_tap` region — the media viewer opened
+("first of the set") — and the menu closed without dispatching.
+
+Reproducible twice at the same anchor; moving the anchor so the item
+overlaps only text/empty region makes the same item dispatch correctly.
+The click coordinate (75,610) is left of the photo's painted bounds
+(~x125+), so the winning gesture region belongs to a row whose hit area
+extends past where it paints — the unclipped-bounds defect already filed
+as hydrolysis#252 ("rows straddling a scroll viewport keep unclipped hit
+bounds"), here additionally beating an overlay layer that should occlude
+content. If the fix for #252 clips the row region to the viewport, this
+symptom clears with it; flagging in case the overlay-vs-content ordering
+needs a separate look.
+
+Minimal repro: a `scroll` over a `List` whose last row carries `.on_tap`,
+with a `.context_menu` on an earlier row — right-click so the popup's
+items land over the straddling row's unpainted extent, then click the
+item. Expected: the item dispatches; observed: the straddling row's
+gesture fires.

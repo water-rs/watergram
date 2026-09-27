@@ -49,7 +49,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{highlight_styled, AccountRow, ChatRow, DayRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, MsgHit, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -60,6 +60,7 @@ use mdi::check;
 use mdi::microphone;
 use mdi::file_gif_box;
 use mdi::at;
+use mdi::bell_off;
 use mdi::calendar;
 use mdi::chevron_down;
 use mdi::chevron_up;
@@ -320,6 +321,9 @@ pub(crate) fn sidebar_stack(store: Store) -> impl View {
 }
 
 #[allow(if_else_view)] // tab styling picks between two text looks, not reactive content
+// MsgHit/ChatRow fields are immutable row data — hits are re-listed on
+// each new search, not mutated in place.
+#[expect(collection_item_snapshot, reason = "MsgHit/ChatRow fields are immutable row data; a hit updates by list replacement, not in-place mutation")]
 pub(crate) fn sidebar_view(store: Store) -> impl View {
     let conn = store.connection.clone();
     // Single-message forward (context menu) sets `forward_message`; the
@@ -376,28 +380,39 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             }),
     );
     let server_results = SignalCollection::new(store.server_results.clone());
-    let show_results = store.server_results.map(|v| !v.is_empty()).distinct();
+    let show_results = store
+        .server_results
+        .zip(&store.msg_results)
+        .map(|(a, b)| !a.is_empty() || !b.is_empty())
+        .distinct();
     let search_now = store.search.debounce(Duration::from_millis(400));
     let rows_store = store.clone();
     let res_store = store.clone();
+    // Folder chips carry each list's unread-chat count (TDLib
+    // `updateUnreadChatCount`) like Desktop's folder bar.
     let folder_tabs = store
         .folders
         .zip(&store.active_folder)
-        .map(|(fs, active)| {
+        .zip(&store.folder_unreads)
+        .map(|((fs, active), unreads)| {
+            let badge = |id: i32| unreads.get(&id).copied().unwrap_or(0);
             let mut tabs: Vec<FolderRow> = vec![FolderRow {
                 id: 0,
                 title: "All".into(),
                 active: active == 0,
+                unread: badge(0),
             }];
             tabs.extend(fs.iter().map(|f| FolderRow {
                 id: f.id,
                 title: f.title.clone(),
                 active: f.id == active,
+                unread: badge(f.id),
             }));
             tabs.push(FolderRow {
                 id: -1,
                 title: "Archive".into(),
                 active: active == -1,
+                unread: badge(-1),
             });
             tabs
         });
@@ -497,14 +512,27 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                             let label = tab.title.clone();
                             let a11y = label.clone();
                             let id = tab.id;
-                            let chip = if tab.active {
-                                text(label)
-                                    .caption()
-                                    .bold()
-                                    .foreground(Accent)
-                                    .anyview()
+                            // Desktop's folder chips append the list's
+                            // unread-chat count after the title.
+                            let fg = if tab.active {
+                                Color::from(Accent)
                             } else {
-                                text(label).caption().muted().anyview()
+                                Color::from(MutedForeground)
+                            };
+                            let chip = if tab.unread > 0 {
+                                hstack((
+                                    text(label).caption().foreground(fg.clone()),
+                                    text(tab.unread.to_string())
+                                        .caption()
+                                        .bold()
+                                        .foreground(fg.clone()),
+                                ))
+                                .spacing(4.0)
+                                .anyview()
+                            } else if tab.active {
+                                text(label).caption().bold().foreground(fg).anyview()
+                            } else {
+                                text(label).caption().foreground(fg).anyview()
                             };
                             let chip = chip
                                 .padding_with((chip_pad_v, 10.0_f32))
@@ -581,6 +609,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             when(show_results, move || {
                 let local_store = rows_store.clone();
                 let remote_store = res_store.clone();
+                let msg_hits = SignalCollection::new(store.msg_results.clone());
                 vstack((
                     List::for_each(filtered.clone(), move |row: ChatRow| {
                         let id = row.id;
@@ -599,6 +628,39 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         ListItem::new(
                             chat_row(remote_store.clone(), row)
                                 .on_tap(move |store: Store| store.select_chat(id)),
+                        )
+                    }),
+                    Divider,
+                    text("Messages").caption().muted().padding_with((4.0, 12.0)),
+                    List::for_each(msg_hits, move |hit: MsgHit| {
+                        let hit2 = hit.clone();
+                        ListItem::new(
+                            hstack((
+                                vstack((
+                                    hstack((
+                                        text(hit.title.clone()).body().line_limit(ONE),
+                                        spacer(),
+                                        text(hit.time.clone()).caption().muted(),
+                                    ))
+                                    .spacing(4.0),
+                                    text(if hit.sender.is_empty() {
+                                        hit.snippet.clone()
+                                    } else {
+                                        format!("{}: {}", hit.sender, hit.snippet).into()
+                                    })
+                                    .caption()
+                                    .line_limit(ONE)
+                                    .muted(),
+                                ))
+                                .spacing(2.0)
+                                .leading(),
+                            ))
+                            .padding_with((4.0, 10.0))
+                            .on_tap(move |store: Store| store.open_hit(&hit2))
+                            .a11y_label(format!(
+                                "Message in {}: {}",
+                                hit.title, hit.snippet
+                            )),
                         )
                     }),
                 ))
@@ -792,16 +854,35 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
             vstack((
                 hstack((
                     kind_icon(&row.kind_icon),
+                    // Muted chats dim the title and carry a bell-off glyph
+                    // after it — Telegram Desktop's muted-row style.
                     if row.title_styled.is_empty() {
                         text(row.title.clone())
                             .body()
                             .line_limit(ONE)
-                            .foreground(Foreground)
+                            .foreground(if row.muted {
+                                Color::from(MutedForeground)
+                            } else {
+                                Color::from(Foreground)
+                            })
                     } else {
                         text(row.title_styled.clone())
                             .body()
                             .line_limit(ONE)
-                            .foreground(Foreground)
+                            .foreground(if row.muted {
+                                Color::from(MutedForeground)
+                            } else {
+                                Color::from(Foreground)
+                            })
+                    },
+                    if row.muted {
+                        bell_off()
+                            .tint(MutedForeground)
+                            .size(13.0, 13.0)
+                            .a11y_hidden(true)
+                            .anyview()
+                    } else {
+                        spacer().width(0.0).anyview()
                     },
                     spacer(),
                     when(row.online, || text("●").caption().foreground(Accent)),
@@ -1617,6 +1698,17 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         })
         .distinct();
     let has_mentions = open_mentions.is_positive().distinct();
+    // Open chat's unread count drives the floating catch-up chip.
+    let open_unread = store
+        .chats
+        .zip(&store.selected)
+        .map(|(rows, open)| {
+            open.and_then(|id| rows.iter().find(|r| r.id == id).map(|r| r.unread))
+                .unwrap_or(0)
+        })
+        .distinct();
+    let del_open = store.confirm_delete.is_some().distinct();
+    let store_del = store.clone();
     let store_for_info_overlay = store.clone();
     // Honest reproduction: `when(a).otherwise(b)` (WhenComplete) panics at
     // mount on the shipped renderers — nami#23, DOGFOOD r11-4a. Kept in this
@@ -1664,8 +1756,43 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         .a11y_role(AccessibilityRole::Button),
                 )),
             ))
+            // Stacks above the catch-up chip (Desktop: @ over ↓).
+            .padding_with([0.0, 136.0, 0.0, 16.0])
+        }),
+        // Floating "N unread ↓" catch-up chip — Desktop's bottom-right
+        // button while the open chat carries unread. Without a scroll
+        // readback (waterui#1259) it shows while unread > 0 and clears on
+        // tap; real clients will hide it at the tail once #1259 lands.
+        when(open_unread.is_positive().distinct(), move || {
+            let n = open_unread.clone();
+            vstack((
+                spacer(),
+                hstack((
+                    spacer(),
+                    hstack((
+                        chevron_down()
+                            .tint(AccentForeground)
+                            .size(14.0, 14.0)
+                            .a11y_hidden(true),
+                        text!("{n}")
+                            .caption()
+                            .bold()
+                            .foreground(AccentForeground),
+                    ))
+                    .spacing(2.0)
+                    .padding_with((7.0, 12.0))
+                    .background(RoundedRectangle::new(0.5).fill(Accent))
+                    .a11y_hidden(true)
+                    .on_tap(|store: Store| store.catch_up())
+                    .a11y_label("Mark all read and jump to latest")
+                    .a11y_role(AccessibilityRole::Button),
+                )),
+            ))
             .padding_with([0.0, 84.0, 0.0, 16.0])
         }),
+        // Delete-confirm card (Desktop's "Delete N messages?" dialog with
+        // the "Also delete for <peer>" checkbox in private chats).
+        when(del_open, move || delete_confirm_card(store_del.clone())),
         when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
     ))
     .on_change(&search_live, |q: Str, store: Store| store.run_chat_search(q))
@@ -3508,6 +3635,69 @@ fn poll_block(message_id: i64, poll: &PollRow) -> impl View {
     ))
     .spacing(6.0)
     .leading()
+}
+
+/// Desktop's delete-confirmation card: dimmed scrim + centered card with
+/// the count, an "Also delete for <peer>" revoke checkbox on private
+/// chats, and Cancel / Delete (destructive red).
+fn delete_confirm_card(store: Store) -> impl View {
+    let ask = store.confirm_delete.snapshot().unwrap_or(DeleteAsk {
+        ids: Vec::new(),
+        peer: "".into(),
+    });
+    let n = ask.ids.len();
+    let has_peer = !ask.peer.is_empty();
+    let peer_label = format!("Also delete for {}", ask.peer);
+    let revoke = store.delete_revoke.clone();
+    let esc = modal_escape(store.clone(), |s| s.dismiss_delete());
+    zstack((
+        // Scrim: taps outside the card dismiss it (Desktop parity).
+        Rectangle
+            .fill(WithOpacity::new(Srgb::from_hex("#000000"), 0.45))
+            .on_tap(|store: Store| store.dismiss_delete()),
+        vstack((
+            hstack((
+                text(if n == 1 {
+                    "Delete message?".into()
+                } else {
+                    format!("Delete {} messages?", n)
+                })
+                .body()
+                .bold(),
+                spacer(),
+            )),
+            if has_peer {
+                toggle(peer_label, &revoke).anyview()
+            } else {
+                spacer().height(0.0).anyview()
+            },
+            hstack((
+                spacer(),
+                text("Cancel")
+                    .body()
+                    .foreground(Accent)
+                    .padding_with((6.0, 12.0))
+                    .on_tap(|store: Store| store.dismiss_delete())
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_label("Cancel"),
+                text("Delete")
+                    .body()
+                    .bold()
+                    .foreground(Error)
+                    .padding_with((6.0, 12.0))
+                    .on_tap(|store: Store| store.confirm_delete_now())
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_label("Delete"),
+            ))
+            .spacing(8.0),
+        ))
+        .spacing(14.0)
+        .padding_with(20.0)
+        .background(Surface)
+        .clip(RoundedRectangle::new(0.08))
+        .max_width(300.0),
+    ))
+    .with(esc)
 }
 
 /// In-pane media viewer (Desktop's viewer is fullscreen; ours covers the

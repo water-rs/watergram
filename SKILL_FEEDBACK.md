@@ -274,3 +274,42 @@ positives observed. (Patterns from earlier rounds folded in.)
 - **False positives observed:** none new this round (the four r35
   warnings — `.state` ordering mis-fix, `is_positive()`, two
   unnecessary `anyview()`s — were real findings).
+
+## r38
+
+- **`EdgeInsets` array order** — `EdgeInsets::from([a,b,c,d])` is
+  `[top, bottom, leading, trailing]` (waterui `padding.rs:193`), which
+  is NOT the CSS `TRBL` order many will assume. Cost me a compile-fix
+  cycle while placing two floating buttons at bottom-right; got it
+  right only after reading the source.
+  - **Fix:** `references/layout.md` (or styling) — one line:
+    "`EdgeInsets::from([..])` takes `[top, bottom, leading, trailing]`."
+- **`WithOpacity` is not `Color`-aware** — `WithOpacity::new(color, a)`
+  requires `T: Resolvable<Resolved = ResolvedColor>`
+  (waterui `color/mod.rs:172`); `Color` (the role enum) does not
+  implement it, so a translucent scrim must be written
+  `WithOpacity::new(Srgb::from_hex("#000000"), 0.45)`, not
+  `WithOpacity::new(Color::from(...), ..)`. The error is a trait-bound
+  E0277 that points nowhere useful.
+  - **Fix:** snippets — add a "scrim/overlay" snippet showing
+    `Rectangle.fill(WithOpacity::new(Srgb::from_hex("#000"), 0.45))`
+    and note that role colors can't be opacity-wrapped.
+- **`toggle` lives where?** — skill docs show switch styling but the
+  plain `toggle(label, &Binding<bool>)` signature isn't in any
+  reference I could find; had to grep waterui sources.
+  - **Fix:** forms/controls reference should list
+    `toggle(impl Into<Str>, &Binding<bool>)` explicitly.
+- **Lint candidates (new this round):**
+  - `needless_anyview` fired correctly — `if flag { icon.anyview() }
+    else { spacer().anyview() }` where both arms could be plain —
+    caught; a `.foreground(if .. { Color::from(X) } else {
+    Color::from(Y) })` ternary needs the same hint (both arms same
+    type — skip the Color::from wrapper? no wait, the lint is about
+    anyview). No false positives.
+  - `collection_item_snapshot` on `sidebar_view` flagged MsgHit field
+    reads inside `List::for_each` — legit item-level
+    `#[expect(collection_item_snapshot, reason="MsgHit fields are
+    immutable row data; a hit updates by list replacement, not in-place
+    mutation")]` because MsgHit is rebuilt per hit, not mutated in place.
+    Kept as an `#[expect]` per the false-positive rule; arguably the
+    lint could special-case "fields consumed only at row build time".
