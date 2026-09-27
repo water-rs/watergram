@@ -2629,6 +2629,13 @@ gesture's actionable node and the announced Button is dead for assistive
 activation. Both are framework-side semantics gaps; the leaf-hidden form
 is the only composition that yields one Button node carrying `Activate`.
 
+**r37 update:** hydrolysis#229 (a11y descendant-text on dev head
+`6edbe148`) does NOT cover this leaf-gesture path — removing the four
+`.a11y_hidden` sites still duplicates the Button nodes and leaves empty
+`Role(Image)` siblings (`a11y_audit_chat`/`a11y_audit_overlays` fail).
+The leaf-hidden workaround stays until #221 lands; every site carries a
+`hydrolysis#221` comment.
+
 ## r35 — repin hydrolysis 1076084 / waterui b956632 (verifications + two new defects)
 
 Re-verified on the new pins (Mesa 26.2.3 lavapipe, wolfi container):
@@ -2793,12 +2800,17 @@ Suspect: `async_io::Timer`'s wake → `runnable.schedule()` →
 subscription. Needs a real event loop to bisect — reported as a live
 defect with the chain mapped.
 
-App-side workaround tied to #228: both searches watch the raw
-binding (`search_now` in views.rs, `search_live` in views.rs) instead
-of `.debounce(400ms)`. When #228 lands, restore `.debounce(Duration::
-from_millis(400))` at both call sites and delete this paragraph.
+**RESOLVED in r37 — verified live.** nami's dev head (pin `78d8fd4f`,
+fix commit `1a3711e`) adds an `UpstreamGuard` that keeps the upstream
+subscription alive for the watch's lifetime, so the timer-backed
+emission reaches the watcher. `.debounce(Duration::from_millis(400))`
+is restored at both sites (`search_now` / `search_live` in views.rs):
+typing "rust" in the sidebar search produced debounced filtered
+results with match highlights (r37d_typed.png). #228 can be closed.
 
 ### r36-1: `Command::shortcut` exists in waterui but hydrolysis never dispatches it — no key-event surface at all
+
+Filed as water-rs/hydrolysis#247.
 
 Tried to wire Desktop's global shortcuts (Ctrl+F in-chat search,
 Ctrl+W close, Alt+↑/↓ switch chats, Ctrl+Tab folders) for the r36
@@ -2842,6 +2854,9 @@ close (Ctrl+W) and per-chat mute (Ctrl+Shift+M), so the PARITY row is
 
 ### r36-2: `when` nested inside another `when`'s payload never materializes on the live winit renderer (headless passes)
 
+**RESOLVED in hydrolysis `6edbe148` (fix #239 — mid-flush dynamic swaps land inside the same frame); verified live in r37.**
+Filed as water-rs/hydrolysis#251 (shared root with r36-5: `when` payloads inserted after mount on winit miss materialization/interaction).
+
 The pinned-messages banner is `when(has_pinned, || vstack((banner_row, when(pinned_popup, || rows))))`. Tapping the banner flips `pinned_popup` true — verified the handler fires and the flag toggles — but the inner `when`'s subtree never paints and never takes layout space on the winit renderer: zero pixel diff between open and closed captures. The semantic/offscreen runtime is not affected: a probe that mounts the same view headless, flips the flag and dumps the tree finds the "Jump to pinned" rows with real bounds (`tests::probe_pinned_popup_open`). Moving the inner `when` out to a sibling position (`vstack((when(has_pinned, …), when(pinned_popup, …)))`) makes the popup render live — the feature ships in that form; this entry reports the defect.
 
 Minimal reproduction:
@@ -2862,7 +2877,16 @@ let ui = vstack((
 
 Observed: the inner `when`'s condition signal appears never to be watched (or its insertion never paints) when the payload is built lazily inside another `when`'s payload. App workaround in place: the popup `when` is a sibling of the banner `when`, marked with a comment at views.rs:976-979.
 
+**RESOLVED in r37 on hydrolysis `6edbe148` (fix #239 ≈ #251):** the
+shared `when` insertion path is fixed — the same-class symptoms are
+verified live elsewhere (pinned-banner popup + multi-select bar buttons
+dispatch; see r36-5). The app still uses the sibling-`when` structure,
+so the nested case itself is no longer exercised live; headless probes
+always passed. The workaround stays harmlessly in place.
+
 ### r36-3: rows straddling a `scroll`/`List` viewport edge keep unclipped hit/gesture bounds — taps on chrome above fire the row
+
+Filed as water-rs/hydrolysis#252.
 
 While verifying the multi-select bar, taps inside the "2 selected" action band (a sibling *above* the messages list) toggled selection on the message row whose top scrolled under the bar. Paint is clipped correctly — the row is invisible there — but hit testing is not: hydrolysis pushes the viewport clip only around drawing (`list.rs:1137-1140` `push_layer_rect(1.0, viewport)`, popped at :1695) while each row's sub-view flushes its gestures into a rect derived from the unclipped `row_rect`/`content_rect` (`subview.flush_in_rect(..., content_rect)` at :1631; row hit bounds computed from the same unclipped rect at :1399). The clip never reaches `gesture_regions`/`pointer_targets`, so the straddling row's `.on_tap` keeps firing in the band above the viewport.
 
@@ -2871,6 +2895,8 @@ Minimal repro shipped as `probe_scroll_row_tap_clip` (src/lib.rs, `#[ignore]`d �
 Observed live: with multi-select active, clicks on the select bar's action row (Copy/Forward/Delete/✕, y≈120-130) toggled selection on the row peeking under the bar instead of (or in addition to) hitting the bar buttons.
 
 ### r36-4: no `on_submit` on `TextField` — Enter-to-send (single-line) is inexpressible
+
+Filed as water-rs/waterui#1265.
 
 Telegram Desktop sends the composed message on Enter (Shift+Enter for newline). There is no surface to hang that on:
 
@@ -2881,6 +2907,9 @@ Telegram Desktop sends the composed message on Enter (Shift+Enter for newline). 
 Expected: `TextField::on_submit(impl Fn)` fired when Enter is pressed while the single-line field is focused (desktop convention: Enter submits, Shift+Enter newline), matching SwiftUI's `onSubmit`. PARITY: Enter-to-send is ❌ until this lands — clicking the send button is the only path.
 
 ### r36-5: `button().action()` inside a `when(…)` payload materialized after mount paints but never receives pointer input (winit only — headless passes)
+
+**RESOLVED in hydrolysis `6edbe148` (#239): select-bar Forward dispatched live in r37 (forward sheet opened, forward completed).**
+Filed as water-rs/hydrolysis#251 (same insertion-path defect as r36-2).
 
 Every `button` in a `when`-inserted subtree renders correctly yet is dead to clicks on the live winit renderer: `pointer down candidates` reports `pointer_hits=[]` at the button's painted position (and anywhere else — the bound is absent, not displaced). Sibling input paths in the SAME payload still work: `.on_tap` gesture regions fire, and `field` takes focus via the text-input fallback. Both the multi-select bar (`when(sel_active)` — Copy/Forward/Delete/✕, verified at 800/1400) and the forward banner (`when(forward_mode)` — Cancel ✕, field+chip fine) exhibit it, so the feature UI paints but its buttons are unclickable.
 
@@ -2900,3 +2929,53 @@ let ui = vstack((
 Observed: the `when` insertion path apparently flushes the payload's paint + gesture + a11y registration but drops (or never binds) `bind_interaction_target` press slots — consistent with r36-2, where a `when` inside a `when` payload never materializes at all on winit while headless passes. Likely the same insertion-path gap at a different subsystem (paint lands, interaction doesn't).
 
 Refinement (r36, verified live): the scope is `button().action()`-style press slots specifically, NOT every pointer target — a `Menu::new(label(..).icon(dots_vertical()).icon_only(), …)` inside `when(hov)` (the chat-row ⋮) DID register and open its menu on click (`pointer_hits=[3, 2]`, menu painted). `.on_tap` gestures, `field` focus and `Menu` triggers all survive; `button`/`icon_button` press slots die.
+
+**RESOLVED in r37 on hydrolysis `6edbe148` (fix #239, mid-flush dynamic
+swaps ≈ #251) — verified live.** The multi-select bar's Forward button
+dispatched (`select_chat(5) batch=2` → "2 messages forwarded" snackbar,
+source chat stayed open) and the pinned-banner popup's buttons work.
+`probe_when_payload_button_dead` is un-`#[ignore]`d as a regression
+tripwire. #251 can be closed.
+
+## r37 — repin hydrolysis 6edbe148 / waterui 9971190d / nami 78d8fd4f (resolutions + one new trap)
+
+### r37-1: writing a signal inside its own `on_change` watcher panics — `RefCell already borrowed` — with no documented deferral path
+
+Observed live on hydrolysis `6edbe148` / waterui `9971190d`: tapping a
+chat row while `forward_ids` was non-empty ran `select_chat` inside
+`list_selection`'s `on_change` dispatch; the forward branch then wrote
+`list_selection` (snap-back) and the whole app crashed at
+`waterui/src/view_ext/on_change.rs:84` — `handler.borrow_mut()(...)`
+inside a `RefCell` held across the dispatch. Every `on_change` handler
+is re-entrancy-poisoned against writes to *its own* observed signal.
+
+Minimal repro (any signal): `on_change(&b, |v, _| b.set(v))` — writing
+`b` synchronously inside the handler panics. Escaping via a deferred
+task works: `spawn_local(async move { b.set(x) })` (used in
+state.rs select_chat's forward branch). This is a sharp, undocumented
+footgun for app authors — a queued-write or a documented "defer your
+own writes" note on `on_change` would save the crash. Not filed: the
+crash surfaced only now because #251 previously made the triggering
+button dead, so the code path was unreachable until this round.
+
+### r37-2: #229 descendant-text merge — expected behavior, tests updated (not a defect)
+
+On waterui `9971190d` / hydrolysis `6edbe148`, `emit_accessibility` now
+consumes descendant text that names a role-carrying container
+(hydrolysis#229): a labelled row's `text` leaves no longer emit their own
+`[label]` nodes — the name surfaces inside the row's action label
+(`Unblock Spammer`, `Use English`, `Open profile of Alice`,
+`Mention @alice`). Six tests asserting leaf labels were updated to the
+merged labels. This is the intended tree — a11y-wise the merged label is
+better (one node, real action name).
+
+The same round exposed a latent app-side crash worth noting, not a
+framework defect: `Photo::new(path.map(Url::from_file_path_str))` built
+for a file id whose local path had not downloaded yet (`""`) panics in
+`parse_url` ("URL string is empty", `utils/url/src/parser.rs:49`), and
+the new `materialize_list_item` a11y pass (`list.rs:776` →
+`measurement.rs:957`) is the first path that reaches those `body()`s
+headlessly. Two app sites that lacked a `has`-gate — the playable-media
+thumbnail (`views.rs` bubble `otherwise`) and the album grid cells — are
+now gated on the resolved path like every other site; latent crash fixed
+in the app.

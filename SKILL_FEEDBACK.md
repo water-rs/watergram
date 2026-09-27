@@ -82,9 +82,11 @@ Pinned skill source for this round: waterui `db7a6e7d`, copied to
 - **Skill said:** reactivity.md lists `debounce` as available.
 - **Actually true:** on hydrolysis it never re-emits
   (water-rs/hydrolysis#228 — timer wake never schedules).
-- **Fix:** until the fix lands, `reactivity.md` should flag
-  debounce/throttle as "broken on hydrolysis; use `.on_change` on the
-  raw binding or a manual `sleep`+latest-check loop".
+- **RESOLVED (r37, verified live):** nami dev `78d8fd4f` (fix `1a3711e`,
+  `UpstreamGuard` pins the upstream subscription for the watch's
+  lifetime) restores emission — `.debounce(400ms)` now feeds the search
+  filter as expected. The "broken on hydrolysis" caveat can be dropped
+  once pins move past the fix.
 
 ### 7. Per-span `Style.background` dropped (fixed on #212)
 - **Tried:** `StyledStr` span with `style.background = Some(c)` for
@@ -211,6 +213,21 @@ Pinned skill source for this round: waterui `db7a6e7d`, copied to
   `target/debug/<bin>-<hash>` over `dist/linux/debug/<bin>` before
   launching — the run path reads dist/, not target/."
 
+### 17. `on_change` reentrancy: writing the watched signal inside its own
+   handler panics — `RefCell already borrowed` (r37-1)
+- **Tried:** inside `select_chat` (dispatched from `list_selection`'s
+  `on_change`), writing `list_selection` to snap the highlight back —
+  whole-app panic at `on_change.rs:84` `handler.borrow_mut()`.
+- **Skill said:** reactivity.md documents `on_change` but nothing about
+  re-entrancy, deferred writes, or that handlers hold a `RefCell`
+  across dispatch.
+- **Actually true:** any synchronous write to the observed signal inside
+  its own `on_change` handler panics; `spawn_local` to defer one task
+  turn is the escape hatch.
+- **Fix:** reactivity.md: "`on_change` handlers must not synchronously
+  write the signal they observe — defer via `spawn_local`."
+- **Lint candidate below** — the pattern is statically detectable.
+
 ## Lint candidates
 
 Mistakes I made this round that a lint could have caught, plus false
@@ -250,6 +267,10 @@ positives observed. (Patterns from earlier rounds folded in.)
   `button(..).action(..)`/`icon_button(..)` inside a `when(` payload
   that has no `.otherwise(` sibling, suggest `.otherwise` or `.on_tap`
   or a `Menu`.
+- **`on_change` self-write** — `v.on_change(&b, |..| b.set(x))` panics
+  at runtime (r37-1). Lint: an `.on_change(&b, ..)` whose handler body
+  (or a fn it calls) synchronously `.set(...)`s `b` — suggest
+  `spawn_local` deferral.
 - **False positives observed:** none new this round (the four r35
   warnings — `.state` ordering mis-fix, `is_positive()`, two
   unnecessary `anyview()`s — were real findings).

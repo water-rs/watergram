@@ -263,6 +263,10 @@ mod tests {
             show_avatar: false,
             sender_photo: 0,
             is_service: false,
+            view_count: 0,
+            author_sig: Str::from(""),
+            album_id: 0,
+            album_files: Vec::new(),
         }
     }
 
@@ -837,8 +841,8 @@ mod tests {
         }]);
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
         app.query().label("2 members").assert_exists();
-        app.query().label("Alice").assert_exists();
-        app.query().label("owner").assert_exists();
+        // #229: name/status leaves merge into the member row's button label.
+        app.query().label("Open profile of Alice").assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -2784,8 +2788,9 @@ mod tests {
         }]);
         let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
         app.query().label("Blocked users").assert_exists();
-        app.query().label("Spammer").assert_exists();
-        app.query().label("Unblock").assert_exists();
+        // hydrolysis#229: a labelled row's text leaves merge into its label,
+        // so the member name only surfaces inside the row's "Unblock …" label.
+        app.query().label("Unblock Spammer").assert_exists();
     }
 
     /// r13-4: Settings → Language lists the packs from
@@ -2796,9 +2801,10 @@ mod tests {
         store.load_language_packs(); // demo branch seeds three rows
         let mut app = ui.mount(move || views::settings_view(store.clone()).state(&store));
         app.query().label("Language").assert_exists();
-        app.query().label("English").assert_exists();
-        app.query().label("简体中文 — Chinese (Simplified)").assert_exists();
-        app.query().label("Deutsch — German").assert_exists();
+        // #229: pack names surface inside each row's "Use …" button label.
+        app.query().label("Use English").assert_exists();
+        app.query().label("Use 简体中文 — Chinese (Simplified)").assert_exists();
+        app.query().label("Use Deutsch — German").assert_exists();
     }
 
     #[test]
@@ -2846,7 +2852,10 @@ mod tests {
         let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
         store.toggle_info();
         app.query().label("Chat info").assert_exists();
-        app.query().label("Shared media").assert_exists();
+        app.query().label("Shared").assert_exists();
+        app.query().label("Media").assert_exists();
+        app.query().label("Files").assert_exists();
+        app.query().label("Links").assert_exists();
         app.query().label("Members").assert_exists();
         app.query().label("Close info").assert_exists();
     }
@@ -2916,7 +2925,7 @@ mod tests {
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_overlay.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_overlay.png");
-        app.query().label("Shared media").assert_exists();
+        app.query().label("Shared").assert_exists();
         app.query().label("🌄").assert_exists();
     }
 
@@ -3002,8 +3011,9 @@ mod tests {
         let inner = store.clone();
         let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
         store.composer.set(Str::from("hi @al"));
-        app.query().label("@alice").assert_exists();
-        app.query().label("@bob").assert_not_exists();
+        // #229: suggestion text merges into each row's "Mention @…" label.
+        app.query().label("Mention @alice").assert_exists();
+        app.query().label("Mention @bob").assert_not_exists();
         store.apply_mention("alice");
         assert!(store.composer.snapshot().contains("@alice "));
     }
@@ -3701,6 +3711,99 @@ mod tests {
     }
 
     #[test]
+    fn toast_notice_fires_on_copy() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| !r.text.is_empty() && !r.is_service)
+            .unwrap();
+        store.copy_message(&row);
+        let (seq, msg) = store.notice.snapshot();
+        assert_eq!(msg.as_str(), "Text copied");
+        store.copy_message(&row);
+        let (seq2, _) = store.notice.snapshot();
+        assert!(seq2 > seq, "repeating the same toast must re-fire");
+    }
+
+    #[test]
+    fn channel_post_footer_shows_views_and_signature() {
+        let store = store();
+        store.seed_demo();
+        // Chat 4 is the demo channel: posts carry the 👁 view count and
+        // alternate posts carry an author signature.
+        store.select_chat(4);
+        let rows = store.messages.snapshot();
+        let post = rows
+            .iter()
+            .find(|r| r.view_count > 0)
+            .expect("channel posts should carry view counts");
+        let footer = post.post_footer();
+        assert!(footer.starts_with("👁"), "footer: {footer}");
+        assert!(
+            rows.iter().any(|r| !r.author_sig.is_empty()),
+            "some channel posts should be signed"
+        );
+        // A non-channel chat shows no footer at all.
+        store.select_chat(1);
+        assert!(store
+            .messages
+            .snapshot()
+            .iter()
+            .all(|r| r.view_count == 0 && r.author_sig.is_empty()));
+    }
+
+    #[test]
+    fn jump_to_day_lists_days_and_jumps() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.toggle_jump_date();
+        assert!(store.jump_date_open.snapshot());
+        let days = store.jump_days.snapshot();
+        assert_eq!(days.len(), 2, "yesterday + today are the seeded days");
+        let target = days[0].day;
+        store.jump_to_day(target);
+        assert!(!store.jump_date_open.snapshot(), "popup closes on pick");
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.day == target)
+            .unwrap();
+        assert!(row.highlighted, "first message of the day highlighted");
+    }
+
+    #[test]
+    fn album_rows_merge_into_one_bubble() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let rows = store.messages.snapshot();
+        let album: Vec<_> = rows.iter().filter(|r| r.album_id == 777).collect();
+        assert_eq!(album.len(), 1, "3-member album merges into one row");
+        assert_eq!(album[0].album_files.len(), 3);
+        assert!(album[0].text.contains("first of the set"));
+    }
+
+    #[test]
+    fn shared_tab_switches_source() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.load_shared_tab(1);
+        assert!(!store.shared_files.snapshot().is_empty());
+        store.load_shared_tab(2);
+        assert!(!store.shared_links.snapshot().is_empty());
+        store.load_shared_tab(0);
+        assert!(!store.shared_media.snapshot().is_empty());
+        assert_eq!(store.shared_tab.snapshot(), 0);
+    }
+
+    #[test]
     fn copy_selected_joins_in_message_order() {
         let store = store();
         store.seed_demo();
@@ -3932,11 +4035,9 @@ mod tests {
     /// by `when` after mount PAINTS but never registers a pointer target on
     /// the winit renderer — the select bar's Copy/Forward/Delete/✕ and the
     /// forward banner's ✕ all get `pointer_hits=[]` on live clicks. `.on_tap`
-    /// and `field` in the same payload do work. Offscreen this passes
-    /// (tap_at dispatches directly), so the defect is live-only; kept
-    /// `#[ignore]`d as the regression tripwire.
-    // Run with `cargo test --lib -- --ignored`.
-    #[ignore]
+    /// and `field` in the same payload do work. Fixed upstream by
+    /// hydrolysis#239 (mid-flush dynamic swaps land in the same frame) and
+    /// verified live in r37 — kept as a regression tripwire.
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_when_payload_button_dead(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();

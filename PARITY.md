@@ -62,7 +62,7 @@
 | 富文本实体（粗/斜/剧透/超链） | ✅ | `FormattedText.entities` → `StyledStr`（粗/斜/下划/删除/剧透/代码/引用/链接，UTF-16→byte 映射+重叠合并） | `styled_entities_merge` |
 | 转发带出处徽标 | ✅ | `m.forward_info.origin`（User/HiddenUser/Chat/Channel 出处行内徽标） | — |
 | 消息右键菜单（回复/编辑/复制/转发/删除/反应/置顶/选择） | ✅ | 行 context_menu → 对应 API：`ContextMenu` preview=bubble+accessory=反应条（waterui#1245 已落地；Linux 弹窗暂不含 accessory，hydrolysis#200）；Reply/Edit(仅own)/Copy/Pin·Unpin/Forward/Select/Delete(CommandRole::Destructive)；Pin 派发已实测（r33_ctx800_pin.png） | `context_menu_items_and_roles` `message_context_menu_desktop_items` `message_context_menu_edit_only_own` |
-| 多选消息（批量删除/批量转发） | 🟡 | `deleteMessages(revoke)` / `forwardMessages` 批处理 + 选择条（☑/☐ 行内勾选，实测 "1 selected"→"2 selected"）；选择条按钮（Copy/Forward/Delete/✕）在 winit 上实测为死按钮 —— `when(sel_active)` payload 内的 `button().action()` 不注册 pointer target（DOGFOOD r36-5/hydrolysis 待报） | `multi_select_bar_appears` |
+| 多选消息（批量删除/批量转发） | ✅ | `deleteMessages(revoke)` / `forwardMessages` 批处理 + 选择条（☑/☐ 行内勾选，实测 "1 selected"→"2 selected"）；选择条 Copy/Forward/Delete/✕ 实测派发（hydrolysis#239 修复 `when` payload 按钮，r37 实机验证转发流程走通） | `multi_select_bar_appears` |
 | 投票显示与投票 | ✅ | `MessagePoll` → 问题/选项/得票条/已选✓/总数；`setPollAnswer` 投票 | `poll_renders_in_bubble` |
 | 创建投票 | ✅ | 附件菜单 → 创建投票：问题 + 2–10 选项 + 匿名/多选/测验标记 → `sendMessage(inputMessagePoll)`，含 Regular/Quiz 两型与 correct_option_id | `poll_creator_sends_and_resets` `poll_option_remove_shifts` |
 | 定时消息列表/立即发送 | ✅ | `getChatScheduledMessages` 面板 + `editMessageSchedulingState(None)`（工具栏时钟） | `scheduled_panel_lists_rows` |
@@ -71,6 +71,7 @@
 | 转发带评论 | ✅ | 转发横幅内评论字段 → `forwardMessages` 完成后同聊天 `sendMessage` 文本附言 | `forward_banner_shows_comment_field` |
 | @提及/用户名补全 | ✅ | 输入框尾部 @token → `searchChatMembers`+`getUser`(username) 过滤弹层，选中回填 `@username ` | `mention_popup_filters_and_inserts`, `mention_token_parses` |
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
+| 信息面板共享内容标签页 | ✅ | 「Shared」区 `shared_tab` Media/Files/Links 三 tab：媒体网格 / 文档行 / 链接行，点击行内跳转对应消息 | `info_panel_shows_shared_media` `probe_overlay_chunk` + 实测截图（r37_info*/_files/_links） |
 | 未读消息分隔线 | ✅ | `chat.last_read_inbox_message_id`+`unread_count` → 首条未读上方「Unread messages」分隔条 | `unread_divider_renders` |
 | 打开会话锚定未读分隔线 | ✅ | `scroll_to_open`：unread>0 且有分隔线 → 定位分隔线行；未读挂起期间收到新消息不动视口（`follows_tail`），自发消息仍跟随尾部 | `open_unread_anchors_divider` |
 | 发送者头像/名字、转发徽标点开资料 | ✅ | 气泡列头像、组内发送者名、「Forwarded from」徽标 → `open_peer` → Profile 卡（demo 合成卡） | `peer_taps_open_profiles` |
@@ -79,6 +80,9 @@
 | 悬停快捷回复钮 | ✅ | 指针悬停气泡 → 旁侧 ↩ 圆钮 → 一键回复（Telegram Desktop hover affordance） | 实测截图（r35_hover1400/800/600） |
 | 双击快捷回应 | ✅ | 双击气泡 → `quick_react` 切换 ❤️（Desktop 默认快反应） | `quick_react_applies_heart` |
 | 侧边栏搜索命中高亮 | ✅ | `title_styled`/`preview_styled` = 命中子串 AccentContainer span 标记；行级重绘受 DOGFOOD r35-3 保留路径缺陷所限 | `sidebar_search_highlight_splits` |
+| 操作反馈 toast | ✅ | `SnackbarManager` + `.snackbar(...)` 浮层：复制/置顶/转发完成/删除等提示（"2 messages forwarded" 实测出现）；按 Desktop 底部居中条 | `toast_notice_fires_on_copy` + 实测截图（r37_snack*/r37d_fwded.png） |
+| 频道贴 footer（浏览数/签名） | ✅ | `kind_icon="channel"` 贴子行尾：👁 `view_count` + `author_signature` | `channel_post_footer_shows_views` + 实测截图（r37_channel*） |
+| 跳转到日期弹层 | ✅ | 工具栏日历钮 → 日期弹层 → `date_jump_target` 定位并高亮目标消息 | `date_jump_popup_opens` + 实测截图（r37_jump*） |
 | 拖拽文件进窗口发送 | ❌ | 框架双层缺口：waterui `DragData` 仅 Text|Url 无 File；hydrolysis 未桥接 winit DroppedFile/HoveredFile — DOGFOOD r34-1 | — |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
 | 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条并按对端 accent 色着色；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母色圆）；组末气泡底角尾巴为气泡背景层内 Path 楔形 + `.offset` 外推（同 fill 一体、接角方角、不占布局空间）；组间间距大于组内 | `set_messages_groups_runs` |
@@ -97,6 +101,7 @@
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`（圆角裁剪、max_width 320）、视频/动画 `video_player`、音频紧凑播放器；demo 种子含程序化 640×360 PNG 实图渲染验证 | `media_slot`、`media_play_fallback_row`、`demo_seeds_photo_file` |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
+| 接收端相册合并气泡 | ✅ | `media_album_id` 同组消息合并为一条气泡，双列网格渲染所有成员媒体（`album_files`→`file_signal`，空路径按位占位符——`Url::from_file_path_str` 空串 panic 已按 `has`-gate 规避） | `album_rows_merge_into_one_bubble` + 实测截图（r37_album800/600） |
 | 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭（占满会话面板；非全屏） | `media_viewer_overlay` |
 | Emoji 选择面板 | ✅ | 本地 Emoji 网格（~300 项，VS16 整段）→ 插入输入框；与贴纸/GIF 同一面板三 tab | `emoji_tab_shows_grid` |
 | 发送前预览+说明编辑 | ✅ | 附件条：图片缩略图+文件名+caption 输入框（发送时并入消息 caption） | `attach_preview_shows_caption_field` |
@@ -145,6 +150,7 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：97 项 ｜ 部分 🟡：1 项（多选批处理 —— 选择条按钮死按钮，DOGFOOD r36-5）｜ 未实现 ❌：2 项（拖放文件发送 DOGFOOD r34-1，全局快捷键 DOGFOOD r36-1）
+- 已实现 ✅：103 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：2 项（拖放文件发送 DOGFOOD r34-1，全局快捷键 DOGFOOD r36-1）
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。r35 补录：消息内搜索 n/N+^/v+命中高亮、@提及跳转钮、悬停↩快捷回复、双击❤️快反应、侧边栏搜索命中高亮。r36 补录：置顶消息多选弹层实测（r36_pinned1400/800/600）、会话行悬停 ⋮ 菜单实测（r36_hovmenu*，悬停时时间戳隐藏）、composer Markdown→实体+demo 回显实测（r36_echo*）、多选条实测部分（r36-5 死按钮记 🟡）、全局快捷键记 ❌（r36-1）。搜索命中高亮配色修正为 M3 container+on-*（r36_marks*）。
+- r37 补录：toast 提示（Snackbar）、频道贴 footer（👁 浏览数+签名）、跳转到日期弹层、相册合并气泡、信息面板共享 Media/Files/Links 标签页；多选批处理升 ✅（hydrolysis#239 修复实测）。

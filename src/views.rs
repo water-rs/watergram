@@ -4,6 +4,7 @@
 //! `store: Store` as a `#[state]` extractor injected once at the root.
 
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 
 use waterui_backend_core::widget::ModalInteraction;
@@ -15,6 +16,7 @@ use crate::capture::VideoNoteGpu;
 use waterui::media::Photo;
 use waterui::video::video_player;
 use waterui::accessibility::{AccessibilityRole, AccessibilityState};
+use waterui::snackbar::{Snackbar, SnackbarManager};
 use waterui::navigation::{
     ColumnWidth, NavigationSplitView, NavigationToolbar, NavigationToolbarItem,
     NavigationToolbarPlacement, NavigationView,
@@ -23,7 +25,8 @@ use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
 use waterui::text::IntoText;
 use waterui::form::picker::file::FilePicker;
-use waterui::shape::{Circle, Path, RoundedRectangle, ShapeExt, UnevenRoundedRectangle};
+use waterui::form::picker::{picker, PickerItem};
+use waterui::shape::{Circle, Path, Rectangle, RoundedRectangle, ShapeExt, UnevenRoundedRectangle};
 use waterui::graphics::color::{BorderColor, Srgb, WithOpacity};
 use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Error, Foreground,
@@ -46,7 +49,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{highlight_styled, AccountRow, ChatRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{highlight_styled, AccountRow, ChatRow, DayRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -57,6 +60,7 @@ use mdi::check;
 use mdi::microphone;
 use mdi::file_gif_box;
 use mdi::at;
+use mdi::calendar;
 use mdi::chevron_down;
 use mdi::chevron_up;
 use mdi::close;
@@ -102,6 +106,17 @@ pub fn root(store: Store) -> impl View {
         Screen::Main => main_screen(inner.clone()).anyview(),
     })
     .state(&store)
+    // Transient toasts: store.notify() writes (seq, msg); the window's
+    // SnackbarManager shows them (Option extractor — absent under the
+    // semantic test runtime, which mounts no window).
+    .on_change(
+        &store.notice,
+        |(_, msg): (u64, Str), sb: Option<SnackbarManager>| {
+            if let Some(sb) = sb {
+                sb.show(Snackbar::new(msg));
+            }
+        },
+    )
 }
 
 fn loading_screen() -> impl View {
@@ -362,10 +377,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
     );
     let server_results = SignalCollection::new(store.server_results.clone());
     let show_results = store.server_results.map(|v| !v.is_empty()).distinct();
-    // hydrolysis#228 workaround: `store.search.debounce(400ms)` never
-    // re-emitted on hydrolysis (DOGFOOD r35-4). Restore `.debounce(
-    // Duration::from_millis(400))` once #228 lands.
-    let search_now = store.search.clone();
+    let search_now = store.search.debounce(Duration::from_millis(400));
     let rows_store = store.clone();
     let res_store = store.clone();
     let folder_tabs = store
@@ -1008,6 +1020,30 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             })
             .background(SurfaceVariant)
         }),
+        // Jump-to-date popup (calendar toolbar item): sibling `when` per
+        // the r36-2 nested-`when` defect — same pattern as pinned_popup.
+        when(store.jump_date_open.clone(), {
+            let days = SignalCollection::new(store.jump_days.clone());
+            move || {
+                VStack::for_each(days.clone(), |d: DayRow| {
+                    let day = d.day;
+                    let label = d.label.clone();
+                    hstack((
+                        calendar().tint(MutedForeground).size(12.0, 12.0).a11y_hidden(true),
+                        text(label.clone()).caption(),
+                        spacer(),
+                        when(d.count > 0, move || {
+                            text(d.count.to_string()).caption().muted()
+                        }),
+                    ))
+                    .spacing(6.0)
+                    .padding_with((4.0, 12.0))
+                    .on_tap(move |store: Store| store.jump_to_day(day))
+                    .a11y_label(Str::from(format!("Jump to {label}")))
+                })
+                .background(SurfaceVariant)
+            }
+        }),
     )),
     // Multi-select action bar (Desktop's "N selected" header state).
     when(sel_active, move || {
@@ -1554,10 +1590,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
 
     let composer_b = store.composer.clone();
     let search_open2 = store.chat_search_open.clone();
-    // hydrolysis#228 workaround: `chat_search.debounce(400ms)` never
-    // re-emitted on hydrolysis (DOGFOOD r35-4). Restore `.debounce(
-    // Duration::from_millis(400))` once #228 lands.
-    let search_live = store.chat_search.clone();
+    let search_live = store.chat_search.debounce(Duration::from_millis(400));
     let viewer_open = store.viewer.is_some().distinct();
     let store_for_viewer = store.clone();
     let store_for_info = store.clone();
@@ -1651,6 +1684,12 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 icon_button(magnify(), "Search in chat", move |store: Store| {
                     let v = !search_open2.snapshot();
                     store.chat_search_open.set(v);
+                }),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarTrailing,
+                icon_button(calendar(), "Jump to date", move |store: Store| {
+                    store.toggle_jump_date()
                 }),
             ))
             .item(NavigationToolbarItem::new(
@@ -1879,7 +1918,10 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             v.muted().anyview()
         }
     };
-    let has_media = row.media_file != 0 || row.play_file != 0 || !row.media_label.is_empty();
+    let has_media = row.media_file != 0
+        || row.play_file != 0
+        || !row.media_label.is_empty()
+        || !row.album_files.is_empty();
     // Emoji-only messages render large on no bubble fill (Telegram Desktop).
     let emoji_n = if has_media || has_link || has_styled || row.poll.is_some() {
         0
@@ -1897,11 +1939,11 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             .strip_prefix("Forwarded from ")
             .unwrap_or(fwd.as_str())
             .to_string();
-        // hydrolysis#221 workaround: hide the leaf so the gesture, not the
-        // leaf, emits the single named Button node (remove with the fix).
         parts.push(muted_parts(
             text(fwd.clone()).italic(true).caption().line_limit(ONE).anyview(),
         )
+        // hydrolysis#221 workaround: hide the leaf so the gesture, not the
+        // leaf, emits the single named Button node (remove with the fix).
         .a11y_hidden(true)
         .on_tap(move |store: Store| store.open_peer(fu, fc, Str::from(fwd_name.clone())))
         .a11y_label(Str::from(format!("Open profile of {}", fwd.as_str().strip_prefix("Forwarded from ").unwrap_or(fwd.as_str()))))
@@ -1913,13 +1955,13 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     if row.group_first && !row.outgoing && !sender.is_empty() {
         let (su, sc) = (row.sender_user, row.sender_chat);
         let sender_name = sender.to_string();
-        // hydrolysis#221 workaround: hide the leaf so the gesture, not the
-        // leaf, emits the single named Button node (remove with the fix).
         parts.push(
             text(sender.clone())
                 .caption()
                 .bold()
                 .foreground(peer_color(row.sender_accent, sender.as_str()))
+                // hydrolysis#221 workaround: hide the leaf so the gesture,
+                // not the leaf, emits the single named Button node.
                 .a11y_hidden(true)
                 .on_tap(move |store: Store| store.open_peer(su, sc, Str::from(sender_name.clone())))
                 .a11y_label(Str::from(format!("Open profile of {sender}")))
@@ -2110,7 +2152,14 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
         AnyView::default()
     };
 
+    // Channel post footer: "👁 1.2K · signature" before the clock
+    // (Telegram Desktop meta order).
+    let footer = row.post_footer();
+    let footer2 = footer.clone();
     let meta_overlay = hstack((
+        when(!footer.is_empty(), move || {
+            text(footer2.clone()).caption()
+        }),
         when(row.edited, || text("edited").caption()),
         text(time).caption(),
         if row.pending {
@@ -2439,18 +2488,23 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
             })
             .otherwise(move || {
                 hstack((
-                    if tfid != 0 {
-                        Photo::new(thumb.map(Url::from_file_path_str))
-                            .max_width(96.0)
-                            .max_height(96.0)
-                            .clip(RoundedRectangle::new(0.12))
-                            .anyview()
-                    } else {
+                    // `Url::from_file_path_str` panics on an empty string, so
+                    // the thumbnail Photo must not exist until the file path
+                    // resolves — gate it on the resolved path, not on `tfid`.
+                    when(thumb.map(|p: Str| !p.is_empty()).distinct(), {
+                        let thumb_url = thumb.map(Url::from_file_path_str);
+                        move || {
+                            Photo::new(thumb_url.clone())
+                                .max_width(96.0)
+                                .max_height(96.0)
+                                .clip(RoundedRectangle::new(0.12))
+                        }
+                    })
+                    .otherwise(|| {
                         image_outline()
                             .tint(MutedForeground)
                             .size(14.0, 14.0)
-                            .anyview()
-                    },
+                    }),
                     text!("{label_text}{suffix}", suffix = pct.map(|p: i32| {
                         if p > 0 && p < 100 {
                             Str::from(format!(" — {p}%"))
@@ -2465,6 +2519,46 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
             }),
         ))
         .anyview()
+    } else if row.album_files.len() > 1 {
+        // Incoming media album: the merged row renders every member's
+        // media as a two-column grid (Desktop's album bubble).
+        let mut grid: Vec<AnyView> = Vec::new();
+        for pair in row.album_files.chunks(2) {
+            let cells: Vec<AnyView> = pair
+                .iter()
+                .map(|&fid| {
+                    // `Url::from_file_path_str` panics on an empty path, so
+                    // the Photo only exists once the file resolves.
+                    let path = store.file_signal(fid);
+                    let has = path.map(|p: Str| !p.is_empty()).distinct();
+                    let url = store.file_signal(fid).map(Url::from_file_path_str);
+                    when(has, move || {
+                        Photo::new(url.clone())
+                            .max_width(240.0)
+                            .max_height(180.0)
+                            .clip(RoundedRectangle::new(0.08))
+                    })
+                    .otherwise(|| {
+                        vstack((
+                            spacer(),
+                            hstack((
+                                spacer(),
+                                image_outline()
+                                    .tint(MutedForeground)
+                                    .size(24.0, 24.0),
+                                spacer(),
+                            )),
+                            spacer(),
+                        ))
+                        .width(240.0)
+                        .height(180.0)
+                    })
+                    .anyview()
+                })
+                .collect();
+            grid.push(hstack(cells).spacing(2.0).anyview());
+        }
+        vstack(grid).spacing(2.0).anyview()
     } else if row.media_file != 0 {
         let fid = row.media_file;
         let path_a = store.file_signal(fid);
@@ -3146,7 +3240,7 @@ pub(crate) fn info_overlay_chunk(store: Store) -> impl View {
                 Color::srgb_hex("#000000").with_opacity(0.30),
                 Vector::new(-2.0, 0.0),
                 8.0,
-                0.0,
+                Rectangle,
             )),
         ))
         .alignment(TopTrailing),
@@ -3172,7 +3266,7 @@ pub(crate) fn info_panel(store: Store) -> impl View {
                     .collect::<Vec<MediaChunkRow>>()
             }),
     );
-    let cells = store.clone();
+    let shared_tab_store = store.clone();
     let chat_id = store.selected.unwrap_or(0);
     let kind = store
         .chats
@@ -3265,14 +3359,75 @@ pub(crate) fn info_panel(store: Store) -> impl View {
             ))
             .spacing(0.0)
         }),
-        text("Shared media").caption().muted().padding_with((8.0, 14.0)),
-        scroll(VStack::for_each(media_chunks, move |chunk: MediaChunkRow| {
-            let mut cells_v: Vec<AnyView> = Vec::new();
-            for cell in chunk.cells.iter().take(3) {
-                cells_v.push(media_cell(cells.clone(), cell.clone()).anyview());
+        text("Shared").caption().muted().padding_with((8.0, 14.0)),
+        // Media / Files / Links tabs (Desktop's shared-content section).
+        {
+            let tab = store.shared_tab.clone();
+            picker(
+                "Shared content",
+                vec![
+                    PickerItem::new(0usize, text("Media")),
+                    PickerItem::new(1usize, text("Files")),
+                    PickerItem::new(2usize, text("Links")),
+                ],
+                &tab,
+            )
+            .segmented()
+            .padding_with((0.0, 14.0))
+            .on_change(&tab, |t: usize, store: Store| store.load_shared_tab(t))
+        },
+        watch(store.shared_tab.clone(), move |tab: usize| {
+            let st = shared_tab_store.clone();
+            match tab {
+                1 => scroll(VStack::for_each(
+                    SignalCollection::new(st.shared_files.clone()),
+                    |row: SharedLinkRow| {
+                        hstack((
+                            file().tint(MutedForeground).size(14.0, 14.0).a11y_hidden(true),
+                            vstack((
+                                text(row.title.clone()).caption().line_limit(ONE),
+                                text(row.detail.clone()).caption().muted(),
+                            ))
+                            .spacing(0.0)
+                            .leading(),
+                            spacer(),
+                        ))
+                        .spacing(8.0)
+                        .padding_with((4.0, 14.0))
+                    },
+                ))
+                .anyview(),
+                2 => scroll(VStack::for_each(
+                    SignalCollection::new(st.shared_links.clone()),
+                    |row: SharedLinkRow| {
+                        hstack((
+                            link_variant().tint(Accent).size(14.0, 14.0).a11y_hidden(true),
+                            vstack((
+                                text(row.title.clone()).caption().line_limit(ONE),
+                                text(row.detail.clone()).caption().line_limit(ONE).muted(),
+                            ))
+                            .spacing(0.0)
+                            .leading(),
+                            spacer(),
+                        ))
+                        .spacing(8.0)
+                        .padding_with((4.0, 14.0))
+                    },
+                ))
+                .anyview(),
+                _ => scroll(VStack::for_each(media_chunks.clone(), {
+                    let cells = st.clone();
+                    move |chunk: MediaChunkRow| {
+                        let mut cells_v: Vec<AnyView> = Vec::new();
+                        for cell in chunk.cells.iter().take(3) {
+                            cells_v.push(media_cell(cells.clone(), cell.clone()).anyview());
+                        }
+                        hstack(cells_v).spacing(4.0)
+                    }
+                }))
+                .anyview(),
             }
-            hstack(cells_v).spacing(4.0)
-        })),
+        }),
     ))
     .spacing(0.0)
     .leading()

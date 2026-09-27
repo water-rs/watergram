@@ -290,6 +290,37 @@ pub struct MessageRow {
     /// bubble; excluded from sender runs and multi-select. Kept as its own
     /// list row (the r30 fold was reverted — DOGFOOD r31-1).
     pub is_service: bool,
+    /// Channel post footer: interaction_info view count (0 = none; user
+    /// posts have no view count — `getMessageViewCount` is channel-only).
+    pub view_count: i32,
+    /// Post author signature (`author_signature`) on channel posts.
+    pub author_sig: Str,
+    /// Album this message belongs to (`media_album_id`, 0 = none).
+    /// Consecutive rows with the same id merge into one album bubble at
+    /// `set_messages`; the merged row keeps the first member's id and
+    /// carries every member's media file in `album_files`.
+    pub album_id: i64,
+    /// Media file ids of a merged album (non-empty only on album rows).
+    pub album_files: Vec<i32>,
+}
+
+impl MessageRow {
+    /// Post footer text: "👁 1.2K  ·  Alice Liddell" — Desktop draws the
+    /// view count before the author signature in the bubble's meta line.
+    pub fn post_footer(&self) -> Str {
+        let mut s = String::new();
+        if self.view_count > 0 {
+            s.push_str("👁 ");
+            s.push_str(&fmt_count(self.view_count));
+        }
+        if !self.author_sig.is_empty() {
+            if !s.is_empty() {
+                s.push_str("  ·  ");
+            }
+            s.push_str(&self.author_sig);
+        }
+        Str::from(s)
+    }
 }
 
 /// A single poll answer option as shown inside a poll bubble.
@@ -309,6 +340,26 @@ pub struct PollRow {
     pub options: Vec<PollOptRow>,
     pub voters: i32,
     pub closed: bool,
+}
+
+/// A day in the jump-to-date popup (loaded days locally,
+/// `getChatMessageCalendar` days on a real session).
+#[derive(Clone, Identifiable)]
+pub struct DayRow {
+    #[id]
+    pub day: i64,
+    pub label: Str,
+    /// Message count on that day (0 = unknown/local listing).
+    pub count: i32,
+}
+
+/// One row of the info panel's shared Files / Links tabs.
+#[derive(Clone, Identifiable)]
+pub struct SharedLinkRow {
+    #[id]
+    pub id: i64,
+    pub title: Str,
+    pub detail: Str,
 }
 
 /// One cell in the info panel's shared-media grid (photo/video from
@@ -450,6 +501,10 @@ impl PartialEq for MessageRow {
             && self.show_avatar == o.show_avatar
             && self.sender_photo == o.sender_photo
             && self.is_service == o.is_service
+            && self.view_count == o.view_count
+            && self.author_sig == o.author_sig
+            && self.album_id == o.album_id
+            && self.album_files == o.album_files
     }
 }
 impl Eq for MessageRow {}
@@ -545,6 +600,15 @@ pub struct Store {
     pub pinned_idx: Rc<Cell<usize>>,
     /// The pinned-messages list popup under the banner.
     pub pinned_popup: Binding<bool>,
+    /// Jump-to-date popup open; `jump_days` is the popup's day list.
+    pub jump_date_open: Binding<bool>,
+    pub jump_days: Binding<Vec<DayRow>>,
+    /// Info panel "Shared" tab: 0=Media, 1=Files, 2=Links.
+    pub shared_tab: Binding<usize>,
+    /// Rows for the Files and Links shared-content tabs
+    /// (msg id + display strings; tap opens the message).
+    pub shared_files: Binding<Vec<SharedLinkRow>>,
+    pub shared_links: Binding<Vec<SharedLinkRow>>,
     /// In-chat message search state.
     pub chat_search_open: Binding<bool>,
     pub chat_search: Binding<Str>,
@@ -646,6 +710,9 @@ pub struct Store {
     pub forward_ids: Binding<Vec<i64>>,
     /// Optional comment sent as a follow-up text message after a forward.
     pub forward_comment: Binding<Str>,
+    /// Transient toast text the root view routes into `SnackbarManager`
+    /// (seq + message; the seq makes identical messages re-fire).
+    pub notice: Binding<(u64, Str)>,
     /// Message multi-selection (batch forward/delete).
     pub selected_msgs: Binding<Vec<i64>>,
     /// Folder editor sheet state.
@@ -815,6 +882,20 @@ fn fmt_time(ts: i32) -> Str {
         })
         .unwrap_or_default()
         .into()
+}
+
+/// Compact count for bubble footers: 999 → "999", 1234 → "1.2K",
+/// 4_500_000 → "4.5M" (Telegram Desktop's one-decimal style).
+fn fmt_count(n: i32) -> String {
+    let n = n.max(0) as f64;
+    if n < 1_000.0 {
+        format!("{}", n as i64)
+    } else if n < 1_000_000.0 {
+        let v = n / 1_000.0;
+        if v < 10.0 { format!("{v:.1}K") } else { format!("{}K", v.round() as i64) }
+    } else {
+        format!("{:.1}M", n / 1_000_000.0)
+    }
 }
 
 /// Local calendar day index (`num_days_from_ce`) for a unix timestamp.
@@ -1213,6 +1294,11 @@ impl Store {
             pinned_msgs: Binding::default(),
             pinned_idx: Rc::new(Cell::new(0)),
             pinned_popup: Binding::bool(false),
+            jump_date_open: Binding::bool(false),
+            jump_days: Binding::<Vec<DayRow>>::default(),
+            shared_tab: Binding::<usize>::default(),
+            shared_files: Binding::<Vec<SharedLinkRow>>::default(),
+            shared_links: Binding::<Vec<SharedLinkRow>>::default(),
             chat_search_open: Binding::bool(false),
             chat_search: Binding::container(Str::from("")),
             chat_search_results: Binding::<Vec<MessageRow>>::default(),
@@ -1279,6 +1365,7 @@ impl Store {
             forward_noattr: Binding::bool(false),
             forward_ids: Binding::<Vec<i64>>::default(),
             forward_comment: Binding::container(Str::from("")),
+            notice: Binding::container((0u64, Str::from(""))),
             // Message multi-selection (Select → batch forward/delete).
             selected_msgs: Binding::<Vec<i64>>::default(),
             folder_open: Binding::bool(false),
@@ -1500,6 +1587,10 @@ impl Store {
             link_url: Str::from(""),
             poll: None,
             is_service: false,
+            view_count: 0,
+            author_sig: Str::from(""),
+            album_id: 0,
+            album_files: Vec::new(),
         };
         let svc = |id: i64, text: &str| {
             let mut r = m(id, "", text, "", false, false, "", "", "", "");
@@ -1617,6 +1708,14 @@ impl Store {
         }
         if let Some(chip) = msgs[16].reaction_chips.first_mut() {
             chip.chosen = true;
+        }
+        // A three-photo album (TDLib media_album_id): the rows merge into
+        // one bubble grid at set_messages.
+        for (mid, caption) in [(40, "first of the set"), (41, ""), (42, "")] {
+            let mut a = m(mid, "Alice", caption, "09:57", false, false, "", "", "", "photo · 240 KB");
+            a.media_file = 1;
+            a.album_id = 777;
+            msgs.push(a);
         }
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
@@ -2261,6 +2360,14 @@ impl Store {
             edited: m.edit_date != 0,
             poll,
             is_service,
+            view_count: m
+                .interaction_info
+                .as_ref()
+                .map(|i| i.view_count)
+                .unwrap_or(0),
+            author_sig: Str::from(m.author_signature.clone()),
+            album_id: m.media_album_id,
+            album_files: Vec::new(),
         }
     }
 
@@ -2540,9 +2647,15 @@ impl Store {
                         .and_then(|i| i.reactions.as_ref())
                         .map(Self::chips_from_td)
                         .unwrap_or_default();
+                    let views = u
+                        .interaction_info
+                        .as_ref()
+                        .map(|i| i.view_count)
+                        .unwrap_or(0);
                     self.update_message_row(u.message_id, |r| {
                         r.reaction_chips = chips.clone();
                         r.my_reaction = mine.clone();
+                        r.view_count = views;
                     });
                 }
             }
@@ -3036,6 +3149,7 @@ impl Store {
             };
             let send_copy = self.forward_noattr.snapshot();
             let comment = self.forward_comment.snapshot();
+            let n = msg_ids.len();
             self.forward_message.set(None);
             self.forward_ids.set(Vec::new());
             self.forward_noattr.set(false);
@@ -3069,10 +3183,24 @@ impl Store {
             })
             .detach();
             // The tap already highlighted the row — restore the highlight to
-            // the still-open chat (forwarding does not open a chat).
+            // the still-open chat (forwarding does not open a chat). The
+            // snap-back write is deferred one task turn: this select_chat ran
+            // inside `list_selection`'s on_change dispatch, and writing the
+            // same signal re-entrantly panics on the handler RefCell
+            // (on_change.rs:84).
             self.syncing_selection.set(true);
-            self.list_selection.set(self.selected.snapshot());
-            self.syncing_selection.set(false);
+            let sel = self.selected.snapshot();
+            let st = self.clone();
+            spawn_local(async move {
+                st.list_selection.set(sel);
+                st.syncing_selection.set(false);
+            })
+            .detach();
+            self.notify(if n == 1 {
+                Str::from("Message forwarded")
+            } else {
+                Str::from(format!("{n} messages forwarded"))
+            });
             return;
         }
         if self.open_chat.get() == chat_id {
@@ -3126,17 +3254,27 @@ impl Store {
             let mut msgs = Self::demo_conversation();
             // Same rule as `apply_unread_divider`: only a chat with unread
             // gets the "Unread messages" divider row.
-            if self
+            let chat = self
                 .chats
                 .snapshot()
                 .iter()
                 .find(|r| r.id == chat_id)
-                .map(|r| r.unread)
-                .unwrap_or(0)
-                == 0
-            {
+                .cloned();
+            if chat.as_ref().map(|r| r.unread).unwrap_or(0) == 0 {
                 for r in msgs.iter_mut() {
                     r.unread_divider = false;
+                }
+            }
+            // Channel posts carry the 👁 view count, and some carry an
+            // author signature (TDLib author_signature).
+            if chat.map(|r| r.kind_icon.as_str() == "channel").unwrap_or(false) {
+                for r in msgs.iter_mut() {
+                    if !r.is_service {
+                        r.view_count = 1200 + (r.id as i32) * 137;
+                        if r.id % 2 == 0 {
+                            r.author_sig = Str::from("T. G. Team");
+                        }
+                    }
                 }
             }
             self.set_messages(msgs);
@@ -3164,7 +3302,7 @@ impl Store {
         let open = !self.info_open.snapshot();
         self.info_open.set(open);
         if open {
-            self.load_shared_media();
+            self.load_shared_tab(self.shared_tab.snapshot());
             let kind = self
                 .chats
                 .snapshot()
@@ -3292,6 +3430,36 @@ impl Store {
     /// Sets `messages` after marking the first row of each distinct local
     /// day with `day_header` + `day_label` (the date pill).
     pub fn set_messages(&self, mut rows: Vec<MessageRow>) {
+        // Media albums (TDLib `media_album_id`): consecutive rows sharing a
+        // non-zero album id merge into one bubble — the row keeps the first
+        // member's id and collects every member's media file.
+        let mut merged: Vec<MessageRow> = Vec::with_capacity(rows.len());
+        for mut r in rows.drain(..) {
+            let joinable = r.album_id != 0
+                && merged
+                    .last()
+                    .map(|p| p.album_id == r.album_id)
+                    .unwrap_or(false);
+            if joinable {
+                let p = merged.last_mut().expect("joinable implies nonempty");
+                if r.media_file != 0 {
+                    p.album_files.push(r.media_file);
+                }
+                if !r.text.is_empty() {
+                    if !p.text.is_empty() {
+                        p.text = Str::from(format!("{}\n{}", p.text, r.text));
+                    } else {
+                        p.text = r.text.clone();
+                    }
+                }
+            } else {
+                if r.album_id != 0 && r.media_file != 0 {
+                    r.album_files = vec![r.media_file];
+                }
+                merged.push(r);
+            }
+        }
+        let mut rows = merged;
         let mut prev_day = 0i64;
         for r in &mut rows {
             r.day_header = r.day != prev_day;
@@ -3413,6 +3581,190 @@ impl Store {
         self.jump_to_message(message_id);
     }
 
+    /// Chat-header calendar button: toggle the jump-to-date popup and
+    /// (re)load its day list — locally from the loaded window on a demo
+    /// store, `getChatMessageCalendar` on a real session.
+    pub fn toggle_jump_date(&self) {
+        let open = !self.jump_date_open.snapshot();
+        self.jump_date_open.set(open);
+        if !open {
+            return;
+        }
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        if self.client_id.get() == 0 {
+            let mut seen: Vec<i64> = Vec::new();
+            for r in self.messages.snapshot() {
+                if r.day != 0 && !seen.contains(&r.day) {
+                    seen.push(r.day);
+                }
+            }
+            seen.sort_unstable();
+            self.jump_days.set(
+                seen.iter()
+                    .map(|&d| DayRow {
+                        day: d,
+                        label: fmt_day_label(d),
+                        count: 0,
+                    })
+                    .collect(),
+            );
+            return;
+        }
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::MessageCalendar::MessageCalendar(cal)) =
+                functions::get_chat_message_calendar(
+                    chat_id,
+                    None,
+                    enums::SearchMessagesFilter::Empty,
+                    0,
+                    client,
+                )
+                .await
+            {
+                store.jump_days.set(
+                    cal.days
+                        .iter()
+                        .map(|d| {
+                            let day = local_day(d.message.date);
+                            DayRow {
+                                day,
+                                label: fmt_day_label(day),
+                                count: d.total_count,
+                            }
+                        })
+                        .collect(),
+                );
+            }
+        })
+        .detach();
+    }
+
+    /// Jump-to-date pick: scroll to the first loaded message of the day,
+    /// or fetch it via `getChatMessageByDate` when the day predates the
+    /// loaded window.
+    pub fn jump_to_day(&self, day: i64) {
+        self.jump_date_open.set(false);
+        let list = self.messages.snapshot();
+        if let Some(row) = list.iter().find(|r| r.day == day) {
+            let id = row.id;
+            self.jump_to_message(id);
+            return;
+        }
+        let chat_id = self.open_chat.get();
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        let ts = chrono::NaiveDate::from_num_days_from_ce_opt(day as i32)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .and_then(|t| t.and_local_timezone(chrono::Local).earliest())
+            .map(|t| t.timestamp() as i32)
+            .unwrap_or(0);
+        if ts == 0 {
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Message::Message(m)) =
+                functions::get_chat_message_by_date(chat_id, ts, client).await
+            {
+                store.jump_to_message(m.id);
+            }
+        })
+        .detach();
+    }
+
+    /// Info panel shared-content tabs: 0 media (PhotoAndVideo), 1 files
+    /// (Document), 2 links (Url). Tab switches reload through
+    /// `searchChatMessages` with the matching filter.
+    pub fn load_shared_tab(&self, tab: usize) {
+        self.shared_tab.set(tab);
+        let chat_id = self.open_chat.get();
+        if chat_id == 0 {
+            return;
+        }
+        if self.client_id.get() == 0 {
+            // Demo seeds so all three tabs render content.
+            match tab {
+                1 => self.shared_files.set(
+                    [("spec-draft.md", "182 KB"), ("hydrolysis-trace.log", "4.1 MB"), ("r36-repo.bundle", "41 MB")]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (t, d))| SharedLinkRow {
+                            id: -(i as i64) - 100,
+                            title: Str::from(*t),
+                            detail: Str::from(*d),
+                        })
+                        .collect(),
+                ),
+                2 => self.shared_links.set(
+                    [("WaterUI — native apps in Rust", "waterui.dev"), ("hydrolysis#251", "github.com/water-rs/hydrolysis/issues/251")]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (t, d))| SharedLinkRow {
+                            id: -(i as i64) - 200,
+                            title: Str::from(*t),
+                            detail: Str::from(*d),
+                        })
+                        .collect(),
+                ),
+                _ => self.load_shared_media(),
+            }
+            return;
+        }
+        if tab == 0 {
+            self.load_shared_media();
+            return;
+        }
+        let filter = if tab == 1 {
+            enums::SearchMessagesFilter::Document
+        } else {
+            enums::SearchMessagesFilter::Url
+        };
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::FoundChatMessages::FoundChatMessages(found)) =
+                functions::search_chat_messages(
+                    chat_id,
+                    None,
+                    String::new(),
+                    None,
+                    0,
+                    0,
+                    50,
+                    Some(filter),
+                    client,
+                )
+                .await
+            {
+                let rows: Vec<SharedLinkRow> = found
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let (t, _, label, _) = Store::content_preview(&m.content);
+                        SharedLinkRow {
+                            id: m.id,
+                            title: if t.is_empty() { label } else { t },
+                            detail: fmt_time(m.date),
+                        }
+                    })
+                    .collect();
+                if tab == 1 {
+                    store.shared_files.set(rows);
+                } else {
+                    store.shared_links.set(rows);
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn pin_message(&self, message_id: i64) {
         let chat_id = self.open_chat.get();
         let client = self.client_id.get();
@@ -3490,6 +3842,10 @@ impl Store {
                 show_avatar: false,
                 sender_photo: 0,
                 is_service: true,
+                view_count: 0,
+                author_sig: Str::from(""),
+                album_id: 0,
+                album_files: Vec::new(),
             });
             self.set_messages(rows);
             return;
@@ -4600,6 +4956,10 @@ impl Store {
             link_url: Str::from(""),
             poll: None,
             is_service: false,
+            view_count: 0,
+            author_sig: Str::from(""),
+            album_id: 0,
+            album_files: Vec::new(),
             day: local_day(now),
         });
         self.set_messages(rows);
@@ -5125,6 +5485,14 @@ impl Store {
         }
     }
 
+    /// Push a transient toast message: the root view routes `notice` into
+    /// the window's `SnackbarManager`. The sequence counter lets the same
+    /// text fire again.
+    pub fn notify(&self, msg: impl Into<Str>) {
+        let (seq, _) = self.notice.snapshot();
+        self.notice.set((seq + 1, msg.into()));
+    }
+
     /// Copy a message's text to the internal clipboard binding (and the OS
     /// clipboard when available).
     pub fn copy_message(&self, row: &MessageRow) {
@@ -5135,6 +5503,7 @@ impl Store {
         {
             let _ = cb.set_text(text);
         }
+        self.notify("Text copied");
     }
 
     /// Batch-copy the selected messages: texts joined by newlines in
@@ -5160,6 +5529,8 @@ impl Store {
         if let Ok(mut cb) = arboard::Clipboard::new() {
             let _ = cb.set_text(joined);
         }
+        let n = self.selected_msgs.snapshot().len();
+        self.notify(format!("{n} copied"));
     }
 
     pub fn start_forward(&self, row: &MessageRow) {
