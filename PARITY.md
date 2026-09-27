@@ -41,15 +41,17 @@
 |---|---|---|---|
 | 打开会话 + 历史分页 | ✅ | `getChatHistory` 向前翻页 | `messages_render` |
 | 发送文本 | ✅ | `sendMessage(inputMessageText)` | `composer_sends_and_clears` |
+| 输入框 Markdown（*粗* _斜_ `码` ~~删~~ \|\|剧透\|\|） | ✅ | `parse_markdown` 发送时转 `FormattedText` 实体（UTF-16 offset），demo 走本地回显行；编辑路径同样解析 | `parse_markdown_strips_delimiters_and_offsets_utf16` `send_demo_echo_appends_outgoing_row` |
+| 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | ❌ | 框架双层缺口：`Command::shortcut` 元数据存在（waterui menu.rs:261）但 hydrolysis 无任何消费点；修饰键 chord 在 hit_test.rs:2148 直接 return false，且 Event 枚举只有 Hover* —— 无键事件派发面。DOGFOOD r36-1 | — |
 | 编辑消息 | ✅ | `editMessageText`；`message.edit_date` → 气泡内 "edited" 标记 | — |
 | 删除消息 | ✅ | `deleteMessages` | — |
 | 转发 | ✅ | `forwardMessages` | — |
 | 回复 / 引用（含点击引用跳转原消息） | ✅ | `inputMessageReplyTo` + `jump_to_message`（本地命中直接高亮+滚动，未加载走 `getMessage`+历史） | `reply_banner_shows` / `reply_quote_jumps_to_loaded_message` |
-| 复制文本 | ✅ | `getMessage` + 剪贴板 | — |
+| 复制文本 | ✅ | `getMessage` + 剪贴板；多选模式下按消息顺序 `\n` 拼接（r36） | `copy_selected_joins_in_message_order` |
 | 已读标记（拉取后回执） | ✅ | `viewMessages` | — |
-| 消息内搜索 | ✅ | `searchChatMessages` + 本地窗口全量命中高亮（`search_hit`→AccentContainer span）+ n/N 计数 + ^/v 逐条跳转 + 结果行列表（防抖移除：nami debounce 在 hydrolysis 不发射，DOGFOOD r35-4，直接监听 binding） | `chat_search_panel_opens` `chat_search_marks_and_clears` `chat_search_next_prev_cycle` |
+| 消息内搜索 | ✅ | `searchChatMessages` + 本地窗口全量命中高亮（`search_hit`→SelectionContainer+SelectionForeground span 配对，深浅气泡上均可读，r36 修正）+ n/N 计数 + ^/v 逐条跳转 + 结果行列表（防抖移除：nami debounce 在 hydrolysis 不发射，DOGFOOD r35-4/hydrolysis#228 workaround，直接监听 binding） | `chat_search_panel_opens` `chat_search_marks_and_clears` `chat_search_next_prev_cycle` |
 | 跳转到某条消息（日期/回复定位） | ✅ | `getChatHistory` 窗口加载 + `List` `ScrollController<usize>` 按索引精确滚动 + 气泡高亮 | — |
-| 置顶消息条 | ✅ | `getChatPinnedMessage` + `pinChatMessage`/`unpinChatMessage`，点击跳转 | `pinned_banner_shows` |
+| 置顶消息条 | ✅ | `getChatPinnedMessage` + `searchChatMessages(Pinned)` 全量列表；单条点击直接跳转，多条弹出列表逐条跳转（`VStack::for_each` 弹出层）+ `·N` 计数；`pinChatMessage`/`unpinChatMessage` | `pinned_banner_shows` `pinned_popup_opens_and_jumps` `pinned_tap_single_jumps_directly` |
 | 服务消息（置顶/入群/拉人，居中灰条） | ✅ | `MessagePinMessage`/`MessageChatAddMembers`/`MessageChatJoinBy*` → 居中 muted pill（"You"/发送者名前缀，拉人解析成员名）；独立 List 行，`ListItem::insets`+`.list_min_row_height(0)` 给 Desktop 间距（34pt 实测，waterui#1252 已落地）；不参与消息组、不可多选、无右键菜单；demo pin 路径同步追加服务行 | `pin_appends_service_row` / `service_row_not_selectable` / `service_rows_break_runs` |
 | Reactions 展示（统一 pill 组件：气泡内气泡色派生 tint、已选 accent） | ✅ | `UpdateMessageInteractionInfo`（数量+自己的选择） | `reactions_render` |
 | Reactions 发送 | ✅ | `addMessageReaction`/`removeMessageReaction`（右键菜单 👍❤️😂😮😢 + 取消） | — |
@@ -60,7 +62,7 @@
 | 富文本实体（粗/斜/剧透/超链） | ✅ | `FormattedText.entities` → `StyledStr`（粗/斜/下划/删除/剧透/代码/引用/链接，UTF-16→byte 映射+重叠合并） | `styled_entities_merge` |
 | 转发带出处徽标 | ✅ | `m.forward_info.origin`（User/HiddenUser/Chat/Channel 出处行内徽标） | — |
 | 消息右键菜单（回复/编辑/复制/转发/删除/反应/置顶/选择） | ✅ | 行 context_menu → 对应 API：`ContextMenu` preview=bubble+accessory=反应条（waterui#1245 已落地；Linux 弹窗暂不含 accessory，hydrolysis#200）；Reply/Edit(仅own)/Copy/Pin·Unpin/Forward/Select/Delete(CommandRole::Destructive)；Pin 派发已实测（r33_ctx800_pin.png） | `context_menu_items_and_roles` `message_context_menu_desktop_items` `message_context_menu_edit_only_own` |
-| 多选消息（批量删除/批量转发） | ✅ | `deleteMessages(revoke)` / `forwardMessages` 批处理 + 选择条（☑/☐ 行内勾选） | `multi_select_bar_appears` |
+| 多选消息（批量删除/批量转发） | 🟡 | `deleteMessages(revoke)` / `forwardMessages` 批处理 + 选择条（☑/☐ 行内勾选，实测 "1 selected"→"2 selected"）；选择条按钮（Copy/Forward/Delete/✕）在 winit 上实测为死按钮 —— `when(sel_active)` payload 内的 `button().action()` 不注册 pointer target（DOGFOOD r36-5/hydrolysis 待报） | `multi_select_bar_appears` |
 | 投票显示与投票 | ✅ | `MessagePoll` → 问题/选项/得票条/已选✓/总数；`setPollAnswer` 投票 | `poll_renders_in_bubble` |
 | 创建投票 | ✅ | 附件菜单 → 创建投票：问题 + 2–10 选项 + 匿名/多选/测验标记 → `sendMessage(inputMessagePoll)`，含 Regular/Quiz 两型与 correct_option_id | `poll_creator_sends_and_resets` `poll_option_remove_shifts` |
 | 定时消息列表/立即发送 | ✅ | `getChatScheduledMessages` 面板 + `editMessageSchedulingState(None)`（工具栏时钟） | `scheduled_panel_lists_rows` |
@@ -134,7 +136,7 @@
 | 语言包 | ✅ | `getLocalizationTargetInfo` 列表 + `setOption(language_pack_id)` 切换 + `getLanguagePackStrings` 全量拉取喂 `Store::tr`（复数按 zero/one/other 槽选；更新经 `UpdateLanguagePackStrings` 合入；官方包键未覆盖处回落英文原文） | `lang_pack_section` |
 | 存储/缓存清理 | ✅ | `getStorageStatistics` 摘要 + `optimizeStorage` 清理按钮 | `settings_storage_section` |
 | 屏蔽用户管理 | ✅ | `getBlockedMessageSenders` + `setMessageSenderBlockList(None)` 解除（Privacy 区块） | `settings_blocked_section` |
-| 会话右键菜单（已读/未读/置顶/归档/静音/加入/离开/清空历史） | ✅ | 行 context_menu；`deleteChatHistory` 清空历史 | — |
+| 会话右键菜单（已读/未读/置顶/归档/静音/加入/离开/清空历史） | ✅ | 行 context_menu；`deleteChatHistory` 清空历史；行悬停 ⋮ 快捷菜单复用同一命令集（`Menu::new` + `.icon_only()`）—— 悬停显现 ⋮（悬停时时间戳隐藏，Desktop 行为）且点击实测打开菜单（r36_hovmenu1400/800/600.png） | `probe_hover_enter_fires` + 实测截图 |
 | 收藏夹（Saved Messages） | ✅ | TDLib 中即本人私聊，走普通会话路径 | — |
 
 ## 8. 明确不计划（本期范围外）
@@ -143,6 +145,6 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：95 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：1 项（拖放文件发送，框架缺口 DOGFOOD r34-1）
+- 已实现 ✅：97 项 ｜ 部分 🟡：1 项（多选批处理 —— 选择条按钮死按钮，DOGFOOD r36-5）｜ 未实现 ❌：2 项（拖放文件发送 DOGFOOD r34-1，全局快捷键 DOGFOOD r36-1）
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
-- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。r35 补录：消息内搜索 n/N+^/v+命中高亮、@提及跳转钮、悬停↩快捷回复、双击❤️快反应、侧边栏搜索命中高亮。
+- r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。r35 补录：消息内搜索 n/N+^/v+命中高亮、@提及跳转钮、悬停↩快捷回复、双击❤️快反应、侧边栏搜索命中高亮。r36 补录：置顶消息多选弹层实测（r36_pinned1400/800/600）、会话行悬停 ⋮ 菜单实测（r36_hovmenu*，悬停时时间戳隐藏）、composer Markdown→实体+demo 回显实测（r36_echo*）、多选条实测部分（r36-5 死按钮记 🟡）、全局快捷键记 ❌（r36-1）。搜索命中高亮配色修正为 M3 container+on-*（r36_marks*）。

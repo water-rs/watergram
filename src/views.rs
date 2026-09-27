@@ -27,7 +27,8 @@ use waterui::shape::{Circle, Path, RoundedRectangle, ShapeExt, UnevenRoundedRect
 use waterui::graphics::color::{BorderColor, Srgb, WithOpacity};
 use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Error, Foreground,
-    MutedForeground, Surface, SurfaceVariant,
+    MutedForeground, SelectionForeground, Surface, TertiaryContainer,
+    SurfaceVariant,
 };
 use waterui::handler::SharedAction;
 use waterui::widget::condition::when;
@@ -45,7 +46,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{highlight_styled, AccountRow, ChatRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{highlight_styled, AccountRow, ChatRow, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -59,7 +60,9 @@ use mdi::at;
 use mdi::chevron_down;
 use mdi::chevron_up;
 use mdi::close;
+use mdi::content_copy;
 use mdi::delete_sweep;
+use mdi::dots_vertical;
 use mdi::account_plus;
 use mdi::emoticon;
 use mdi::link_variant;
@@ -332,16 +335,24 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 || r.preview.to_lowercase().contains(&q)
                         })
                         .map(|mut r| {
-                            let hl = Color::from(AccentContainer);
+                            // r36: tertiary-container box + light selection
+                            // foreground (secondary_container blends into the
+                            // row fill; the tertiary hue stays visible).
+                            let (bg, fg) = (
+                                Color::from(TertiaryContainer),
+                                Color::from(SelectionForeground),
+                            );
                             r.title_styled = highlight_styled(
                                 &StyledStr::plain(r.title.clone()),
                                 &q,
-                                hl.clone(),
+                                bg.clone(),
+                                fg.clone(),
                             );
                             r.preview_styled = highlight_styled(
                                 &StyledStr::plain(r.preview.clone()),
                                 &q,
-                                hl,
+                                bg,
+                                fg,
                             );
                             r
                         })
@@ -351,9 +362,9 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
     );
     let server_results = SignalCollection::new(store.server_results.clone());
     let show_results = store.server_results.map(|v| !v.is_empty()).distinct();
-    // Was `store.search.debounce(400ms)` — the debounced signal never
-    // re-emitted on hydrolysis, so sidebar search never ran (DOGFOOD r35-4).
-    // Filtering a handful of local rows is cheap.
+    // hydrolysis#228 workaround: `store.search.debounce(400ms)` never
+    // re-emitted on hydrolysis (DOGFOOD r35-4). Restore `.debounce(
+    // Duration::from_millis(400))` once #228 lands.
     let search_now = store.search.clone();
     let rows_store = store.clone();
     let res_store = store.clone();
@@ -418,34 +429,40 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         when(forward_mode, move || {
             let noattr = store.forward_noattr.clone();
             let comment_b = store.forward_comment.clone();
-            hstack((
-                share_variant().tint(Accent).size(16.0, 16.0),
-                text("Select a chat to forward to")
+            // Two rows: the comment field + no-attribution chip alone
+            // overfill the 340pt sidebar, wrapping the caption into a
+            // narrow shard.
+            vstack((
+                hstack((
+                    share_variant().tint(Accent).size(16.0, 16.0),
+                    text("Select a chat to forward to")
+                        .caption()
+                        .foreground(Accent),
+                    spacer(),
+                    icon_button(close(), "Cancel", |store: Store| {
+                        store.forward_message.set(None);
+                        store.forward_ids.set(Vec::new());
+                        store.forward_comment.set_from("");
+                    }),
+                )),
+                hstack((
+                    field("Comment", &comment_b)
+                        .prompt("Add a comment…")
+                        .hide_label(),
+                    text!(
+                        "Without attribution{mark}",
+                        mark = noattr.map(|b: bool| Str::from(if b { " ✓" } else { "" }))
+                    )
                     .caption()
-                    .foreground(Accent),
-                field("Comment", &comment_b)
-                    .prompt("Add a comment…")
-                    .hide_label()
-                    .width(150.0),
-                spacer(),
-                text!(
-                    "Without attribution{mark}",
-                    mark = noattr.map(|b: bool| Str::from(if b { " ✓" } else { "" }))
-                )
-                .caption()
-                .padding_with((2.0, 8.0))
-                .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
-                .on_tap(|store: Store| {
-                    let v = !store.forward_noattr.snapshot();
-                    store.forward_noattr.set(v);
-                })
-                .a11y_label("Forward without attribution")
-                .a11y_role(AccessibilityRole::Button),
-                icon_button(close(), "Cancel", |store: Store| {
-                    store.forward_message.set(None);
-                    store.forward_ids.set(Vec::new());
-                    store.forward_comment.set_from("");
-                }),
+                    .padding_with((2.0, 8.0))
+                    .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+                    .on_tap(|store: Store| {
+                        let v = !store.forward_noattr.snapshot();
+                        store.forward_noattr.set(v);
+                    })
+                    .a11y_label("Forward without attribution")
+                    .a11y_role(AccessibilityRole::Button),
+                )),
             ))
             .padding_with((8.0, 12.0))
             .background(Surface)
@@ -678,7 +695,6 @@ pub(crate) fn avatar(store: Store, file_id: i32, title: &str, size: f32, accent:
 
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
 pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
-    let id = row.id;
     let unread = row.unread;
     // Telegram Desktop: a saved draft replaces the last-message preview with
     // a red "Draft: <text>" line; a live typing indicator still wins.
@@ -752,41 +768,75 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         spacer().width(1.0).anyview()
     };
 
-    hstack((
-        avatar(store, row.photo_file, &row.title, 44.0, row.accent),
-        vstack((
-            hstack((
-                kind_icon(&row.kind_icon),
-                if row.title_styled.is_empty() {
-                    text(row.title.clone())
-                        .body()
-                        .line_limit(ONE)
-                        .foreground(Foreground)
-                } else {
-                    text(row.title_styled.clone())
-                        .body()
-                        .line_limit(ONE)
-                        .foreground(Foreground)
-                },
-                spacer(),
-                when(row.online, || text("●").caption().foreground(Accent)),
-                text(row.time.clone()).caption().muted(),
+    // Hover ⋮ at the row's top-trailing edge (Desktop reveals it over the
+    // timestamp); same action list as the right-click context menu.
+    let hov = Binding::bool(false);
+    let hov_show = hov.clone();
+    let hov_off = hov.not();
+    let row_for_menu = row.clone();
+    zstack((
+        hstack((
+            avatar(store, row.photo_file, &row.title, 44.0, row.accent),
+            vstack((
+                hstack((
+                    kind_icon(&row.kind_icon),
+                    if row.title_styled.is_empty() {
+                        text(row.title.clone())
+                            .body()
+                            .line_limit(ONE)
+                            .foreground(Foreground)
+                    } else {
+                        text(row.title_styled.clone())
+                            .body()
+                            .line_limit(ONE)
+                            .foreground(Foreground)
+                    },
+                    spacer(),
+                    when(row.online, || text("●").caption().foreground(Accent)),
+                    // Desktop hides the timestamp while the hover ⋮ covers it.
+                    {
+                        let t = row.time.clone();
+                        when(hov_off, move || {
+                            let t = t.clone();
+                            text(t).caption().muted()
+                        })
+                    },
+                ))
+                .spacing(4.0),
+                hstack((
+                    preview_line,
+                    spacer(),
+                    mention_badge,
+                    badge,
+                ))
+                .spacing(4.0),
             ))
-            .spacing(4.0),
-            hstack((
-                preview_line,
-                spacer(),
-                mention_badge,
-                badge,
-            ))
-            .spacing(4.0),
+            .spacing(2.0)
+            .leading(),
         ))
-        .spacing(2.0)
-        .leading(),
+        .spacing(10.0)
+        .padding_with((6.0, 10.0)),
+        when(hov_show, move || {
+            Menu::new(
+                label("Chat actions").icon(dots_vertical()).icon_only(),
+                chat_row_menu(&row_for_menu),
+            )
+        }),
     ))
-    .spacing(10.0)
-    .padding_with((6.0, 10.0))
-    .context_menu((
+    .alignment(TopTrailing)
+    .on_hover_enter(|State(h): State<Binding<bool>>| h.set(true))
+    .on_hover_exit(|State(h): State<Binding<bool>>| h.set(false))
+    .state(&hov)
+    .context_menu(chat_row_menu(&row))
+}
+
+/// Chat-row action menu — shared between the right-click context menu
+/// and the hover ⋮ button (Desktop shows the same actions on both).
+fn chat_row_menu(
+    row: &ChatRow,
+) -> impl MenuView {
+    let id = row.id;
+    (
         "Mark read".action(move |store: Store| store.mark_read(id)),
         if row.marked_unread {
             "Mark as read (clear flag)"
@@ -805,7 +855,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
         "Join chat".action(move |store: Store| store.join(id)),
         "Clear history".action(move |store: Store| store.clear_history(id)),
         "Leave chat".action(move |store: Store| store.leave(id)),
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +883,19 @@ pub(crate) fn chat_column(store: Store) -> impl View {
     let scroller = store.scroll.clone();
     let has_pinned = store.pinned_label.map(|s: Str| !s.is_empty()).distinct();
     let pinned_label = store.pinned_label.clone();
+    // Banner counter "·2" when several messages are pinned (Desktop shows
+    // a progress tick on the pin icon; the count reads the same info).
+    let pinned_count = store
+        .pinned_msgs
+        .map(|v: Vec<PinnedRow>| {
+            if v.len() > 1 {
+                Str::from(format!(" · {}", v.len()))
+            } else {
+                Str::from("")
+            }
+        })
+        .distinct();
+    let pinned_rows = SignalCollection::new(store.pinned_msgs.clone());
     let search_open = store.chat_search_open.clone();
     let search_b = store.chat_search.clone();
     let search_results_b = store.chat_search_results.clone();
@@ -911,19 +974,41 @@ pub(crate) fn chat_column(store: Store) -> impl View {
     });
     let esc_stickers = modal_escape(store.clone(), |s| s.stickers_open.set(false));
             vstack((
-    when(has_pinned, move || {
-        hstack((
-            pin().tint(Accent).size(14.0, 14.0).a11y_hidden(true),
-            text!("{pinned_label}")
-                .caption()
-                .line_limit(ONE)
-                .foreground(Accent),
-            spacer(),
-        ))
-        .padding_with((6.0, 12.0))
-        .background(Surface)
-        .on_tap(|store: Store| store.jump_to_message(store.pinned_id.get()))
-    }),
+    vstack((
+        when(has_pinned, move || {
+            hstack((
+                pin().tint(Accent).size(14.0, 14.0).a11y_hidden(true),
+                text!("{pinned_label}{pinned_count}")
+                    .caption()
+                    .line_limit(ONE)
+                    .foreground(Accent),
+                spacer(),
+            ))
+            .padding_with((6.0, 12.0))
+            .on_tap(|store: Store| store.pinned_tap())
+            .background(Surface)
+        }),
+        // Multi-pin list (Desktop's "View all pinned" popup): each row
+        // jumps to that message and closes the popup. Kept as a sibling
+        // `when`, not nested in the banner's payload — a `when` inside
+        // another `when`'s payload never materializes live (r36-2).
+        when(store.pinned_popup.clone(), move || {
+            VStack::for_each(pinned_rows.clone(), |row: PinnedRow| {
+                let id = row.id;
+                let label = row.label.clone();
+                hstack((
+                    pin().tint(MutedForeground).size(12.0, 12.0).a11y_hidden(true),
+                    text(label.clone()).caption().line_limit(ONE),
+                    spacer(),
+                ))
+                .spacing(6.0)
+                .padding_with((4.0, 12.0))
+                .on_tap(move |store: Store| store.pinned_jump(id))
+                .a11y_label(Str::from(format!("Jump to pinned: {label}")))
+            })
+            .background(SurfaceVariant)
+        }),
+    )),
     // Multi-select action bar (Desktop's "N selected" header state).
     when(sel_active, move || {
         hstack((
@@ -931,6 +1016,9 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 .caption()
                 .bold(),
             spacer(),
+            icon_button(content_copy(), "Copy selected", |store: Store| {
+                store.copy_selected()
+            }),
             icon_button(share_variant(), "Forward selected", |store: Store| {
                 store.forward_selected()
             }),
@@ -1466,9 +1554,9 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
 
     let composer_b = store.composer.clone();
     let search_open2 = store.chat_search_open.clone();
-    // Debounce was `chat_search.debounce(400ms)`; the debounced signal never
-    // re-emitted on hydrolysis, so marks/counter never appeared — see
-    // DOGFOOD r35-4. The loaded-window search is a cheap snapshot scan.
+    // hydrolysis#228 workaround: `chat_search.debounce(400ms)` never
+    // re-emitted on hydrolysis (DOGFOOD r35-4). Restore `.debounce(
+    // Duration::from_millis(400))` once #228 lands.
     let search_live = store.chat_search.clone();
     let viewer_open = store.viewer.is_some().distinct();
     let store_for_viewer = store.clone();
@@ -1561,7 +1649,8 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
             .item(NavigationToolbarItem::new(
                 NavigationToolbarPlacement::TopBarTrailing,
                 icon_button(magnify(), "Search in chat", move |store: Store| {
-                    store.chat_search_open.set(!search_open2.snapshot())
+                    let v = !search_open2.snapshot();
+                    store.chat_search_open.set(v);
                 }),
             ))
             .item(NavigationToolbarItem::new(
@@ -2204,6 +2293,7 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
     let hov = Binding::bool(false);
     let r_quick = row.clone();
     let r_dbl = row.clone();
+    let r_sel = row.clone();
     let quick_reply = when(hov.clone(), move || {
         let rr = r_quick.clone();
         reply()
@@ -2227,6 +2317,16 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
                 .accessory(reaction_strip(&row)),
         )
         .on_tap_gesture_count(2, move |store: Store| store.quick_react(&r_dbl))
+        // A tap landing on the bubble is owned exclusively by the deepest
+        // gesture group — the row-level select toggle never sees it
+        // (hydrolysis gesture groups: one group owns a point; chained
+        // gestures on this view share the bubble's group), so multi-select
+        // needs its own tap here. It is inert until selection is active.
+        .on_tap(move |store: Store| {
+            if !r_sel.is_service && !store.selected_msgs.snapshot().is_empty() {
+                store.toggle_select(r_sel.id);
+            }
+        })
         .anyview();
 
     let placed = if row.outgoing {

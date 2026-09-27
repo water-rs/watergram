@@ -16,7 +16,9 @@ use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
 use waterui::color::Srgb;
-use waterui::theme::color::{AccentContainer, AccentForeground, Foreground};
+use waterui::theme::color::{
+    AccentForeground, Foreground, SelectionForeground, TertiaryContainer,
+};
 use waterui::form::secure::Secure;
 use waterui::text::styled::{Style, StyledStr};
 use waterui::layout::{Rect, ScrollController, Size};
@@ -99,6 +101,14 @@ impl Config {
             let _ = std::fs::write(path, json);
         }
     }
+}
+
+/// One row in the pinned-messages popup.
+#[derive(Clone, Identifiable)]
+pub struct PinnedRow {
+    #[id]
+    pub id: i64,
+    pub label: Str,
 }
 
 /// One row in the chat list. `Ord` is inverted so `Vec::sort` orders
@@ -527,6 +537,14 @@ pub struct Store {
     /// Excerpt of the chat's pinned message (empty = none).
     pub pinned_label: Binding<Str>,
     pub pinned_id: Rc<Cell<i64>>,
+    /// All pinned messages (most recent first) driving the banner counter
+    /// and the pinned-messages popup; `pinned_id`/`pinned_label` track the
+    /// banner's current entry (tap cycles through them, Desktop-style).
+    pub pinned_msgs: Binding<Vec<PinnedRow>>,
+    /// Index into `pinned_msgs` the banner is showing.
+    pub pinned_idx: Rc<Cell<usize>>,
+    /// The pinned-messages list popup under the banner.
+    pub pinned_popup: Binding<bool>,
     /// In-chat message search state.
     pub chat_search_open: Binding<bool>,
     pub chat_search: Binding<Str>,
@@ -973,12 +991,21 @@ pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
     styled_from_formatted_mask(ft, Some(Color::from(Srgb::BLACK)))
 }
 
-/// Return `base` with every case-insensitive occurrence of `q` given a span
-/// `background` (r35: in-chat + sidebar search highlighting). Byte-offset
-/// matching runs on the lowercased copy, which is only safe while
-/// lowercasing preserves byte length — otherwise fall back to a
-/// case-sensitive match so offsets never mis-slice the original.
-pub(crate) fn highlight_styled(base: &StyledStr, q: &str, hl: Color) -> StyledStr {
+/// Return `base` with every case-insensitive occurrence of `q` marked with
+/// the `hl_bg`/`hl_fg` span pair (r35: in-chat + sidebar search highlighting;
+/// r36: TertiaryContainer+SelectionForeground — SelectionContainer resolves to
+/// secondary_container, which is nearly identical to the incoming bubble's
+/// fill and left the mark invisible; the tertiary hue contrasts both fills).
+/// Byte-offset matching
+/// runs on the lowercased copy, which is only safe while lowercasing
+/// preserves byte length — otherwise fall back to a case-sensitive match so
+/// offsets never mis-slice the original.
+pub(crate) fn highlight_styled(
+    base: &StyledStr,
+    q: &str,
+    hl_bg: Color,
+    hl_fg: Color,
+) -> StyledStr {
     if q.is_empty() {
         return base.clone();
     }
@@ -999,7 +1026,8 @@ pub(crate) fn highlight_styled(base: &StyledStr, q: &str, hl: Color) -> StyledSt
                 out.push(text[at..s].to_string(), style.clone());
             }
             let mut hit = style.clone();
-            hit.background = Some(hl.clone());
+            hit.background = Some(hl_bg.clone());
+            hit.foreground = Some(hl_fg.clone());
             out.push(text[s..e].to_string(), hit);
             at = e;
         }
@@ -1015,6 +1043,58 @@ pub(crate) fn has_spoiler_entity(ft: &types::FormattedText) -> bool {
     ft.entities
         .iter()
         .any(|e| matches!(e.r#type, enums::TextEntityType::Spoiler))
+}
+
+/// Telegram Desktop's composer markdown — `*b*` `_i_` `` `m` `` `~~s~~`
+/// `||spoiler||` — parsed into `FormattedText` entities on send. Entity
+/// offsets are UTF-16 code units (TDLib's contract). Non-nesting: the
+/// earliest opening delimiter wins, unclosed/empty pairs stay literal.
+pub(crate) fn parse_markdown(input: &str) -> types::FormattedText {
+    const DELIMS: &[&str] = &["**", "~~", "||", "__", "*", "_", "`"];
+    fn kind(d: &str) -> enums::TextEntityType {
+        match d {
+            "**" | "*" => enums::TextEntityType::Bold,
+            "__" | "_" => enums::TextEntityType::Italic,
+            "~~" => enums::TextEntityType::Strikethrough,
+            "||" => enums::TextEntityType::Spoiler,
+            _ => enums::TextEntityType::Code,
+        }
+    }
+    let mut clean = String::with_capacity(input.len());
+    let mut entities = Vec::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        let Some(start) = rest.find(|c| "*_`~|".contains(c)) else {
+            clean.push_str(rest);
+            break;
+        };
+        clean.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let Some(delim) = DELIMS.iter().find(|d| tail.starts_with(**d)) else {
+            unreachable!("find() matched a delimiter char");
+        };
+        let after = &tail[delim.len()..];
+        match after.find(*delim) {
+            Some(close) if close > 0 => {
+                let inner = &after[..close];
+                entities.push(types::TextEntity {
+                    offset: clean.encode_utf16().count() as i32,
+                    length: inner.encode_utf16().count() as i32,
+                    r#type: kind(delim),
+                });
+                clean.push_str(inner);
+                rest = &after[close + delim.len()..];
+            }
+            _ => {
+                clean.push_str(delim);
+                rest = after;
+            }
+        }
+    }
+    types::FormattedText {
+        text: clean,
+        entities,
+    }
 }
 
 fn position_in<'a>(chat: &'a types::Chat, list: &enums::ChatList) -> Option<&'a types::ChatPosition> {
@@ -1130,6 +1210,9 @@ impl Store {
             last_typing_sent: Rc::new(Cell::new(Instant::now())),
             pinned_label: Binding::container(Str::from("")),
             pinned_id: Rc::new(Cell::new(0)),
+            pinned_msgs: Binding::default(),
+            pinned_idx: Rc::new(Cell::new(0)),
+            pinned_popup: Binding::bool(false),
             chat_search_open: Binding::bool(false),
             chat_search: Binding::container(Str::from("")),
             chat_search_results: Binding::<Vec<MessageRow>>::default(),
@@ -1238,6 +1321,22 @@ impl Store {
         }
     }
 
+    /// Demo pinned state for chat 1: two entries — the banner shows the
+    /// latest and cycles on tap (Desktop), and the banner's tap opens the
+    /// pinned list popup when several messages are pinned.
+    fn demo_seed_pinned(&self, chat_id: i64) {
+        if chat_id != 1 {
+            return;
+        }
+        self.pinned_label.set_from("Alice: shipping it 🚀");
+        self.pinned_id.set(14);
+        self.pinned_msgs.set(vec![
+            PinnedRow { id: 14, label: Str::from("Alice: shipping it 🚀") },
+            PinnedRow { id: 12, label: Str::from("Alice: nice. and the NV12 conversion?") },
+        ]);
+        self.pinned_idx.set(0);
+    }
+
     /// Populate the store with fake data for screenshots/demos on
     /// device-less VMs (`WATERGRAM_DEMO=1`). Never runs on the real path.
     pub fn seed_demo(&self) {
@@ -1311,8 +1410,7 @@ impl Store {
                 .insert(1, path.to_string_lossy().to_string());
             self.files_version.add_assign(1);
         }
-        self.pinned_label.set_from("Alice: shipping it 🚀");
-        self.pinned_id.set(14);
+        self.demo_seed_pinned(1);
         self.sessions.set(vec![
             SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
             SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
@@ -2997,6 +3095,9 @@ impl Store {
         self.oldest_message.set(0);
         self.pinned_label.set_from("");
         self.pinned_id.set(0);
+        self.pinned_msgs.set(Vec::new());
+        self.pinned_idx.set(0);
+        self.pinned_popup.set(false);
         self.chat_search_open.set(false);
         self.chat_search.set_from("");
         self.chat_search_results.set(Vec::new());
@@ -3039,6 +3140,7 @@ impl Store {
                 }
             }
             self.set_messages(msgs);
+            self.demo_seed_pinned(chat_id);
             self.scroll_to_open(chat_id);
             return;
         }
@@ -3237,7 +3339,10 @@ impl Store {
         self.set_messages(self.messages.snapshot());
     }
 
-    /// Fetch the chat's pinned message into `pinned_label`/`pinned_id`.
+    /// Fetch the chat's pinned messages into `pinned_msgs` plus the
+    /// banner's `pinned_label`/`pinned_id` pair. `getChatPinnedMessage`
+    /// returns only the latest pin; `searchChatMessages(Pinned)` fills
+    /// the list popup's rows.
     #[allow(if_else_view)] // string pick, not a view
     async fn refresh_pinned(&self, chat_id: i64) {
         match functions::get_chat_pinned_message(chat_id, self.client_id.get()).await {
@@ -3252,6 +3357,60 @@ impl Store {
                 self.pinned_label.set_from("");
             }
         }
+        // Full pinned list for the popup (searchChatMessages with the
+        // Pinned filter — Desktop's "View all pinned" path). Keep the
+        // single-pin state working if the search fails.
+        if let Ok(enums::FoundChatMessages::FoundChatMessages(found)) = functions::search_chat_messages(
+            chat_id,
+            None,
+            String::new(),
+            None,
+            0,
+            0,
+            100,
+            Some(enums::SearchMessagesFilter::Pinned),
+            self.client_id.get(),
+        )
+        .await
+        {
+            let mut entries: Vec<PinnedRow> = found
+                .messages
+                .iter()
+                .map(|m| {
+                    let (t, _, label, _) = Self::content_preview(&m.content);
+                    PinnedRow {
+                        id: m.id,
+                        label: if t.is_empty() { label } else { t },
+                    }
+                })
+                .collect();
+            entries.sort_by_key(|e| std::cmp::Reverse(e.id));
+            if !entries.is_empty() {
+                self.pinned_msgs.set(entries);
+                self.pinned_idx.set(0);
+            } else {
+                self.pinned_msgs.set(Vec::new());
+            }
+        }
+    }
+
+    /// Banner tap: cycle to the next pinned message and jump to it
+    /// (Desktop advances the bar through every pin). Single pin jumps
+    /// straight to it, same as before.
+    pub fn pinned_tap(&self) {
+        let list = self.pinned_msgs.snapshot();
+        if list.len() > 1 {
+            let open = !self.pinned_popup.snapshot();
+            self.pinned_popup.set(open);
+            return;
+        }
+        self.jump_to_message(self.pinned_id.get());
+    }
+
+    /// Jump to a pinned message from the popup, then close it.
+    pub fn pinned_jump(&self, message_id: i64) {
+        self.pinned_popup.set(false);
+        self.jump_to_message(message_id);
     }
 
     pub fn pin_message(&self, message_id: i64) {
@@ -3274,7 +3433,12 @@ impl Store {
                 })
                 .unwrap_or_default();
             self.pinned_id.set(message_id);
-            self.pinned_label.set(label);
+            self.pinned_label.set(label.clone());
+            let mut pins = self.pinned_msgs.snapshot();
+            pins.retain(|r| r.id != message_id);
+            pins.insert(0, PinnedRow { id: message_id, label });
+            self.pinned_msgs.set(pins);
+            self.pinned_idx.set(0);
             // A real pinChatMessage(notify) produces a service row in
             // history; mirror it so the demo chat shows the same line.
             let mut rows = self.messages.snapshot();
@@ -3346,8 +3510,21 @@ impl Store {
         let chat_id = self.open_chat.get();
         let client = self.client_id.get();
         if client == 0 {
-            self.pinned_id.set(0);
-            self.pinned_label.set_from("");
+            let mut pins = self.pinned_msgs.snapshot();
+            pins.retain(|r| r.id != message_id);
+            self.pinned_msgs.set(pins);
+            self.pinned_idx.set(0);
+            self.pinned_popup.set(false);
+            match self.pinned_msgs.snapshot().first() {
+                Some(row) => {
+                    self.pinned_id.set(row.id);
+                    self.pinned_label.set(row.label.clone());
+                }
+                None => {
+                    self.pinned_id.set(0);
+                    self.pinned_label.set_from("");
+                }
+            }
             return;
         }
         let store = self.clone();
@@ -3453,7 +3630,12 @@ impl Store {
                 } else {
                     r.styled.clone()
                 };
-                highlight_styled(&base, q, Color::from(AccentContainer))
+                highlight_styled(
+                    &base,
+                    q,
+                    Color::from(TertiaryContainer),
+                    Color::from(SelectionForeground),
+                )
             } else {
                 StyledStr::empty()
             };
@@ -3504,7 +3686,12 @@ impl Store {
     }
 
     /// r35: Desktop's double-tap quick-react — toggles the default ❤️.
+    /// Inert while multi-select is active: there a double-tap is just two
+    /// selection clicks, not a reaction.
     pub fn quick_react(&self, row: &MessageRow) {
+        if !self.selected_msgs.snapshot().is_empty() {
+            return;
+        }
         self.toggle_reaction(row, "❤️");
     }
 
@@ -4283,6 +4470,9 @@ impl Store {
         if chat_id == 0 || text.trim().is_empty() {
             return;
         }
+        // Desktop's composer markdown is applied at send time, not while
+        // typing (the draft stays plain text).
+        let ft = parse_markdown(&text);
         if let Some(msg_id) = self.editing.snapshot() {
             self.editing.set(None);
             self.composer.set_from("");
@@ -4294,10 +4484,7 @@ impl Store {
                     msg_id,
                     enums::InputMessageContent::InputMessageText(
                         types::InputMessageText {
-                            text: types::FormattedText {
-                                text,
-                                entities: Vec::new(),
-                            },
+                            text: ft,
                             link_preview_options: None,
                             clear_draft: true,
                         },
@@ -4309,7 +4496,8 @@ impl Store {
             .detach();
             return;
         }
-        let reply = self.reply_to.snapshot().map(|id| {
+        let reply_to_id = self.reply_to.snapshot();
+        let reply = reply_to_id.map(|id| {
             enums::InputMessageReplyTo::Message(types::InputMessageReplyToMessage {
                 message_id: id,
                 quote: None,
@@ -4320,6 +4508,12 @@ impl Store {
         self.composer.set_from("");
         self.set_draft(chat_id, None);
         let client = self.client_id.get();
+        if client == 0 {
+            // Demo: optimistic local echo so the send path — including
+            // markdown entities — is exercisable without a connection.
+            self.demo_echo(ft, reply_to_id);
+            return;
+        }
         spawn_local(async move {
             let _ = functions::send_message(
                 chat_id,
@@ -4328,10 +4522,7 @@ impl Store {
                 options,
                 enums::InputMessageContent::InputMessageText(
                     types::InputMessageText {
-                        text: types::FormattedText {
-                            text,
-                            entities: Vec::new(),
-                        },
+                        text: ft,
                         link_preview_options: None,
                         clear_draft: true,
                     },
@@ -4341,6 +4532,79 @@ impl Store {
             .await;
         })
         .detach();
+    }
+
+    /// Demo-mode optimistic echo for `send_opt` — appends the outgoing
+    /// MessageRow locally (same row shape `set_messages` produces) so the
+    /// send path — including markdown entities — is exercisable without a
+    /// TDLib connection.
+    fn demo_echo(&self, ft: types::FormattedText, reply_to_id: Option<i64>) {
+        let mut rows = self.messages.snapshot();
+        let next_id = rows.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+        let reply_excerpt = reply_to_id
+            .and_then(|id| rows.iter().find(|r| r.id == id))
+            .map(|r| {
+                let t = r.text.to_string();
+                Str::from(t.chars().take(28).collect::<String>())
+            })
+            .unwrap_or_default();
+        let spoiler = has_spoiler_entity(&ft);
+        let mask = spoiler.then(|| Color::from(AccentForeground));
+        let now = chrono::Local::now().timestamp() as i32;
+        rows.push(MessageRow {
+            id: next_id,
+            sender: Str::from(""),
+            sender_accent: -1,
+            text: Str::from(ft.text.clone()),
+            time: fmt_time(now),
+            outgoing: true,
+            read_out: false,
+            can_edit: true,
+            reply_excerpt,
+            reply_to_id: reply_to_id.unwrap_or(0),
+            media_file: 0,
+            play_file: 0,
+            media_label: Str::from(""),
+            reaction_chips: Vec::new(),
+            failed: false,
+            pending: true,
+            highlighted: false,
+            unread_divider: false,
+            group_first: true,
+            group_last: true,
+            avatar_col: false,
+            show_avatar: false,
+            sender_photo: 0,
+            day_header: false,
+            day_label: Str::from(""),
+            edited: false,
+            my_reaction: Str::from(""),
+            styled: styled_from_formatted_mask(&ft, mask),
+            styled_open: if spoiler {
+                styled_from_formatted_mask(&ft, None)
+            } else {
+                StyledStr::empty()
+            },
+            has_spoiler: spoiler,
+            search_hit: false,
+            search_styled: StyledStr::empty(),
+            mentions_me: false,
+            link_site: Str::from(""),
+            link_title: Str::from(""),
+            link_desc: Str::from(""),
+            forwarded_from: Str::from(""),
+            sender_user: self.my_id.get(),
+            sender_chat: 0,
+            fwd_user: 0,
+            fwd_chat: 0,
+            link_url: Str::from(""),
+            poll: None,
+            is_service: false,
+            day: local_day(now),
+        });
+        self.set_messages(rows);
+        // Outgoing always follows the tail (same as the Update::NewMessage path).
+        self.scroll_bottom();
     }
 
     /// Build the right `InputMessageContent` for a local file path based on
@@ -4870,6 +5134,31 @@ impl Store {
             && let Ok(mut cb) = arboard::Clipboard::new()
         {
             let _ = cb.set_text(text);
+        }
+    }
+
+    /// Batch-copy the selected messages: texts joined by newlines in
+    /// message order (Desktop's multi-select Copy keeps the selection).
+    pub fn copy_selected(&self) {
+        let ids = self.selected_msgs.snapshot();
+        if ids.is_empty() {
+            return;
+        }
+        let joined = self
+            .messages
+            .snapshot()
+            .iter()
+            .filter(|r| ids.contains(&r.id))
+            .map(|r| r.text.to_string())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<String>>()
+            .join("\n");
+        if joined.is_empty() {
+            return;
+        }
+        self.clipboard.set_from(joined.clone());
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            let _ = cb.set_text(joined);
         }
     }
 

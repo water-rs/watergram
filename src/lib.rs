@@ -180,7 +180,7 @@ pub fn app(mut env: Environment) -> App {
 #[cfg(test)]
 mod tests {
     use chrono::Datelike;
-    use crate::state::{ChatRow, FolderRow, MessageRow, ReactionChip, Screen, SharedMediaRow, Store};
+    use crate::state::{ChatRow, FolderRow, MessageRow, PinnedRow, ReactionChip, Screen, SharedMediaRow, Store, parse_markdown};
     use crate::views;
     use waterui::accessibility::AccessibilityRole;
     use waterui::layout::frame::Frame;
@@ -3605,24 +3605,28 @@ mod tests {
     fn sidebar_search_highlight_splits() {
         use crate::state::highlight_styled;
         use waterui::text::styled::StyledStr;
-        use waterui::theme::color::AccentContainer;
+        use waterui::theme::color::{SelectionContainer, SelectionForeground};
         let s = highlight_styled(
             &StyledStr::plain("Alice Wu"),
             "wu",
-            Color::from(AccentContainer),
+            Color::from(SelectionContainer),
+            Color::from(SelectionForeground),
         );
         let chunks = s.chunks();
+        // r36: the mark must carry BOTH roles — a SelectionContainer fill
+        // alone leaves dark text illegible on light bubbles.
         assert!(
-            chunks
-                .iter()
-                .any(|(t, st)| t.as_str() == "Wu" && st.background.is_some()),
-            "matched substring not highlighted: {chunks:?}"
+            chunks.iter().any(|(t, st)| t.as_str() == "Wu"
+                && st.background.is_some()
+                && st.foreground.is_some()),
+            "matched substring not highlighted legibly: {chunks:?}"
         );
         // A query that doesn't match leaves the text plain.
         let none = highlight_styled(
             &StyledStr::plain("Alice Wu"),
             "zzz",
-            Color::from(AccentContainer),
+            Color::from(SelectionContainer),
+            Color::from(SelectionForeground),
         );
         assert!(none.chunks().iter().all(|(_, st)| st.background.is_none()));
     }
@@ -3653,6 +3657,131 @@ mod tests {
                 .any(|c| c.emoji.as_str() == "❤️" && c.chosen),
             "no chosen ❤️ chip after quick-react"
         );
+    }
+
+    #[test]
+    fn pinned_popup_opens_and_jumps() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        // Demo chat 1 seeds two pinned messages (14, 12): tapping the banner
+        // opens the popup instead of jumping.
+        assert_eq!(store.pinned_msgs.snapshot().len(), 2);
+        store.pinned_tap();
+        assert!(store.pinned_popup.snapshot(), "multi-pin tap should open popup");
+        store.pinned_jump(12);
+        assert!(!store.pinned_popup.snapshot(), "popup should close on jump");
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 12)
+            .unwrap();
+        assert!(row.highlighted, "jump target should be highlighted");
+    }
+
+    #[test]
+    fn pinned_tap_single_jumps_directly() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store
+            .pinned_msgs
+            .set(vec![PinnedRow { id: 12, label: Str::from("x") }]);
+        store.pinned_id.set(12);
+        store.pinned_tap();
+        assert!(!store.pinned_popup.snapshot(), "single pin should jump, not open");
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 12)
+            .unwrap();
+        assert!(row.highlighted);
+    }
+
+    #[test]
+    fn copy_selected_joins_in_message_order() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let rows = store.messages.snapshot();
+        let ids: Vec<i64> = rows
+            .iter()
+            .filter(|r| !r.is_service && !r.text.is_empty())
+            .take(2)
+            .map(|r| r.id)
+            .collect();
+        // Select in reverse order — the copy must still follow message order.
+        store.toggle_select(ids[1]);
+        store.toggle_select(ids[0]);
+        store.copy_selected();
+        let clip = store.clipboard.snapshot();
+        let first = rows.iter().find(|r| r.id == ids[0]).unwrap().text.to_string();
+        let second = rows.iter().find(|r| r.id == ids[1]).unwrap().text.to_string();
+        assert_eq!(
+            clip.as_str(),
+            format!("{first}\n{second}"),
+            "copy must join selected texts in message order"
+        );
+    }
+
+    #[test]
+    fn parse_markdown_strips_delimiters_and_offsets_utf16() {
+        let ft = parse_markdown("hi *bold* _it_ `m` ~~s~~ ||sec|| end");
+        assert_eq!(ft.text.as_str(), "hi bold it m s sec end");
+        use tdlib_rs::enums::TextEntityType as T;
+        let kinds: Vec<&T> = ft.entities.iter().map(|e| &e.r#type).collect();
+        assert_eq!(
+            kinds,
+            [&T::Bold, &T::Italic, &T::Code, &T::Strikethrough, &T::Spoiler]
+        );
+        // UTF-16 offsets: a BMP char is 1 unit, an astral emoji is 2.
+        let ft2 = parse_markdown("a\u{1F600} *b*");
+        assert_eq!(ft2.text.as_str(), "a\u{1F600} b");
+        assert_eq!(ft2.entities[0].offset, 4, "a + astral emoji + space = 4 UTF-16 units");
+        assert_eq!(ft2.entities[0].length, 1);
+        // Unclosed delimiters stay literal.
+        let ft3 = parse_markdown("a *never closed");
+        assert_eq!(ft3.text.as_str(), "a *never closed");
+        assert!(ft3.entities.is_empty());
+    }
+
+    #[test]
+    fn send_demo_echo_appends_outgoing_row() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let before = store.messages.snapshot().len();
+        store.composer.set_from("*bold* tail");
+        store.send();
+        let rows = store.messages.snapshot();
+        assert!(rows.len() > before, "demo send should append a local echo");
+        let last = rows.iter().rev().find(|r| r.outgoing).unwrap();
+        assert_eq!(last.text.as_str(), "bold tail");
+        assert!(last.pending, "echo starts pending until a send result");
+    }
+
+    /// r36 probe: does the pinned-message popup subtree materialize when
+    /// `pinned_popup` flips true after mount? Dumps the semantic tree so we
+    /// can see whether the `when` payload inserted "Jump to pinned" rows.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_pinned_popup_open(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        store.pinned_label.set("Alice: shipping it".into());
+        store.pinned_msgs.set(vec![
+            PinnedRow { id: 14, label: Str::from("Alice: shipping it") },
+            PinnedRow { id: 12, label: Str::from("Alice: NV12 conversion?") },
+        ]);
+        let mut app = ui.viewport(1000, 900).mount_offscreen({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_popup_closed.txt", app.semantic_mut());
+        store.pinned_popup.set(true);
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_popup_open.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/probe_popup_open.png");
+        app.query().label_contains("Jump to pinned").assert_exists();
     }
 
     /// Minimal modal-Escape probe: one button inside a `ModalInteraction`
@@ -3725,6 +3854,157 @@ mod tests {
                 eprintln!("CHIP #{} {:?} '{}' bounds={:?}", el.id().as_u64(), n.role(), l, n.bounds());
             }
         }
+    }
+
+    /// Probe: with multi-select bar materialized (`when` sibling), dump every
+    /// semantic node's bounds to see whether a message row's slot overlaps
+    /// the select-bar band (live taps at y≈120 fire a row's on_tap).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_select_bar_bounds(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.open_chat.set(7);
+        store.pinned_label.set("Alice: shipping it".into());
+        store.pinned_msgs.set(vec![
+            PinnedRow { id: 14, label: Str::from("Alice: shipping it") },
+        ]);
+        let mut app = ui.viewport(1400, 950).mount_offscreen({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_sel_off.txt", app.semantic_mut());
+        store.selected_msgs.set(vec![11, 24]);
+        app.semantic_mut().settle();
+        dump_bounds("/tmp/probe_sel_on.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/probe_sel_on.png");
+    }
+
+
+    /// Minimal repro for DOGFOOD r36-3: a row scrolled so it straddles the
+    /// scroll viewport's top edge keeps an unclipped `.on_tap` bound that
+    /// reaches into the sibling band above — taps on that chrome fire the
+    /// row. Paint is clipped by `push_layer_rect` (hydrolysis
+    /// list.rs:1138-1140 / scroll.rs) while gesture bounds register
+    /// unclipped via `transformed_rect` — the clip never reaches hit testing.
+    // Fails until the framework fix lands — `tap above the scroll viewport
+    // hit a row inside it`. Run with `cargo test --lib -- --ignored`.
+    #[ignore]
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_scroll_row_tap_clip(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let taps: Binding<i32> = Binding::container(0);
+        let sc = waterui::layout::ScrollController::<Point>::new(Point::new(0.0, 0.0));
+        let controller = sc.clone();
+        let t = taps.clone();
+        let mut app = ui.viewport(400, 360).mount_offscreen(move || {
+            vstack((
+                text!("chrome above the scroll view").padding(),
+                scroll(vstack((0..10)
+                    .map(|i| {
+                        let t = t.clone();
+                        Frame::new(text!("row {i}").padding())
+                            .height(80.0)
+                            .on_tap(move |_s: Store| t.set(t.snapshot() + 1))
+                    })
+                    .collect::<Vec<_>>()))
+                .scroll_controller(&sc),
+            ))
+            .state(&store)
+        });
+        app.settle();
+        // Half-row scroll: row 0's slot now straddles the viewport top edge
+        // (dump shows its label bound leaking above the viewport top).
+        controller.scroll_to(Point::new(0.0, 60.0));
+        app.settle();
+        dump_bounds("/tmp/probe_scroll_clip.txt", app.semantic_mut());
+        // Tap inside the sibling band ABOVE the scroll viewport but inside the
+        // straddling row's unclipped bound — must not hit.
+        app.tap_at(200.0, 45.0);
+        app.settle();
+        assert_eq!(
+            taps.snapshot(),
+            0,
+            "tap on the sibling band above a scroll viewport hit a row inside it"
+        );
+    }
+
+    /// Minimal repro for DOGFOOD r36-5: a `button` whose subtree is inserted
+    /// by `when` after mount PAINTS but never registers a pointer target on
+    /// the winit renderer — the select bar's Copy/Forward/Delete/✕ and the
+    /// forward banner's ✕ all get `pointer_hits=[]` on live clicks. `.on_tap`
+    /// and `field` in the same payload do work. Offscreen this passes
+    /// (tap_at dispatches directly), so the defect is live-only; kept
+    /// `#[ignore]`d as the regression tripwire.
+    // Run with `cargo test --lib -- --ignored`.
+    #[ignore]
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_when_payload_button_dead(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let flag = Binding::bool(false);
+        let hits: Binding<i32> = Binding::container(0);
+        let f = flag.clone();
+        let h = hits.clone();
+        let mut app = ui.viewport(400, 300).mount_offscreen(move || {
+            let h_outer = h.clone();
+            vstack((
+                text!("header"),
+                when(f.clone(), move || {
+                    let h3 = h_outer.clone();
+                    button("Bump").action(move |_s: Store| h3.set(h3.snapshot() + 1))
+                }),
+            ))
+            .state(&store)
+        });
+        app.settle();
+        flag.set(true);
+        app.settle();
+        dump_bounds("/tmp/probe_when_button.txt", app.semantic_mut());
+        let _ = app.snapshot().save_png("/tmp/probe_when_button.png");
+        // The button paints centred, ~one row below the header.
+        app.tap_at(200.0, 49.0);
+        app.settle();
+        assert_eq!(
+            hits.snapshot(),
+            1,
+            "button inside a `when` payload inserted after mount never fired"
+        );
+    }
+
+    /// Regression tripwire for the chat-row hover ⋮: `on_hover_enter` /
+    /// `on_hover_exit` must fire on pointer move so `when(hov)` chrome
+    /// materializes. Verified live on winit (the ⋮ paints and its `Menu`
+    /// opens); this headless run pins the same path via the testing
+    /// driver's `queue_pointer_move`.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_hover_enter_fires(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let hov = Binding::bool(false);
+        let h2 = hov.clone();
+        let mut app = ui.viewport(400, 300).mount_offscreen(move || {
+            vstack((
+                text!("anchor").padding(),
+                Frame::new(text!("hoverable row").padding())
+                    .on_hover_enter(|State(h): State<Binding<bool>>| h.set(true))
+                    .on_hover_exit(|State(h): State<Binding<bool>>| h.set(false))
+                    .state(&h2),
+            ))
+            .state(&store)
+        });
+        app.settle();
+        // Park over the second row, then wiggle inside it.
+        app.queue_pointer_move(200.0, 55.0);
+        app.queue_pointer_move(210.0, 60.0);
+        app.settle();
+        assert!(
+            hov.snapshot(),
+            "on_hover_enter never ran on pointer move over the row"
+        );
+        app.queue_pointer_move(200.0, 15.0);
+        app.settle();
+        assert!(
+            !hov.snapshot(),
+            "on_hover_exit never ran when the pointer left the row"
+        );
     }
 
 }

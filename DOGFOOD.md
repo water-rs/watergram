@@ -2647,7 +2647,7 @@ Re-verified on the new pins (Mesa 26.2.3 lavapipe, wolfi container):
   keystrokes no longer double-fire; composer typing via xdotool
   windowfocus+type lands exactly once.
 
-### r35-1: inserting a `when(…)` → `VStack::for_each(SignalCollection, …)`
+### r35-1 (water-rs/hydrolysis#225): inserting a `when(…)` → `VStack::for_each(SignalCollection, …)`
 subtree blanks every color-emoji glyph in the window permanently
 
 Observed live on hydrolysis 1076084 + waterui b956632, wolfi Mesa 26.2.3
@@ -2696,7 +2696,7 @@ vello-glifo atlas/cache.rs:74-135) — an insert-time ordering bug there
 the captured subtree) is the likely site, but the exact line is
 upstream's to pin down.
 
-### r35-2: `.background(Surface)` does not paint on `when(…) → VStack::for_each(…)`
+### r35-2 (water-rs/hydrolysis#226): `.background(Surface)` does not paint on `when(…) → VStack::for_each(…)`
 
 Both suggestion popups carry `VStack::for_each(rows, …)` +
 `.spacing(0).padding_with((4,0)).background(Surface).clip(Rounded…)`.
@@ -2710,7 +2710,7 @@ measuring/painting against the collection's bounds). Minimal repro:
 `when(c, || VStack::for_each(rows, |r| text(r)).background(Surface))` on
 a colored background → expect a Surface rect, observe none.
 
-### r35-3: retained `List`/`for_each` rows never rebuild when a same-`id` item's fields change
+### r35-3 (water-rs/hydrolysis#227): retained `List`/`for_each` rows never rebuild when a same-`id` item's fields change
 
 `SignalCollection` emits a new snapshot with updated row fields;
 `nami::Binding::set` notifies unconditionally (nami binding.rs:1072) and
@@ -2763,7 +2763,7 @@ replace-detection pass can tell same-id updates apart: this round adds
 `PollRow` (styled fields compare via `to_plain()` + chunk count —
 `styled_row_eq`, src/state.rs:139-169).
 
-### r35-4: `SignalExt::debounce` never re-emits on hydrolysis
+### r35-4 (water-rs/hydrolysis#228): `SignalExt::debounce` never re-emits on hydrolysis
 
 `store.chat_search.debounce(400ms)` feeding
 `.on_change(.., run_chat_search)` produced nothing live — no n/N
@@ -2793,7 +2793,110 @@ Suspect: `async_io::Timer`'s wake → `runnable.schedule()` →
 subscription. Needs a real event loop to bisect — reported as a live
 defect with the chain mapped.
 
-App impact handled without a workaround: both searches watch the raw
-binding (`search_now`/`search_live`) — local filtering of a snapshot is
-cheap; debounce was only an optimization. DOGFOOD stands: the API is
-broken on this backend.
+App-side workaround tied to #228: both searches watch the raw
+binding (`search_now` in views.rs, `search_live` in views.rs) instead
+of `.debounce(400ms)`. When #228 lands, restore `.debounce(Duration::
+from_millis(400))` at both call sites and delete this paragraph.
+
+### r36-1: `Command::shortcut` exists in waterui but hydrolysis never dispatches it — no key-event surface at all
+
+Tried to wire Desktop's global shortcuts (Ctrl+F in-chat search,
+Ctrl+W close, Alt+↑/↓ switch chats, Ctrl+Tab folders) for the r36
+keyboard-shortcuts parity row. Two layers are missing:
+
+1. The metadata channel exists but is never consumed. waterui's
+   `Command::shortcut(Shortcut)` is public API
+   (components/foundation/controls/src/menu.rs:258-263; `Shortcut` +
+   `.command()/.control()/.shift()/.option()` at :73-115), but a
+   `grep -rn 'shortcut' hydrolysis/src` finds only doc comments —
+   no code path reads `command.shortcut`, so menu commands carry a
+   shortcut that can never fire.
+2. There is no fallback for the app to build on. Key dispatch bails on
+   every modifier chord — `hit_test.rs:2148`: `if !activates ||
+   modifiers.control || modifiers.alt || modifiers.super_key { return
+   false; }` — and the widget `Event` enum is pointer-only
+   (HoverEnter/HoverMove/HoverExit), so no `KeyDown`-style handler can
+   be attached anywhere in the view tree either.
+
+Minimal reproduction:
+
+```rust
+let hit = Binding::bool(false);
+let h = hit.clone();
+let ui = Menu::new(
+    label("Actions"),
+    ("Bump".action(move |_: ()| h.set(true))
+        .shortcut(Shortcut::new("b").control())),
+);
+// mount, then press Ctrl+B → nothing; the chord is dropped at
+// hit_test.rs:2148 and no consumer ever inspects `command.shortcut`.
+```
+
+Expected (platform model): a `Command` inside a `Menu`/`context_menu`
+carries its `Shortcut`; the backend registers it on the window/menu
+scope and dispatches the command's action when the chord is pressed —
+macOS key equivalents / Windows accelerators. Telegram Desktop relies
+on this for search (Ctrl+F), chat switching (Alt+↑/↓, Ctrl+Tab),
+close (Ctrl+W) and per-chat mute (Ctrl+Shift+M), so the PARITY row is
+❌ until a dispatch surface exists.
+
+### r36-2: `when` nested inside another `when`'s payload never materializes on the live winit renderer (headless passes)
+
+The pinned-messages banner is `when(has_pinned, || vstack((banner_row, when(pinned_popup, || rows))))`. Tapping the banner flips `pinned_popup` true — verified the handler fires and the flag toggles — but the inner `when`'s subtree never paints and never takes layout space on the winit renderer: zero pixel diff between open and closed captures. The semantic/offscreen runtime is not affected: a probe that mounts the same view headless, flips the flag and dumps the tree finds the "Jump to pinned" rows with real bounds (`tests::probe_pinned_popup_open`). Moving the inner `when` out to a sibling position (`vstack((when(has_pinned, …), when(pinned_popup, …)))`) makes the popup render live — the feature ships in that form; this entry reports the defect.
+
+Minimal reproduction:
+
+```rust
+let outer = Binding::bool(true);
+let inner = Binding::bool(false);
+let i = inner.clone();
+let ui = vstack((
+    when(outer.clone(), move || vstack((
+        text("banner"),
+        when(i.clone(), || text("popup row")),
+    ))),
+));
+// mount on winit; `inner.set(true)` → "popup row" never appears.
+// mount_offscreen + settle → "popup row" is in the tree and painted.
+```
+
+Observed: the inner `when`'s condition signal appears never to be watched (or its insertion never paints) when the payload is built lazily inside another `when`'s payload. App workaround in place: the popup `when` is a sibling of the banner `when`, marked with a comment at views.rs:976-979.
+
+### r36-3: rows straddling a `scroll`/`List` viewport edge keep unclipped hit/gesture bounds — taps on chrome above fire the row
+
+While verifying the multi-select bar, taps inside the "2 selected" action band (a sibling *above* the messages list) toggled selection on the message row whose top scrolled under the bar. Paint is clipped correctly — the row is invisible there — but hit testing is not: hydrolysis pushes the viewport clip only around drawing (`list.rs:1137-1140` `push_layer_rect(1.0, viewport)`, popped at :1695) while each row's sub-view flushes its gestures into a rect derived from the unclipped `row_rect`/`content_rect` (`subview.flush_in_rect(..., content_rect)` at :1631; row hit bounds computed from the same unclipped rect at :1399). The clip never reaches `gesture_regions`/`pointer_targets`, so the straddling row's `.on_tap` keeps firing in the band above the viewport.
+
+Minimal repro shipped as `probe_scroll_row_tap_clip` (src/lib.rs, `#[ignore]`d — passes once the framework clips hit bounds to the viewport): a `scroll` view of 80pt rows under a text "chrome" band; `scroll_to(y=60)` leaves row 0 straddling the top edge, and `tap_at(200, 45)` — inside the sibling band, above the viewport — still fires row 0's tap.
+
+Observed live: with multi-select active, clicks on the select bar's action row (Copy/Forward/Delete/✕, y≈120-130) toggled selection on the row peeking under the bar instead of (or in addition to) hitting the bar buttons.
+
+### r36-4: no `on_submit` on `TextField` — Enter-to-send (single-line) is inexpressible
+
+Telegram Desktop sends the composed message on Enter (Shift+Enter for newline). There is no surface to hang that on:
+
+- waterui `TextField`'s whole API is `new`/`styled`/`line_limit`/`disable_line_limit`/`prompt`/`selection_menu`/`value_binding`/`keyboard` (components/foundation/controls/src/text_field.rs:95-165) — no submit/commit callback, and `TextFieldConfig` has no slot for one.
+- hydrolysis maps Enter to `insert_text_into_focused_target("\n")` (renderer/input/text_editing.rs:1898-1909); a single-line field's line limit strips the `\n`, so Enter is inert — nothing observable fires.
+- No view-level key handler exists to substitute (r36-1: the `Event` enum is pointer-only; modifier chords bail at hit_test.rs:2148).
+
+Expected: `TextField::on_submit(impl Fn)` fired when Enter is pressed while the single-line field is focused (desktop convention: Enter submits, Shift+Enter newline), matching SwiftUI's `onSubmit`. PARITY: Enter-to-send is ❌ until this lands — clicking the send button is the only path.
+
+### r36-5: `button().action()` inside a `when(…)` payload materialized after mount paints but never receives pointer input (winit only — headless passes)
+
+Every `button` in a `when`-inserted subtree renders correctly yet is dead to clicks on the live winit renderer: `pointer down candidates` reports `pointer_hits=[]` at the button's painted position (and anywhere else — the bound is absent, not displaced). Sibling input paths in the SAME payload still work: `.on_tap` gesture regions fire, and `field` takes focus via the text-input fallback. Both the multi-select bar (`when(sel_active)` — Copy/Forward/Delete/✕, verified at 800/1400) and the forward banner (`when(forward_mode)` — Cancel ✕, field+chip fine) exhibit it, so the feature UI paints but its buttons are unclickable.
+
+Minimal reproduction (`tests::probe_when_payload_button_dead`, `#[ignore]`d — passes headless because `tap_at` dispatches through the semantic tree directly):
+
+```rust
+let flag = Binding::bool(false);
+let ui = vstack((
+    text!("header"),
+    when(flag.clone(), || button("Bump").action(|_| hits += 1)),
+));
+// winit: flag.set(true) → "Bump" paints; click at its bounds →
+//   `pointer down candidates pointer_hits=[]` — nothing ever fires.
+// mount_offscreen: app.tap_at(200,49) → hits == 1 (probe asserts this).
+```
+
+Observed: the `when` insertion path apparently flushes the payload's paint + gesture + a11y registration but drops (or never binds) `bind_interaction_target` press slots — consistent with r36-2, where a `when` inside a `when` payload never materializes at all on winit while headless passes. Likely the same insertion-path gap at a different subsystem (paint lands, interaction doesn't).
+
+Refinement (r36, verified live): the scope is `button().action()`-style press slots specifically, NOT every pointer target — a `Menu::new(label(..).icon(dots_vertical()).icon_only(), …)` inside `when(hov)` (the chat-row ⋮) DID register and open its menu on click (`pointer_hits=[3, 2]`, menu painted). `.on_tap` gestures, `field` focus and `Menu` triggers all survive; `button`/`icon_button` press slots die.
