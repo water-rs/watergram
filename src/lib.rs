@@ -15,26 +15,28 @@ mod views;
 
 use state::Store;
 use waterui::app::App;
-use waterui::prelude::*;
 use waterui::media::Url;
+use waterui::prelude::*;
 use waterui::preview;
 use waterui::task::{sleep, spawn_local};
 use waterui::theme::Theme;
-use waterui::window::Window;
+use waterui::window::{Window, WindowState};
 
 /// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
 /// connection — for rendering checks on device-less VMs.
 /// `WATERGRAM_DEMO_PAGE` picks the page: `list` (default), `chat`,
 /// `settings`, `emoji`.
 fn demo_page() -> Option<&'static str> {
-    std::env::var("WATERGRAM_DEMO_PAGE").ok().map(|p| match p.as_str() {
-        "chat" => "chat",
-        "settings" => "settings",
-        "emoji" => "emoji",
-        "info" => "info",
-        "attach" => "attach",
-        _ => "list",
-    })
+    std::env::var("WATERGRAM_DEMO_PAGE")
+        .ok()
+        .map(|p| match p.as_str() {
+            "chat" => "chat",
+            "settings" => "settings",
+            "emoji" => "emoji",
+            "info" => "info",
+            "attach" => "attach",
+            _ => "list",
+        })
 }
 
 #[preview]
@@ -50,7 +52,9 @@ fn main() -> impl View {
             && let Some((w, h)) = spec.split_once('x')
             && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
         {
-            store.win_frame.set(Rect::new(Point::zero(), Size::new(w, h)));
+            store
+                .win_frame
+                .set(Rect::new(Point::zero(), Size::new(w, h)));
         }
         let page = demo_page();
         return views::root(store.clone()).task(async move {
@@ -104,68 +108,72 @@ pub fn app(mut env: Environment) -> App {
         }
     }
     env.install(
-        Theme::new().color_scheme(
-            store
-                .dark
-                .select(ColorScheme::Dark, ColorScheme::Light),
-        ),
+        Theme::new().color_scheme(store.dark.select(ColorScheme::Dark, ColorScheme::Light)),
     );
+    // App-level env carries Store so `App::menu_bar` command actions take
+    // `|s: Store|` by DI instead of capturing the reactive handle. `#[state]`
+    // extraction reads `State<Store>` (the slot `.state(&v)` installs), so the
+    // wrapper goes in — not the bare value.
+    env.insert(waterui::extract::State(store.clone()));
     let win_state = store.win_state.clone();
     let store_for_content = store.clone();
     let mut win = Window::new(store.window_title(), win_state, move || {
-            let s = store_for_content.clone();
-            let rx2 = rx.clone();
-            views::root(store_for_content.clone()).task(async move {
-                if demo {
-                    match demo_page() {
-                        Some("chat") => s.selected.set(Some(1)),
-                        Some("settings") => s.nav.push(state::Route::Settings),
-                        Some("emoji") => {
-                            s.selected.set(Some(1));
-                            s.stickers_open.set(true);
-                        }
-                        Some("info") => {
-                            s.selected.set(Some(1));
-                            s.open_chat.set(1);
-                            s.regroup_messages();
-                            s.info_open.set(true);
-                            s.load_shared_media();
-                        }
-                        Some("attach") => {
-                            s.selected.set(Some(1));
-                            let s2 = s.clone();
-                            spawn_local(async move {
-                                sleep(std::time::Duration::from_millis(800))
-                                .await;
-                                s2.attach.set(vec![
-                                    Url::from_file_path_str(
-                                        Str::from("/tmp/design_doc.pdf"),
-                                    ),
-                                ]);
-                            })
-                            .detach();
-                        }
-                        _ => {}
+        let s = store_for_content.clone();
+        let rx2 = rx.clone();
+        views::root(store_for_content.clone()).task(async move {
+            if demo {
+                match demo_page() {
+                    Some("chat") => s.selected.set(Some(1)),
+                    Some("settings") => s.nav.push(state::Route::Settings),
+                    Some("emoji") => {
+                        s.selected.set(Some(1));
+                        s.stickers_open.set(true);
                     }
-                    // Anchor the seeded thread to the latest message, as the
-                    // live history-load path does (`load_history` → `scroll_bottom`).
-                    s.scroll_bottom();
-                    std::future::pending::<()>().await;
+                    Some("info") => {
+                        s.selected.set(Some(1));
+                        s.open_chat.set(1);
+                        s.regroup_messages();
+                        s.info_open.set(true);
+                        s.load_shared_media();
+                    }
+                    Some("attach") => {
+                        s.selected.set(Some(1));
+                        let s2 = s.clone();
+                        spawn_local(async move {
+                            sleep(std::time::Duration::from_millis(800)).await;
+                            s2.attach.set(vec![Url::from_file_path_str(Str::from(
+                                "/tmp/design_doc.pdf",
+                            ))]);
+                        })
+                        .detach();
+                    }
+                    _ => {}
                 }
-                s.start();
-                while let Ok((update, cid)) = rx2.recv().await {
-                    s.update(update, cid);
-                }
-            })
-        });
+                // Anchor the seeded thread to the latest message, as the
+                // live history-load path does (`load_history` → `scroll_bottom`).
+                s.scroll_bottom();
+                std::future::pending::<()>().await;
+            }
+            s.start();
+            while let Ok((update, cid)) = rx2.recv().await {
+                s.update(update, cid);
+            }
+        })
+    });
     // The window's frame MUST be the store's binding — the reverse alias
     // (`store.win_frame = win.frame`) only rewires `store`, while clones
     // captured earlier keep the orphan default binding and see 0×0 forever
     // (the info panel never docked on the real renderer for this reason).
+    // Desktop-identity adoption (waterui#1314 family): WM_CLASS
+    // class=`watergram`, instance defaults to the same — gives window
+    // managers/desktop files a stable app_id on X11/Wayland.
+    win.app_id = Some("watergram".into());
+    win.instance_name = Some("watergram".into());
     win.frame = store.win_frame.clone();
     // Spawn size; winit rewrites `win.frame` on Moved/Resized from here on.
     // SemanticRuntime never drives it — see DOGFOOD 'window.frame bypassed'.
-    win.frame.set(Rect::new(Point::zero(), Size::new(1280.0, 800.0)));
+    win.frame
+        .set(Rect::new(Point::zero(), Size::new(1280.0, 800.0)));
     // Test hook for `water mcp` screenshots: `WATERGRAM_WIN_SIZE=WxH` makes the
     // width threshold see the viewport size the semantic runner never delivers.
     if let Ok(spec) = std::env::var("WATERGRAM_WIN_SIZE")
@@ -174,14 +182,45 @@ pub fn app(mut env: Environment) -> App {
     {
         win.frame.set(Rect::new(Point::zero(), Size::new(w, h)));
     }
-    App::new_with_windows([win], env)
+    let mut app = App::new_with_windows([win], env);
+    // r43-1 fix lives in hydrolysis devin/menu-bar (66501fc): `App::menu_bar`
+    // commands arm globally on `MenuShortcutRegistry` like a mounted `Menu`
+    // (and render on NSApp.mainMenu on macOS). `env.insert(store)` above
+    // puts Store in the app env so actions take `|s: Store|` by DI.
+    let store_bar = store.clone();
+    app.menu_bar = Computed::constant(vec![
+        Menu::new(
+            "Watergram",
+            store_bar
+                .tr("Quit", 0, "Quit Telegram")
+                .action(|s: Store| s.win_state.set(WindowState::Closed))
+                .shortcut(Shortcut::new("w").control()),
+        ),
+        Menu::new(
+            "File",
+            (
+                store_bar
+                    .tr("NewChat", 0, "New chat")
+                    .action(|s: Store| s.nav.push(state::Route::NewChat))
+                    .shortcut(Shortcut::new("n").control()),
+                store_bar
+                    .tr("Settings", 0, "Settings")
+                    .action(|s: Store| s.nav.push(state::Route::Settings))
+                    .shortcut(Shortcut::new(",").control()),
+            ),
+        ),
+    ]);
+    app
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::Datelike;
-    use crate::state::{ChatRow, FolderRow, MessageRow, PinnedRow, PollRow, ReactionChip, Screen, SharedMediaRow, Store, parse_markdown};
+    use crate::state::{
+        ChatRow, FolderRow, MessageRow, PinnedRow, PollRow, ReactionChip, Screen, SharedMediaRow,
+        Store, parse_markdown,
+    };
     use crate::views;
+    use chrono::Datelike;
     use waterui::accessibility::AccessibilityRole;
     use waterui::layout::frame::Frame;
     use waterui::prelude::*;
@@ -286,7 +325,10 @@ mod tests {
         let mut app = ui.mount(move || views::api_keys_screen(store.clone()).state(&store));
         app.query().label("API ID").assert_exists();
         app.query().label("API hash").assert_exists();
-        app.query().role(Role::BUTTON).label("Continue").assert_exists();
+        app.query()
+            .role(Role::BUTTON)
+            .label("Continue")
+            .assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -294,7 +336,10 @@ mod tests {
         let store = store();
         let for_assert = store.api_id.clone();
         let mut app = ui.mount(move || views::api_keys_screen(store.clone()).state(&store));
-        app.query().label("API ID").single().set_text(&mut app, "94575");
+        app.query()
+            .label("API ID")
+            .single()
+            .set_text(&mut app, "94575");
         assert_eq!(for_assert.snapshot().to_string(), "94575");
     }
 
@@ -315,9 +360,7 @@ mod tests {
         let store = store();
         store.phone.set("+9996612345".into());
         let mut app = ui.mount(move || views::code_screen(store.clone()).state(&store));
-        app.query()
-            .label_contains("9996612345")
-            .assert_exists();
+        app.query().label_contains("9996612345").assert_exists();
         app.query().label("Code").assert_exists();
     }
 
@@ -389,12 +432,13 @@ mod tests {
             msg(1, "first message", false),
             msg(2, "my reply", true),
         ]);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         // List rows fold their contents into the row's own a11y label
         // ("Alice first message 12:00"), so contents match via contains.
-        app.query()
-            .label_contains("first message")
-            .assert_exists();
+        app.query().label_contains("first message").assert_exists();
         app.query().label_contains("my reply").assert_exists();
         app.query().label_contains("Alice").assert_exists();
         app.query().label("Message").assert_exists();
@@ -405,8 +449,14 @@ mod tests {
         let store = store();
         store.open_chat.set(7);
         let composer = store.composer.clone();
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
-        app.query().label("Message").single().set_text(&mut app, "hello world");
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
+        app.query()
+            .label("Message")
+            .single()
+            .set_text(&mut app, "hello world");
         app.query().role(Role::BUTTON).label("Send").tap();
         assert_eq!(composer.snapshot().to_string(), "");
     }
@@ -421,8 +471,7 @@ mod tests {
         let rec = store.recording_voice.clone();
         let err_b = store.capture_error.clone();
         let caller = store.clone();
-        let mut app =
-            ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
         app.query()
             .role(Role::BUTTON)
             .label("Record voice note")
@@ -435,7 +484,10 @@ mod tests {
             assert!(!rec.snapshot());
         } else {
             let err = err_b.snapshot().to_string();
-            assert!(!err.is_empty(), "missing/unopenable device must surface an error");
+            assert!(
+                !err.is_empty(),
+                "missing/unopenable device must surface an error"
+            );
         }
     }
 
@@ -447,12 +499,8 @@ mod tests {
         store.open_chat.set(7);
         let open = store.video_note_open.clone();
         let caller = store.clone();
-        let mut app =
-            ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
-        app.query()
-            .role(Role::BUTTON)
-            .label("Video note")
-            .tap();
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        app.query().role(Role::BUTTON).label("Video note").tap();
         assert!(open.snapshot());
         // The sheet's GpuSurface owns the camera; on a machine without one its
         // shared status must surface the failure (or be mid-open).
@@ -481,8 +529,7 @@ mod tests {
         store.messages.set(vec![m]);
         let msgs = store.messages.clone();
         let caller = store.clone();
-        let mut app =
-            ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
         app.query()
             .label_contains("was not delivered")
             .assert_exists();
@@ -581,7 +628,10 @@ mod tests {
         store.open_chat.set(7);
         store.reply_to.set(Some(5));
         store.reply_label.set("Replying to Alice".into());
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label("Replying to Alice").assert_exists();
     }
 
@@ -591,7 +641,10 @@ mod tests {
         store.open_chat.set(7);
         store.pinned_label.set("Pinned message".into());
         store.pinned_id.set(99);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label("Pinned message").assert_exists();
     }
 
@@ -603,7 +656,10 @@ mod tests {
         store
             .chat_search_results
             .set(vec![msg(1, "needle hit", false)]);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label("Search in chat").assert_exists();
         app.query().label("needle hit").assert_exists();
     }
@@ -626,7 +682,10 @@ mod tests {
         let mut m = msg(1, "seen", true);
         m.read_out = true;
         store.messages.set(vec![m]);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label_contains("✓✓").assert_exists();
     }
 
@@ -642,7 +701,10 @@ mod tests {
             reactors: Vec::new(),
         }];
         store.messages.set(vec![m]);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label_contains("👍 3").assert_exists();
     }
 
@@ -665,11 +727,13 @@ mod tests {
     fn emoji_only_bubble_renders(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.open_chat.set(7);
-        store.messages.set(vec![
-            msg(1, "🔥", false),
-            msg(2, "🎉🎉🎉", true),
-        ]);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        store
+            .messages
+            .set(vec![msg(1, "🔥", false), msg(2, "🎉🎉🎉", true)]);
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label_contains("🔥").assert_exists();
         app.query().label_contains("🎉🎉🎉").assert_exists();
     }
@@ -688,7 +752,10 @@ mod tests {
             reactors: Vec::new(),
         }];
         store.messages.set(vec![m]);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label_contains("React with 👍").assert_exists();
         app.query().label_contains("React with 👍").tap();
         let chips = &store.messages.snapshot()[0].reaction_chips;
@@ -732,7 +799,12 @@ mod tests {
         // (waterui#1245) — hydrolysis doesn't present preview/accessory on
         // Linux yet (#200), so only the command items are in the popup.
         for item in [
-            "Reply", "Edit", "Copy text", "Pin message", "Forward", "Select",
+            "Reply",
+            "Edit",
+            "Copy text",
+            "Pin message",
+            "Forward",
+            "Select",
             "Delete",
         ] {
             let store = store();
@@ -748,7 +820,13 @@ mod tests {
             match item {
                 "Reply" => assert_eq!(store.reply_to.snapshot(), Some(1)),
                 "Edit" => assert_eq!(store.editing.snapshot(), Some(1)),
-                "Copy text" => assert!(store.clipboard.snapshot().to_string().contains("context me")),
+                "Copy text" => assert!(
+                    store
+                        .clipboard
+                        .snapshot()
+                        .to_string()
+                        .contains("context me")
+                ),
                 "Pin message" => assert_eq!(store.pinned_id.get(), 1),
                 "Forward" => assert!(store.forward_message.snapshot().is_some()),
                 "Select" => assert_eq!(store.selected_msgs.snapshot(), vec![1]),
@@ -787,7 +865,13 @@ mod tests {
             })
             .collect();
         assert_eq!(commands.len(), 10); // Reply Edit Copy Link Pin Forward Save Select Info Delete
-        assert_eq!(items.iter().filter(|i| matches!(i, MenuItem::Divider)).count(), 1);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|i| matches!(i, MenuItem::Divider))
+                .count(),
+            1
+        );
         let delete = commands.last().unwrap();
         assert_eq!(delete.role, CommandRole::Destructive);
         // Incoming rows omit Edit (own messages only).
@@ -797,7 +881,10 @@ mod tests {
             .snapshot();
         // Incoming: no Edit; Translate added; Save added; no Copy link (linkable=false).
         assert_eq!(
-            items.iter().filter(|i| matches!(i, MenuItem::Command(_))).count(),
+            items
+                .iter()
+                .filter(|i| matches!(i, MenuItem::Command(_)))
+                .count(),
             8
         );
     }
@@ -857,7 +944,10 @@ mod tests {
             photo: 0,
             accent: -1,
         }]);
-        let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.clone().mount({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.query().label("2 members").assert_exists();
         // #229: name/status leaves merge into the member row's button label.
         app.query().label("Open profile of Alice").assert_exists();
@@ -890,7 +980,9 @@ mod tests {
         app.query().label("Edit profile").assert_exists();
         app.query().label("Two-step verification").assert_exists();
         app.query().label("Active sessions").assert_exists();
-        app.query().label("Telegram Desktop 5.0 · PC").assert_exists();
+        app.query()
+            .label("Telegram Desktop 5.0 · PC")
+            .assert_exists();
         app.query().label("current").assert_exists();
     }
 
@@ -918,7 +1010,11 @@ mod tests {
     fn set_messages_marks_day_headers() {
         let store = store();
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
-        let mut rows = vec![msg(1, "d1a", false), msg(2, "d1b", false), msg(3, "d2a", true)];
+        let mut rows = vec![
+            msg(1, "d1a", false),
+            msg(2, "d1b", false),
+            msg(3, "d2a", true),
+        ];
         rows[0].day = today - 1;
         rows[1].day = today - 1;
         rows[2].day = today;
@@ -954,8 +1050,14 @@ mod tests {
         }
         // The service events are their own list rows again (r31: fold
         // reverted — the row-height gap tracks waterui#1249).
-        assert!(rows.iter().any(|r| r.is_service && r.text == "Alice pinned a message"));
-        assert!(rows.iter().any(|r| r.is_service && r.text == "Bob joined the group"));
+        assert!(
+            rows.iter()
+                .any(|r| r.is_service && r.text == "Alice pinned a message")
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.is_service && r.text == "Bob joined the group")
+        );
         // The Alice m22-m25 run carries the avatar on its last row (m25);
         // m26 breaks it (outgoing) so m27 is a one-message run with both marks.
         let (run_first, run_mid, run_last, solo) = (find(22), find(23), find(25), find(27));
@@ -998,8 +1100,7 @@ mod tests {
                 let expected = spec.split(' ').count();
                 let store = store();
                 let mut app = ui.clone().viewport(600, 400).mount_offscreen(move || {
-                    views::message_bubble(store.clone(), row.clone())
-                        .padding_with((2.0, 12.0))
+                    views::message_bubble(store.clone(), row.clone()).padding_with((2.0, 12.0))
                 });
                 app.semantic_mut().settle();
                 let nodes = app.resolve_elements(&waterui_testing::Selector::default());
@@ -1042,8 +1143,24 @@ mod tests {
         assert_eq!(m11.reply_to_id, 10, "m11 replies to m10");
         store.jump_to_message(10);
         assert_eq!(store.highlight_msg.snapshot(), 10);
-        assert!(store.messages.snapshot().iter().find(|r| r.id == 10).unwrap().highlighted);
-        assert!(store.messages.snapshot().iter().filter(|r| r.highlighted).count() == 1);
+        assert!(
+            store
+                .messages
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 10)
+                .unwrap()
+                .highlighted
+        );
+        assert!(
+            store
+                .messages
+                .snapshot()
+                .iter()
+                .filter(|r| r.highlighted)
+                .count()
+                == 1
+        );
     }
 
     #[test]
@@ -1091,8 +1208,14 @@ mod tests {
         let m16 = rows.iter().position(|r| r.id == 16).unwrap();
         assert_eq!(m16 - m14, 2, "the service row sits between m14 and m16");
         assert!(rows[m14 + 1].is_service);
-        assert!(rows[m14].group_last, "m14 ends its run before the service line");
-        assert!(rows[m16].group_first, "m16 starts a run after the service line");
+        assert!(
+            rows[m14].group_last,
+            "m14 ends its run before the service line"
+        );
+        assert!(
+            rows[m16].group_first,
+            "m16 starts a run after the service line"
+        );
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -1108,8 +1231,7 @@ mod tests {
         rows.push(svc_row);
         rows.push(msg(4, "after", false));
         store.set_messages(rows);
-        let mut app =
-            ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
+        let mut app = ui.mount(move || views::chat_detail(store.clone(), 7).state(&store));
         app.query()
             .label_contains("Alice pinned a message")
             .assert_exists();
@@ -1145,9 +1267,9 @@ mod tests {
         rows.push(svc_row);
         rows.push(msg(4, "after", false));
         store.set_messages(rows);
-        let mut app = ui.viewport(600, 700).mount_offscreen(move || {
-            views::chat_detail(store.clone(), 7).state(&store)
-        });
+        let mut app = ui
+            .viewport(600, 700)
+            .mount_offscreen(move || views::chat_detail(store.clone(), 7).state(&store));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_svc.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_svc.png");
@@ -1201,7 +1323,11 @@ mod tests {
         let ft = types::FormattedText {
             text: "hello bold world".into(),
             entities: vec![
-                types::TextEntity { offset: 6, length: 4, r#type: T::Bold },
+                types::TextEntity {
+                    offset: 6,
+                    length: 4,
+                    r#type: T::Bold,
+                },
                 types::TextEntity {
                     offset: 6,
                     length: 4,
@@ -1209,8 +1335,16 @@ mod tests {
                         url: "https://x".into(),
                     }),
                 },
-                types::TextEntity { offset: 11, length: 5, r#type: T::Italic },
-                types::TextEntity { offset: 11, length: 5, r#type: T::Underline },
+                types::TextEntity {
+                    offset: 11,
+                    length: 5,
+                    r#type: T::Italic,
+                },
+                types::TextEntity {
+                    offset: 11,
+                    length: 5,
+                    r#type: T::Underline,
+                },
             ],
         };
         let chunks = crate::state::styled_from_formatted(&ft).into_chunks();
@@ -1240,7 +1374,9 @@ mod tests {
         store.messages.set(vec![m]);
         store.selected.set(Some(1));
         let inner = store.clone();
-        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        let mut app = ui
+            .clone()
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query()
             .label_contains("https://waterui.dev")
             .assert_exists();
@@ -1256,7 +1392,9 @@ mod tests {
         store.messages.set(vec![m]);
         store.selected.set(Some(1));
         let inner = store.clone();
-        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        let mut app = ui
+            .clone()
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query()
             .label_contains("Example — Title")
             .assert_exists();
@@ -1275,7 +1413,9 @@ mod tests {
         store.messages.set(vec![m]);
         store.selected.set(Some(1));
         let inner = store.clone();
-        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        let mut app = ui
+            .clone()
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         for label in ["example.com", "Example — Title", "A description line."] {
             app.query().label_contains(label).assert_exists();
         }
@@ -1306,7 +1446,9 @@ mod tests {
         store.selected.set(Some(1));
         let inner = store.clone();
         let revealed = store.revealed_spoilers.clone();
-        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        let mut app = ui
+            .clone()
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.query()
             .label("Hidden text — tap to reveal")
             .assert_exists();
@@ -1406,8 +1548,13 @@ mod tests {
         store.selected.set(Some(1));
         let inner = store.clone();
         let flag = store.stickers_open.clone();
-        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
-        app.query().role(Role::BUTTON).label("Stickers & GIFs").tap();
+        let mut app = ui
+            .clone()
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query()
+            .role(Role::BUTTON)
+            .label("Stickers & GIFs")
+            .tap();
         assert!(flag.snapshot());
     }
 
@@ -1437,8 +1584,13 @@ mod tests {
         store.selected.set(Some(1));
         store.members_open.set(true);
         let inner = store.clone();
-        let mut app = ui.clone().mount(move || views::chat_detail(inner.clone(), 1).state(&store));
-        app.query().role(Role::BUTTON).label("New link").assert_exists();
+        let mut app = ui
+            .clone()
+            .mount(move || views::chat_detail(inner.clone(), 1).state(&store));
+        app.query()
+            .role(Role::BUTTON)
+            .label("New link")
+            .assert_exists();
     }
 
     #[test]
@@ -1476,7 +1628,10 @@ mod tests {
         assert_eq!(privacy_audience(&[R::AllowAll]), "Everyone");
         assert_eq!(privacy_audience(&[R::RestrictAll]), "Nobody");
         assert_eq!(privacy_audience(&[R::AllowContacts]), "My contacts");
-        assert_eq!(privacy_audience(&[R::RestrictAll, R::AllowContacts]), "Nobody");
+        assert_eq!(
+            privacy_audience(&[R::RestrictAll, R::AllowContacts]),
+            "Nobody"
+        );
         assert_eq!(privacy_audience(&[]), "Default");
         assert_eq!(
             privacy_audience(&[R::AllowContacts, R::AllowPremiumUsers]),
@@ -1488,8 +1643,20 @@ mod tests {
     fn folder_tabs_render(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.folders.set(vec![
-            crate::state::FolderRow { id: 5, title: "Work".into(), active: false, unread: 0, include: Vec::new() },
-            crate::state::FolderRow { id: 9, title: "Chats".into(), active: false, unread: 0, include: Vec::new() },
+            crate::state::FolderRow {
+                id: 5,
+                title: "Work".into(),
+                active: false,
+                unread: 0,
+                include: Vec::new(),
+            },
+            crate::state::FolderRow {
+                id: 9,
+                title: "Chats".into(),
+                active: false,
+                unread: 0,
+                include: Vec::new(),
+            },
         ]);
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
         app.query().label("Work").assert_exists();
@@ -1520,9 +1687,8 @@ mod tests {
         let mut row = msg(7, "Voice message (3s)", false);
         row.media_label = "Voice".into();
         row.play_file = 99;
-        let mut app = ui.mount(move || {
-            views::message_bubble(store.clone(), row.clone()).state(&store)
-        });
+        let mut app =
+            ui.mount(move || views::message_bubble(store.clone(), row.clone()).state(&store));
         // File 99 is not downloaded -> labelled progress fallback, no crash.
         app.query().label("Voice").assert_exists();
     }
@@ -1538,8 +1704,7 @@ mod tests {
             include: Vec::new(),
         }]);
         store.folder_open.set(true);
-        let mut app =
-            ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
         app.query().label("Save folder").assert_exists();
         app.query().label("New folder").assert_exists();
     }
@@ -1548,12 +1713,17 @@ mod tests {
     fn account_switcher_opens(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.accounts.set(vec![
-            crate::state::AccountRow { id: 1, label: "Alice".into() },
-            crate::state::AccountRow { id: 2, label: "Bob".into() },
+            crate::state::AccountRow {
+                id: 1,
+                label: "Alice".into(),
+            },
+            crate::state::AccountRow {
+                id: 2,
+                label: "Bob".into(),
+            },
         ]);
         store.accounts_open.set(true);
-        let mut app =
-            ui.mount(move || views::sidebar_view(store.clone()).state(&store));
+        let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
         app.query().label("Alice").assert_exists();
         app.query().label("Bob").assert_exists();
         app.query().label("Add account").assert_exists();
@@ -1573,8 +1743,7 @@ mod tests {
         path: &str,
         app: &mut waterui_testing::SemanticApp<R>,
     ) {
-        let nodes = app
-            .resolve_elements(&waterui_testing::Selector::default());
+        let nodes = app.resolve_elements(&waterui_testing::Selector::default());
         let mut out = String::new();
         for el in nodes.iter() {
             let n = el.node();
@@ -1609,7 +1778,11 @@ mod tests {
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_bubble_outgoing(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
-        let mut m = msg(2, "yes — device.clone() into Arc, preview straight on the GpuSurface", true);
+        let mut m = msg(
+            2,
+            "yes — device.clone() into Arc, preview straight on the GpuSurface",
+            true,
+        );
         m.reply_excerpt = "morning! did the camera…".into();
         let mut app = ui.viewport(800, 700).mount_offscreen(move || {
             views::message_bubble(store.clone(), m.clone()).padding_with((2.0, 12.0))
@@ -1638,20 +1811,44 @@ mod tests {
             let s11 = store.clone();
             let s12 = store.clone();
             text("ctx").context_menu((
-                "React 👍".action(move |_: Store| { let _ = &s1; }),
-                "React ❤️".action(move |_: Store| { let _ = &s2; }),
-                "React 🔥".action(move |_: Store| { let _ = &s3; }),
-                "React 😂".action(move |_: Store| { let _ = &s4; }),
-                "React 😮".action(move |_: Store| { let _ = &s5; }),
+                "React 👍".action(move |_: Store| {
+                    let _ = &s1;
+                }),
+                "React ❤️".action(move |_: Store| {
+                    let _ = &s2;
+                }),
+                "React 🔥".action(move |_: Store| {
+                    let _ = &s3;
+                }),
+                "React 😂".action(move |_: Store| {
+                    let _ = &s4;
+                }),
+                "React 😮".action(move |_: Store| {
+                    let _ = &s5;
+                }),
                 Divider,
-                "Reply".action(move |_: Store| { let _ = &s6; }),
-                "Edit".action(move |_: Store| { let _ = &s7; }),
-                "Copy text".action(move |_: Store| { let _ = &s8; }),
-                "Pin message".action(move |_: Store| { let _ = &s9; }),
-                "Forward".action(move |_: Store| { let _ = &s10; }),
-                "Select".action(move |_: Store| { let _ = &s11; }),
+                "Reply".action(move |_: Store| {
+                    let _ = &s6;
+                }),
+                "Edit".action(move |_: Store| {
+                    let _ = &s7;
+                }),
+                "Copy text".action(move |_: Store| {
+                    let _ = &s8;
+                }),
+                "Pin message".action(move |_: Store| {
+                    let _ = &s9;
+                }),
+                "Forward".action(move |_: Store| {
+                    let _ = &s10;
+                }),
+                "Select".action(move |_: Store| {
+                    let _ = &s11;
+                }),
                 Divider,
-                "Delete".action(move |_: Store| { let _ = &s12; }),
+                "Delete".action(move |_: Store| {
+                    let _ = &s12;
+                }),
             ))
         });
         let t = std::time::Instant::now();
@@ -1672,8 +1869,12 @@ mod tests {
             let s1 = store.clone();
             let s2 = store.clone();
             text("ctx").context_menu((
-                "Reply".action(move |_: Store| { let _ = &s1; }),
-                "Delete".action(move |_: Store| { let _ = &s2; }),
+                "Reply".action(move |_: Store| {
+                    let _ = &s1;
+                }),
+                "Delete".action(move |_: Store| {
+                    let _ = &s2;
+                }),
             ))
         });
         let t = std::time::Instant::now();
@@ -1691,9 +1892,9 @@ mod tests {
         store.open_chat.set(1);
         store.regroup_messages();
         let st = store.clone();
-        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
-            views::chat_detail(st.clone(), 1).state(&st)
-        });
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::chat_detail(st.clone(), 1).state(&st));
         app.semantic_mut().settle();
         store.jump_to_message(17);
         app.semantic_mut().settle();
@@ -1711,48 +1912,32 @@ mod tests {
         let one = NonZeroUsize::new(1).unwrap();
         let mut app = ui.viewport(340, 300).mount_offscreen(move || {
             vstack((
-            vstack((
-                // A: plain spacer + text badge
-                hstack((
-                    text("anyone tried hydrolysis on wayland?").caption().line_limit(one).muted(),
-                    spacer(),
-                    text("12").caption(),
-                ))
-                .spacing(4.0),
-                // B: no line_limit
-                hstack((
-                    text("anyone tried hydrolysis on wayland?").caption().muted(),
-                    spacer(),
-                    text("12").caption(),
-                ))
-                .spacing(4.0),
-                // C: line_limit + Circle Image badge
-                hstack((
-                    text("anyone tried hydrolysis on wayland?").caption().line_limit(one).muted(),
-                    spacer(),
-                    text("12")
-                        .caption()
-                        .foreground(AccentForeground)
-                        .padding_with((2.0, 6.0))
-                        .background(Circle.fill(Accent)),
-                ))
-                .spacing(4.0),
-            ))
-            .spacing(8.0)
-            .leading()
-            .padding_with((6.0, 10.0)),
-            // D: outer hstack with an avatar sibling (full row shape)
-            hstack((
-                text("RC").padding_with(44.0),
                 vstack((
+                    // A: plain spacer + text badge
                     hstack((
-                        text("Rust China").body().line_limit(one).foreground(Foreground),
+                        text("anyone tried hydrolysis on wayland?")
+                            .caption()
+                            .line_limit(one)
+                            .muted(),
                         spacer(),
-                        text("14:32").caption().muted(),
+                        text("12").caption(),
                     ))
                     .spacing(4.0),
+                    // B: no line_limit
                     hstack((
-                        text("anyone tried hydrolysis on wayland?").caption().line_limit(one).muted(),
+                        text("anyone tried hydrolysis on wayland?")
+                            .caption()
+                            .muted(),
+                        spacer(),
+                        text("12").caption(),
+                    ))
+                    .spacing(4.0),
+                    // C: line_limit + Circle Image badge
+                    hstack((
+                        text("anyone tried hydrolysis on wayland?")
+                            .caption()
+                            .line_limit(one)
+                            .muted(),
                         spacer(),
                         text("12")
                             .caption()
@@ -1762,37 +1947,70 @@ mod tests {
                     ))
                     .spacing(4.0),
                 ))
-                .spacing(2.0)
-                .leading(),
-            ))
-            .spacing(10.0)
-            .padding_with((6.0, 10.0)),
-            // E: same full-row shape, short preview that fits
-            hstack((
-                text("RC").padding_with(44.0),
-                vstack((
-                    hstack((
-                        text("Rust China").body().line_limit(one).foreground(Foreground),
-                        spacer(),
-                        text("14:32").caption().muted(),
+                .spacing(8.0)
+                .leading()
+                .padding_with((6.0, 10.0)),
+                // D: outer hstack with an avatar sibling (full row shape)
+                hstack((
+                    text("RC").padding_with(44.0),
+                    vstack((
+                        hstack((
+                            text("Rust China")
+                                .body()
+                                .line_limit(one)
+                                .foreground(Foreground),
+                            spacer(),
+                            text("14:32").caption().muted(),
+                        ))
+                        .spacing(4.0),
+                        hstack((
+                            text("anyone tried hydrolysis on wayland?")
+                                .caption()
+                                .line_limit(one)
+                                .muted(),
+                            spacer(),
+                            text("12")
+                                .caption()
+                                .foreground(AccentForeground)
+                                .padding_with((2.0, 6.0))
+                                .background(Circle.fill(Accent)),
+                        ))
+                        .spacing(4.0),
                     ))
-                    .spacing(4.0),
-                    hstack((
-                        text("call me when free").caption().line_limit(one).muted(),
-                        spacer(),
-                        text("1")
-                            .caption()
-                            .foreground(AccentForeground)
-                            .padding_with((2.0, 6.0))
-                            .background(Circle.fill(Accent)),
-                    ))
-                    .spacing(4.0),
+                    .spacing(2.0)
+                    .leading(),
                 ))
-                .spacing(2.0)
-                .leading(),
-            ))
-            .spacing(10.0)
-            .padding_with((6.0, 10.0)),
+                .spacing(10.0)
+                .padding_with((6.0, 10.0)),
+                // E: same full-row shape, short preview that fits
+                hstack((
+                    text("RC").padding_with(44.0),
+                    vstack((
+                        hstack((
+                            text("Rust China")
+                                .body()
+                                .line_limit(one)
+                                .foreground(Foreground),
+                            spacer(),
+                            text("14:32").caption().muted(),
+                        ))
+                        .spacing(4.0),
+                        hstack((
+                            text("call me when free").caption().line_limit(one).muted(),
+                            spacer(),
+                            text("1")
+                                .caption()
+                                .foreground(AccentForeground)
+                                .padding_with((2.0, 6.0))
+                                .background(Circle.fill(Accent)),
+                        ))
+                        .spacing(4.0),
+                    ))
+                    .spacing(2.0)
+                    .leading(),
+                ))
+                .spacing(10.0)
+                .padding_with((6.0, 10.0)),
             ))
             .spacing(12.0)
             .leading()
@@ -1810,9 +2028,9 @@ mod tests {
         let store = store();
         store.seed_demo();
         let inner = store.clone();
-        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
-            views::sidebar_view(inner.clone()).state(&store)
-        });
+        let mut app = ui
+            .viewport(340, 700)
+            .mount_offscreen(move || views::sidebar_view(inner.clone()).state(&store));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_toolbar.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_toolbar.png");
@@ -1885,15 +2103,18 @@ mod tests {
         }
         let mk = |i: i64| Row {
             id: i,
-            label: if i == 0 { "before".into() } else { format!("row{i}").into() },
+            label: if i == 0 {
+                "before".into()
+            } else {
+                format!("row{i}").into()
+            },
         };
         let rows = Binding::container((0..50).map(&mk).collect::<Vec<_>>());
         let for_list = rows.clone();
         let mut app = ui.viewport(300, 200).mount_offscreen(move || {
-            List::for_each(
-                SignalCollection::new(for_list.clone()),
-                |row: Row| ListItem::new(text(row.label.clone())),
-            )
+            List::for_each(SignalCollection::new(for_list.clone()), |row: Row| {
+                ListItem::new(text(row.label.clone()))
+            })
         });
         app.semantic_mut().settle();
         app.query().label("before").assert_exists();
@@ -1901,7 +2122,11 @@ mod tests {
             (0..50)
                 .map(|i| Row {
                     id: i,
-                    label: if i == 0 { "after".into() } else { format!("row{i}").into() },
+                    label: if i == 0 {
+                        "after".into()
+                    } else {
+                        format!("row{i}").into()
+                    },
                 })
                 .collect(),
         );
@@ -1947,15 +2172,20 @@ mod tests {
             )
         });
         app.semantic_mut().settle();
-        app.query().label_contains("unread mentions").assert_exists();
+        app.query()
+            .label_contains("unread mentions")
+            .assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_leading_stack(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let mut app = ui.viewport(460, 200).mount_offscreen(move || {
-            vstack((text("Alice"), text("morning! did the camera filters example work?")))
-                .leading()
-                .padding()
+            vstack((
+                text("Alice"),
+                text("morning! did the camera filters example work?"),
+            ))
+            .leading()
+            .padding()
         });
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_leading.txt", app.semantic_mut());
@@ -1963,9 +2193,9 @@ mod tests {
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_spacer_hstack(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
-        let mut app = ui.viewport(460, 120).mount_offscreen(move || {
-            hstack((text("L"), spacer(), text("R"))).padding()
-        });
+        let mut app = ui
+            .viewport(460, 120)
+            .mount_offscreen(move || hstack((text("L"), spacer(), text("R"))).padding());
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_spacer.txt", app.semantic_mut());
     }
@@ -1993,7 +2223,11 @@ mod tests {
         let store = store();
         let msgs = vec![
             msg(1, "morning! did the camera filters example work?", false),
-            msg(2, "yes — device.clone() into Arc, preview straight on the GpuSurface", true),
+            msg(
+                2,
+                "yes — device.clone() into Arc, preview straight on the GpuSurface",
+                true,
+            ),
             msg(3, "nice. and the NV12 conversion?", false),
         ];
         let mut app = ui.viewport(460, 400).mount_offscreen(move || {
@@ -2177,9 +2411,9 @@ mod tests {
         store.seed_demo();
         store.selected.set(Some(1));
         let inner = store.clone();
-        let mut app = ui.viewport(460, 700).mount_offscreen(move || {
-            views::chat_detail(inner.clone(), 1).state(&store)
-        });
+        let mut app = ui
+            .viewport(460, 700)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_chat.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_chat.png");
@@ -2192,9 +2426,9 @@ mod tests {
         store.seed_demo();
         store.selected.set(Some(1));
         let inner = store.clone();
-        let mut app = ui.viewport(660, 700).mount_offscreen(move || {
-            views::chat_detail(inner.clone(), 1).state(&store)
-        });
+        let mut app = ui
+            .viewport(660, 700)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_chat_wide.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_chat_wide.png");
@@ -2213,9 +2447,9 @@ mod tests {
             waterui::prelude::Size::new(1400.0, 900.0),
         ));
         let inner = store.clone();
-        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
-            views::chat_detail(inner.clone(), 1).state(&store)
-        });
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_info_dock.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_info_dock.png");
@@ -2235,9 +2469,9 @@ mod tests {
         ));
         store.win_frame = frame.clone();
         let inner = store.clone();
-        let mut app = ui.viewport(1060, 900).mount_offscreen(move || {
-            views::chat_detail(inner.clone(), 1).state(&store)
-        });
+        let mut app = ui
+            .viewport(1060, 900)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.semantic_mut().settle();
         frame.set(waterui::prelude::Rect::new(
             waterui::prelude::Point::new(0.0, 0.0),
@@ -2260,9 +2494,9 @@ mod tests {
         ));
         let info = store.info_open.clone();
         let inner = store.clone();
-        let mut app = ui.viewport(1060, 900).mount_offscreen(move || {
-            views::chat_detail(inner.clone(), 1).state(&store)
-        });
+        let mut app = ui
+            .viewport(1060, 900)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 1).state(&store));
         app.semantic_mut().settle();
         info.set(true);
         app.semantic_mut().settle();
@@ -2275,23 +2509,21 @@ mod tests {
         use waterui::theme::color::SurfaceVariant;
         let txt = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
         let mut app = ui.viewport(700, 200).mount_offscreen(move || {
-            vstack((
-                Frame::new(
-                    zstack((
-                        vstack((
-                            text(txt).body().anyview(),
-                            text("short").caption().anyview(),
-                        ))
-                        .spacing(4.0)
-                        .leading()
-                        .padding_with([10.0, 30.0, 10.0, 10.0]),
-                        text("09:41").caption(),
+            vstack((Frame::new(
+                zstack((
+                    vstack((
+                        text(txt).body().anyview(),
+                        text("short").caption().anyview(),
                     ))
-                    .alignment(BottomTrailing),
-                )
-                .max_width(120.0)
-                .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),
-            ))
+                    .spacing(4.0)
+                    .leading()
+                    .padding_with([10.0, 30.0, 10.0, 10.0]),
+                    text("09:41").caption(),
+                ))
+                .alignment(BottomTrailing),
+            )
+            .max_width(120.0)
+            .background(RoundedRectangle::new(0.18).fill(SurfaceVariant)),))
             .width(700.0)
         });
         app.semantic_mut().settle();
@@ -2343,7 +2575,12 @@ mod tests {
                 Color::from(BorderColor).height(1.0),
                 hstack((
                     spacer(),
-                    text("Unread messages").caption().bold().foreground(Accent).padding_with((0.0, 6.0)).background(Color::from(Surface)),
+                    text("Unread messages")
+                        .caption()
+                        .bold()
+                        .foreground(Accent)
+                        .padding_with((0.0, 6.0))
+                        .background(Color::from(Surface)),
                     spacer(),
                 )),
             ))
@@ -2367,9 +2604,9 @@ mod tests {
             waterui::prelude::Size::new(1400.0, 900.0),
         ));
         let inner = store.clone();
-        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
-            views::root(inner.clone()).state(&store)
-        });
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::root(inner.clone()).state(&store));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_root_dock.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_root_dock.png");
@@ -2387,9 +2624,9 @@ mod tests {
         ));
         let inner = store.clone();
         let state = store.clone();
-        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
-            views::root(inner.clone()).state(&state)
-        });
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::root(inner.clone()).state(&state));
         app.semantic_mut().settle();
         store.selected.set(Some(1));
         store.open_chat.set(1);
@@ -2411,9 +2648,9 @@ mod tests {
         ));
         let inner = store.clone();
         let state = store.clone();
-        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
-            views::root(inner.clone()).state(&state)
-        });
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::root(inner.clone()).state(&state));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_root_chat_pre.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_root_chat_pre.png");
@@ -2431,9 +2668,9 @@ mod tests {
         ));
         let inner = store.clone();
         let state = store.clone();
-        let mut app = ui.viewport(1400, 900).mount_offscreen(move || {
-            views::root(inner.clone()).state(&state)
-        });
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::root(inner.clone()).state(&state));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_root_placeholder.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_root_placeholder.png");
@@ -2446,9 +2683,9 @@ mod tests {
         let store = store();
         store.seed_demo();
         let state = store.clone();
-        let mut app = ui.viewport(340, 900).mount_offscreen(move || {
-            views::settings_view(store.clone()).state(&state)
-        });
+        let mut app = ui
+            .viewport(340, 900)
+            .mount_offscreen(move || views::settings_view(store.clone()).state(&state));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_settings.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_settings.png");
@@ -2467,37 +2704,39 @@ mod tests {
         let mut app = ui.viewport(340, 500).mount_offscreen(move || {
             NavigationView::new(
                 "Settings",
-                scroll(vstack((
-                    hstack((text("a0"), spacer(), text("bare").muted())),
+                scroll(
                     vstack((
-                        hstack((text("a1"), spacer(), text("ctx").muted())).context_menu((
-                            "X".action(|_s: Store| {}),
-                        )),
-                        VStack::for_each(
-                            SignalCollection::new(rows.clone()),
-                            |n: crate::state::PrivacyRow| {
-                                hstack((text(n.setting.clone()), spacer(), text(n.audience.clone()).muted()))
+                        hstack((text("a0"), spacer(), text("bare").muted())),
+                        vstack((
+                            hstack((text("a1"), spacer(), text("ctx").muted()))
+                                .context_menu(("X".action(|_s: Store| {}),)),
+                            VStack::for_each(
+                                SignalCollection::new(rows.clone()),
+                                |n: crate::state::PrivacyRow| {
+                                    hstack((
+                                        text(n.setting.clone()),
+                                        spacer(),
+                                        text(n.audience.clone()).muted(),
+                                    ))
                                     .context_menu(("X".action(|_s: Store| {}),))
-                            },
-                        ),
-                        hstack((text("a2"), spacer(), text("tap").muted()))
-                            .on_tap(|_s: Store| {})
-                            .a11y_label("tap row")
-                            .a11y_role(AccessibilityRole::Button),
-                        toggle("sw", &store.notif_private),
-                        hstack((text("a4"), spacer(), text("plain-btn")))
-                            .on_tap(|_s: Store| {}),
-                        hstack((
-                            vstack((text("lit1"), text("lit2"))),
-                            spacer(),
-                        )),
+                                },
+                            ),
+                            hstack((text("a2"), spacer(), text("tap").muted()))
+                                .on_tap(|_s: Store| {})
+                                .a11y_label("tap row")
+                                .a11y_role(AccessibilityRole::Button),
+                            toggle("sw", &store.notif_private),
+                            hstack((text("a4"), spacer(), text("plain-btn")))
+                                .on_tap(|_s: Store| {}),
+                            hstack((vstack((text("lit1"), text("lit2"))), spacer())),
+                        ))
+                        .spacing(4.0)
+                        .leading(),
                     ))
-                    .spacing(4.0)
-                    .leading(),
-                ))
-                .spacing(10.0)
-                .leading()
-                .padding_with((12.0, 16.0))),
+                    .spacing(10.0)
+                    .leading()
+                    .padding_with((12.0, 16.0)),
+                ),
             )
             .state(&state)
         });
@@ -2573,10 +2812,7 @@ mod tests {
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_list_pad_rows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         use waterui::component::list::{List, ListItem};
-        let rows = vec![
-            msg(1, "a", false),
-            msg(2, "b", false),
-        ];
+        let rows = vec![msg(1, "a", false), msg(2, "b", false)];
         let mut app = ui.viewport(460, 200).mount_offscreen(move || {
             vstack((List::for_each(rows.clone(), move |row| {
                 if row.id == 1 {
@@ -2697,9 +2933,9 @@ mod tests {
     fn probe_sidebar_scrolls(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.seed_demo();
-        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
-            views::sidebar_view(store.clone()).state(&store)
-        });
+        let mut app = ui
+            .viewport(340, 700)
+            .mount_offscreen(move || views::sidebar_view(store.clone()).state(&store));
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_sidebar.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_sidebar.png");
@@ -2725,8 +2961,18 @@ mod tests {
         m.poll = Some(crate::state::PollRow {
             question: "Ship the r8 bundle today?".into(),
             options: vec![
-                crate::state::PollOptRow { ix: 0, text: "Yes".into(), pct: 67, chosen: true },
-                crate::state::PollOptRow { ix: 1, text: "Tomorrow".into(), pct: 33, chosen: false },
+                crate::state::PollOptRow {
+                    ix: 0,
+                    text: "Yes".into(),
+                    pct: 67,
+                    chosen: true,
+                },
+                crate::state::PollOptRow {
+                    ix: 1,
+                    text: "Tomorrow".into(),
+                    pct: 33,
+                    chosen: false,
+                },
             ],
             voters: 3,
             closed: false,
@@ -2734,7 +2980,9 @@ mod tests {
         store.messages.set(vec![m]);
         let inner = store.clone();
         let mut app = ui.mount(move || views::chat_detail(inner.clone(), 7).state(&inner));
-        app.query().label_contains("Ship the r8 bundle today?").assert_exists();
+        app.query()
+            .label_contains("Ship the r8 bundle today?")
+            .assert_exists();
         app.query().label_contains("Yes ✓").assert_exists();
         app.query().label_contains("67%").assert_exists();
         app.query().label_contains("3 votes").assert_exists();
@@ -2821,8 +3069,12 @@ mod tests {
         store.seed_demo();
         store.forward_ids.set(vec![1, 2]);
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
-        app.query().label("Select a chat to forward to").assert_exists();
-        app.query().label("Forward without attribution").assert_exists();
+        app.query()
+            .label("Select a chat to forward to")
+            .assert_exists();
+        app.query()
+            .label("Forward without attribution")
+            .assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -2856,7 +3108,9 @@ mod tests {
         app.query().label("Language").assert_exists();
         // #229: pack names surface inside each row's "Use …" button label.
         app.query().label("Use English").assert_exists();
-        app.query().label("Use 简体中文 — Chinese (Simplified)").assert_exists();
+        app.query()
+            .label("Use 简体中文 — Chinese (Simplified)")
+            .assert_exists();
         app.query().label("Use Deutsch — German").assert_exists();
     }
 
@@ -2887,7 +3141,10 @@ mod tests {
             tdlib_rs::enums::LanguagePackStringValue::Deleted,
         );
         store.lang_strings.set(map);
-        assert_eq!(store.tr("Settings", 0, "Settings").as_str(), "Einstellungen");
+        assert_eq!(
+            store.tr("Settings", 0, "Settings").as_str(),
+            "Einstellungen"
+        );
         assert_eq!(store.tr("Members", 1, "Members").as_str(), "1 member");
         assert_eq!(
             store.tr("Members", 5, "Members").as_str(),
@@ -2941,9 +3198,7 @@ mod tests {
         store.seed_demo();
         let mut app = ui.viewport(1000, 700).mount_offscreen(move || {
             zstack((
-                Color::from(Foreground)
-                    .opacity(0.3)
-                    .on_tap(|_s: Store| {}),
+                Color::from(Foreground).opacity(0.3).on_tap(|_s: Store| {}),
                 Frame::new(
                     text("probe")
                         .padding_with(20.0)
@@ -2967,9 +3222,18 @@ mod tests {
         let store = store();
         store.seed_demo();
         store.shared_media.set(vec![
-            SharedMediaRow { file: 0, label: "🌄".into() },
-            SharedMediaRow { file: 0, label: "📷".into() },
-            SharedMediaRow { file: 0, label: "🎞".into() },
+            SharedMediaRow {
+                file: 0,
+                label: "🌄".into(),
+            },
+            SharedMediaRow {
+                file: 0,
+                label: "📷".into(),
+            },
+            SharedMediaRow {
+                file: 0,
+                label: "🎞".into(),
+            },
         ]);
         let st = store.clone();
         let mut app = ui
@@ -2988,7 +3252,9 @@ mod tests {
         store.seed_demo();
         let inner = store.clone();
         let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
-        app.query().label_contains("Unread messages").assert_exists();
+        app.query()
+            .label_contains("Unread messages")
+            .assert_exists();
     }
 
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -2997,9 +3263,9 @@ mod tests {
         store.seed_demo();
         let inner = store.clone();
         let mut app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
-        store.attach.set(vec![Url::from_file_path_str(
-            Str::from("/tmp/photo.jpg"),
-        )]);
+        store
+            .attach
+            .set(vec![Url::from_file_path_str(Str::from("/tmp/photo.jpg"))]);
         app.query().label("photo.jpg").assert_exists();
         app.query().label("Caption").assert_exists();
         app.query().label("Remove").assert_exists();
@@ -3084,8 +3350,14 @@ mod tests {
         // Empty question/options: send is a no-op, panel stays open.
         store.send_poll();
         assert!(store.poll_open.snapshot());
-        app.query().label("Option 1").single().set_text(&mut app, "yes");
-        app.query().label("Option 2").single().set_text(&mut app, "no");
+        app.query()
+            .label("Option 1")
+            .single()
+            .set_text(&mut app, "yes");
+        app.query()
+            .label("Option 2")
+            .single()
+            .set_text(&mut app, "no");
         app.query().label("Option 3").assert_not_exists();
         store.add_poll_option();
         app.query().label("Option 3").assert_exists();
@@ -3157,9 +3429,7 @@ mod tests {
     /// unnamed interactive controls, empty text/image nodes, zero-area
     /// interactive nodes, and exact-duplicate (role, label, bounds) nodes.
     fn a11y_violations(app: &mut waterui_testing::OffscreenApp, page: &str) -> Vec<String> {
-        let nodes = app
-            .semantic_mut()
-            .resolve_elements(&Selector::default());
+        let nodes = app.semantic_mut().resolve_elements(&Selector::default());
         let mut violations = Vec::new();
         let mut seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for el in nodes.iter() {
@@ -3169,9 +3439,14 @@ mod tests {
             }
             let role = n.role();
             let label = n.label().unwrap_or("").trim().to_string();
-            let bounds = n
-                .bounds()
-                .map(|b| (b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32));
+            let bounds = n.bounds().map(|b| {
+                (
+                    b.x() as i32,
+                    b.y() as i32,
+                    b.width() as i32,
+                    b.height() as i32,
+                )
+            });
             if INTERACTIVE_ROLES.contains(&role) && label.is_empty() {
                 violations.push(format!(
                     "{page}: unnamed {role:?} #{id} at {bounds:?}",
@@ -3278,9 +3553,11 @@ mod tests {
         app.semantic_mut().settle();
         audit_or_fail(&mut app, "chat+emoji");
         store.stickers_open.set(false);
-        store.attach.set(vec![waterui::media::Url::from_file_path_str(
-            Str::from("/tmp/design_doc.pdf"),
-        )]);
+        store
+            .attach
+            .set(vec![waterui::media::Url::from_file_path_str(Str::from(
+                "/tmp/design_doc.pdf",
+            ))]);
         app.semantic_mut().settle();
         audit_or_fail(&mut app, "chat+attach");
     }
@@ -3445,7 +3722,11 @@ mod tests {
         assert_eq!(store.open_chat.get(), 3, "ArrowDown did not open chat 3");
         app.press_named_key("ArrowUp");
         app.settle();
-        assert_eq!(store.open_chat.get(), 2, "ArrowUp did not move back to chat 2");
+        assert_eq!(
+            store.open_chat.get(),
+            2,
+            "ArrowUp did not move back to chat 2"
+        );
         // End jumps to the last row; its selection write opens that chat.
         app.press_named_key("End");
         app.settle();
@@ -3458,7 +3739,11 @@ mod tests {
         app.settle();
         app.press_named_key("Enter");
         app.settle();
-        assert_eq!(store.open_chat.get(), 6, "Enter did not activate the focused row");
+        assert_eq!(
+            store.open_chat.get(),
+            6,
+            "Enter did not activate the focused row"
+        );
     }
 
     /// r34 pick 1: opening a chat with unread lands on the "Unread
@@ -3581,15 +3866,10 @@ mod tests {
         // One char after ':' is not a token yet (matches Desktop).
         store.composer.set_from("hi :s");
         app.settle();
-        app.query()
-            .label("Insert :smile:")
-            .assert_not_exists();
+        app.query().label("Insert :smile:").assert_not_exists();
         store.composer.set_from("hi :smi");
         app.settle();
-        app.query()
-            .role(Role::BUTTON)
-            .label("Insert :smile:")
-            .tap();
+        app.query().role(Role::BUTTON).label("Insert :smile:").tap();
         assert_eq!(
             store.composer.snapshot().as_str(),
             "hi 😄 ",
@@ -3597,9 +3877,7 @@ mod tests {
         );
         // After the insert there is no trailing token → row hides.
         app.settle();
-        app.query()
-            .label("Insert :smile:")
-            .assert_not_exists();
+        app.query().label("Insert :smile:").assert_not_exists();
     }
 
     /// r35 pick: in-chat search marks every hit, paints the matched range
@@ -3621,7 +3899,11 @@ mod tests {
                 .any(|(_, s)| s.background.is_some()),
             "matched range has no highlight background"
         );
-        assert_eq!(store.highlight_msg.snapshot(), ids[0], "did not jump to first match");
+        assert_eq!(
+            store.highlight_msg.snapshot(),
+            ids[0],
+            "did not jump to first match"
+        );
         store.run_chat_search(Str::from(""));
         assert!(store.messages.snapshot().iter().all(|r| !r.search_hit));
         assert!(store.chat_match_ids.snapshot().is_empty());
@@ -3659,7 +3941,11 @@ mod tests {
         let target = store.highlight_msg.snapshot();
         assert!(target > 0, "mention jump did not flash a row");
         assert!(
-            store.messages.snapshot().iter().any(|r| r.id == target && r.mentions_me),
+            store
+                .messages
+                .snapshot()
+                .iter()
+                .any(|r| r.id == target && r.mentions_me),
             "mention jump did not land on the mentioning row"
         );
     }
@@ -3733,7 +4019,10 @@ mod tests {
         // opens the popup instead of jumping.
         assert_eq!(store.pinned_msgs.snapshot().len(), 2);
         store.pinned_tap();
-        assert!(store.pinned_popup.snapshot(), "multi-pin tap should open popup");
+        assert!(
+            store.pinned_popup.snapshot(),
+            "multi-pin tap should open popup"
+        );
         store.pinned_jump(12);
         assert!(!store.pinned_popup.snapshot(), "popup should close on jump");
         let row = store
@@ -3750,12 +4039,16 @@ mod tests {
         let store = store();
         store.seed_demo();
         store.select_chat(1);
-        store
-            .pinned_msgs
-            .set(vec![PinnedRow { id: 12, label: Str::from("x") }]);
+        store.pinned_msgs.set(vec![PinnedRow {
+            id: 12,
+            label: Str::from("x"),
+        }]);
         store.pinned_id.set(12);
         store.pinned_tap();
-        assert!(!store.pinned_popup.snapshot(), "single pin should jump, not open");
+        assert!(
+            !store.pinned_popup.snapshot(),
+            "single pin should jump, not open"
+        );
         let row = store
             .messages
             .snapshot()
@@ -3804,11 +4097,13 @@ mod tests {
         );
         // A non-channel chat shows no footer at all.
         store.select_chat(1);
-        assert!(store
-            .messages
-            .snapshot()
-            .iter()
-            .all(|r| r.view_count == 0 && r.author_sig.is_empty()));
+        assert!(
+            store
+                .messages
+                .snapshot()
+                .iter()
+                .all(|r| r.view_count == 0 && r.author_sig.is_empty())
+        );
     }
 
     #[test]
@@ -3875,8 +4170,18 @@ mod tests {
         store.toggle_select(ids[0]);
         store.copy_selected();
         let clip = store.clipboard.snapshot();
-        let first = rows.iter().find(|r| r.id == ids[0]).unwrap().text.to_string();
-        let second = rows.iter().find(|r| r.id == ids[1]).unwrap().text.to_string();
+        let first = rows
+            .iter()
+            .find(|r| r.id == ids[0])
+            .unwrap()
+            .text
+            .to_string();
+        let second = rows
+            .iter()
+            .find(|r| r.id == ids[1])
+            .unwrap()
+            .text
+            .to_string();
         assert_eq!(
             clip.as_str(),
             format!("{first}\n{second}"),
@@ -3892,12 +4197,21 @@ mod tests {
         let kinds: Vec<&T> = ft.entities.iter().map(|e| &e.r#type).collect();
         assert_eq!(
             kinds,
-            [&T::Bold, &T::Italic, &T::Code, &T::Strikethrough, &T::Spoiler]
+            [
+                &T::Bold,
+                &T::Italic,
+                &T::Code,
+                &T::Strikethrough,
+                &T::Spoiler
+            ]
         );
         // UTF-16 offsets: a BMP char is 1 unit, an astral emoji is 2.
         let ft2 = parse_markdown("a\u{1F600} *b*");
         assert_eq!(ft2.text.as_str(), "a\u{1F600} b");
-        assert_eq!(ft2.entities[0].offset, 4, "a + astral emoji + space = 4 UTF-16 units");
+        assert_eq!(
+            ft2.entities[0].offset, 4,
+            "a + astral emoji + space = 4 UTF-16 units"
+        );
         assert_eq!(ft2.entities[0].length, 1);
         // Unclosed delimiters stay literal.
         let ft3 = parse_markdown("a *never closed");
@@ -3929,10 +4243,19 @@ mod tests {
         store.open_chat.set(7);
         store.pinned_label.set("Alice: shipping it".into());
         store.pinned_msgs.set(vec![
-            PinnedRow { id: 14, label: Str::from("Alice: shipping it") },
-            PinnedRow { id: 12, label: Str::from("Alice: NV12 conversion?") },
+            PinnedRow {
+                id: 14,
+                label: Str::from("Alice: shipping it"),
+            },
+            PinnedRow {
+                id: 12,
+                label: Str::from("Alice: NV12 conversion?"),
+            },
         ]);
-        let mut app = ui.viewport(1000, 900).mount_offscreen({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
+        let mut app = ui.viewport(1000, 900).mount_offscreen({
+            let store = store.clone();
+            move || views::chat_detail(store.clone(), 7).state(&store)
+        });
         app.semantic_mut().settle();
         dump_bounds("/tmp/probe_popup_closed.txt", app.semantic_mut());
         store.pinned_popup.set(true);
@@ -3951,15 +4274,11 @@ mod tests {
         use waterui_backend_core::widget::ModalInteraction;
         let closed = waterui::reactive::binding(false);
         let c = closed.clone();
-        let esc = ModalInteraction::new(
-            true,
-            SharedAction::new(move |_: Environment| c.set(true)),
-        );
+        let esc = ModalInteraction::new(true, SharedAction::new(move |_: Environment| c.set(true)));
         // #147 verified: the semantic runtime now registers modal scopes.
-        let mut app = ui.viewport(300, 300).mount(move || {
-            vstack((button("Inside").action(|_: Store| {}),))
-                .with(esc.clone())
-        });
+        let mut app = ui
+            .viewport(300, 300)
+            .mount(move || vstack((button("Inside").action(|_: Store| {}),)).with(esc.clone()));
         app.settle();
         app.press_named_key("Escape");
         app.settle();
@@ -3971,25 +4290,33 @@ mod tests {
         assert!(closed.snapshot(), "Escape did not reach the modal scope");
     }
 
-
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn probe_mention_live(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.seed_demo();
         let inner = store.clone();
-        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
-            views::sidebar_view(inner.clone()).state(&inner)
-        });
+        let mut app = ui
+            .viewport(340, 700)
+            .mount_offscreen(move || views::sidebar_view(inner.clone()).state(&inner));
         app.semantic_mut().settle();
         let nodes = app.semantic_mut().resolve_elements(&Selector::default());
         for el in nodes.iter() {
             let n = el.node();
             let l = n.label().unwrap_or("").to_string();
             if l.contains("mention") || l == "@" {
-                eprintln!("MENTION NODE #{} {:?} '{}' bounds={:?}", el.id().as_u64(), n.role(), l, n.bounds());
+                eprintln!(
+                    "MENTION NODE #{} {:?} '{}' bounds={:?}",
+                    el.id().as_u64(),
+                    n.role(),
+                    l,
+                    n.bounds()
+                );
             }
         }
-        eprintln!("chats[4].mentions = {}", store.chats.snapshot()[4].unread_mentions);
+        eprintln!(
+            "chats[4].mentions = {}",
+            store.chats.snapshot()[4].unread_mentions
+        );
         let _ = app.snapshot().save_png("/tmp/r21/sidebar_offscreen.png");
     }
 
@@ -3999,17 +4326,31 @@ mod tests {
         let store = store();
         store.seed_demo();
         let inner = store.clone();
-        let mut app = ui.viewport(340, 700).mount_offscreen(move || {
-            views::sidebar_view(inner.clone()).state(&inner)
-        });
+        let mut app = ui
+            .viewport(340, 700)
+            .mount_offscreen(move || views::sidebar_view(inner.clone()).state(&inner));
         app.semantic_mut().settle();
-        for el in app.semantic_mut().resolve_elements(&Selector::default()).iter() {
+        for el in app
+            .semantic_mut()
+            .resolve_elements(&Selector::default())
+            .iter()
+        {
             let n = el.node();
             let l = n.label().unwrap_or("").to_string();
-            if l.contains("All") || l.contains("Archive") || l.contains("Work")
-                || l.contains("Personal") || l.contains("New folder")
-                || format!("{:?}", n.role()).to_uppercase().contains("SCROLL") {
-                eprintln!("CHIP #{} {:?} '{}' bounds={:?}", el.id().as_u64(), n.role(), l, n.bounds());
+            if l.contains("All")
+                || l.contains("Archive")
+                || l.contains("Work")
+                || l.contains("Personal")
+                || l.contains("New folder")
+                || format!("{:?}", n.role()).to_uppercase().contains("SCROLL")
+            {
+                eprintln!(
+                    "CHIP #{} {:?} '{}' bounds={:?}",
+                    el.id().as_u64(),
+                    n.role(),
+                    l,
+                    n.bounds()
+                );
             }
         }
     }
@@ -4022,9 +4363,10 @@ mod tests {
         let store = store();
         store.open_chat.set(7);
         store.pinned_label.set("Alice: shipping it".into());
-        store.pinned_msgs.set(vec![
-            PinnedRow { id: 14, label: Str::from("Alice: shipping it") },
-        ]);
+        store.pinned_msgs.set(vec![PinnedRow {
+            id: 14,
+            label: Str::from("Alice: shipping it"),
+        }]);
         let mut app = ui.viewport(1400, 950).mount_offscreen({
             let store = store.clone();
             move || views::chat_detail(store.clone(), 7).state(&store)
@@ -4036,7 +4378,6 @@ mod tests {
         dump_bounds("/tmp/probe_sel_on.txt", app.semantic_mut());
         let _ = app.snapshot().save_png("/tmp/probe_sel_on.png");
     }
-
 
     /// Minimal repro for DOGFOOD r36-3: a row scrolled so it straddles the
     /// scroll viewport's top edge keeps an unclipped `.on_tap` bound that
@@ -4057,14 +4398,16 @@ mod tests {
         let mut app = ui.viewport(400, 360).mount_offscreen(move || {
             vstack((
                 text!("chrome above the scroll view").padding(),
-                scroll(vstack((0..10)
-                    .map(|i| {
-                        let t = t.clone();
-                        Frame::new(text!("row {i}").padding())
-                            .height(80.0)
-                            .on_tap(move |_s: Store| t.set(t.snapshot() + 1))
-                    })
-                    .collect::<Vec<_>>()))
+                scroll(vstack(
+                    (0..10)
+                        .map(|i| {
+                            let t = t.clone();
+                            Frame::new(text!("row {i}").padding())
+                                .height(80.0)
+                                .on_tap(move |_s: Store| t.set(t.snapshot() + 1))
+                        })
+                        .collect::<Vec<_>>(),
+                ))
                 .scroll_controller(&sc),
             ))
             .state(&store)
@@ -4221,11 +4564,22 @@ mod tests {
         store.seed_demo();
         store.select_chat(5); // Rust China: unread 12, 2 mentions
         assert_eq!(
-            store.chats.snapshot().iter().find(|r| r.id == 5).unwrap().unread,
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 5)
+                .unwrap()
+                .unread,
             12
         );
         store.catch_up();
-        let row = store.chats.snapshot().into_iter().find(|r| r.id == 5).unwrap();
+        let row = store
+            .chats
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 5)
+            .unwrap();
         assert_eq!(row.unread, 0);
         assert_eq!(row.unread_mentions, 0);
         // "All" badge drops from 3 unread chats (1, 5, 8) to 2.
@@ -4250,7 +4604,12 @@ mod tests {
         assert_eq!(ids, vec![2, 6, 8]);
         store.set_list(-1);
         assert_eq!(
-            store.chats.snapshot().iter().map(|r| r.id).collect::<Vec<_>>(),
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
             vec![10]
         );
         store.set_list(0);
@@ -4264,13 +4623,45 @@ mod tests {
     fn mute_toggles_row_style() {
         let store = store();
         store.seed_demo();
-        assert!(!store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().muted);
+        assert!(
+            !store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 1)
+                .unwrap()
+                .muted
+        );
         store.toggle_mute(1);
-        assert!(store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().muted);
+        assert!(
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 1)
+                .unwrap()
+                .muted
+        );
         // Seeded-muted chat 4 unmutes the same way.
-        assert!(store.chats.snapshot().iter().find(|r| r.id == 4).unwrap().muted);
+        assert!(
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 4)
+                .unwrap()
+                .muted
+        );
         store.toggle_mute(4);
-        assert!(!store.chats.snapshot().iter().find(|r| r.id == 4).unwrap().muted);
+        assert!(
+            !store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 4)
+                .unwrap()
+                .muted
+        );
     }
 
     /// r39 pick: Translate swaps the bubble body for the translation and
@@ -4325,7 +4716,13 @@ mod tests {
         store.seed_demo();
         store.select_chat(1);
         assert_eq!(
-            store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().unread_reactions,
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 1)
+                .unwrap()
+                .unread_reactions,
             2
         );
         store.reaction_jump();
@@ -4334,7 +4731,13 @@ mod tests {
         assert!(hit.highlighted, "jump target flash-highlighted");
         assert!(!hit.unread_reaction, "flag consumed on jump");
         assert_eq!(
-            store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().unread_reactions,
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 1)
+                .unwrap()
+                .unread_reactions,
             0
         );
     }
@@ -4348,17 +4751,35 @@ mod tests {
         store.seed_demo();
         // Alice is seeded with a 24 h timer.
         assert_eq!(
-            store.chats.snapshot().iter().find(|r| r.id == 2).unwrap().auto_delete,
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 2)
+                .unwrap()
+                .auto_delete,
             86_400
         );
         store.set_auto_delete(2, 0);
         assert_eq!(
-            store.chats.snapshot().iter().find(|r| r.id == 2).unwrap().auto_delete,
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 2)
+                .unwrap()
+                .auto_delete,
             0
         );
         store.set_auto_delete(1, 604_800);
         assert_eq!(
-            store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().auto_delete,
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 1)
+                .unwrap()
+                .auto_delete,
             604_800
         );
         assert_eq!(store.notice.snapshot().1.as_str(), "Auto-delete: 1 week");
@@ -4586,11 +5007,13 @@ mod tests {
         store.folder_name.set_from("Trips");
         store.toggle_folder_chat(5);
         store.save_folder();
-        assert!(store
-            .folders
-            .snapshot()
-            .iter()
-            .any(|f| f.title.as_str() == "Trips" && f.include == vec![5]));
+        assert!(
+            store
+                .folders
+                .snapshot()
+                .iter()
+                .any(|f| f.title.as_str() == "Trips" && f.include == vec![5])
+        );
     }
 
     /// r42: the window title counts unread messages across chats,
@@ -4685,10 +5108,7 @@ mod tests {
         assert_eq!(chips.len(), 2);
         assert_eq!(chips[0].reactors.len(), 2);
         assert_eq!(chips[1].reactors.len(), 1);
-        assert!(chips[0]
-            .reactors
-            .iter()
-            .any(|r| r.as_str() == "Alice"));
+        assert!(chips[0].reactors.iter().any(|r| r.as_str() == "Alice"));
     }
 
     /// r43: emoji inserts land in the recents strip deduped, newest first.
@@ -4775,5 +5195,4 @@ mod tests {
         assert_eq!(store.comments_open.snapshot(), Some(42));
         assert!(store.comments_list.snapshot().len() >= 3);
     }
-
 }

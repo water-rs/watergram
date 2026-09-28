@@ -559,3 +559,66 @@ positives observed. (Patterns from earlier rounds folded in.)
 - **Lint candidates (new this round):** none new — clippy/dylint clean
   on all new code; `Binding::snapshot()` (not `.get()`) was a plain
   compile error, no lint would have caught it.
+
+## r44
+
+- **Typed drag: the skill's drag/drop reference predates #1254.** It still
+  describes `DragData`/`drop_destination(DragData)`; on waterui
+  eda24225 `DragData` is gone and `.drop_destination` is generic over a
+  typed payload: `.drop_destination(|f: waterui::component::drag::Files, store: Store| …)`
+  with `f.into_urls() -> Vec<Url>` and `path`/`is_local` per item.
+  `.drop_hover(&Binding<bool>)` toggles on hover-in/out. One updated
+  snippet pair (drag source `draggable(typed_payload)` + destination)
+  would carry the whole mental model.
+- **OS file drops: the destination must accept `Files`; winit only emits
+  `file://` URIs.** On hydrolysis 437ef045, `WindowEvent::DroppedFile`
+  becomes a `Files` payload resolved at `pointer_position`
+  (hit_test.rs; platform.rs:2530-2542). For testing: winit 0.30's XDnD
+  parser rejects bare paths — the dropper must send
+  `text/uri-list` entries carrying the `file://` scheme, and winit
+  `Path::canonicalize()`s each URI, so the file must exist. A "how to
+  synthesize a drop" note in testing docs would have saved reading
+  winit's `parse_data`.
+- **`.then`-gated nested `Menu` is a silent trap.** A nested `Menu`
+  produced via `flag.then(|| Menu::new(...))` renders, its `›` parent
+  opens a submenu popup, and clicks there never dispatch (DOGFOOD
+  r44-1). The Menu reference should warn that conditional content at
+  nested-menu level is lossy on hydrolysis today — write the `Menu`
+  unconditionally and put conditionality inside its items.
+- **Popup hit regions can die below the main window's bottom edge.**
+  Low-placed `.context_menu` popups lose dispatch on their lower items —
+  clicks are swallowed or pass through to the row beneath (DOGFOOD
+  r44-2, evidence in shots). Until fixed, any "menu looks fine but won't
+  click" report is suspicious: check where the popup's own X window sits
+  (`xwininfo -root -children` lists popups) vs the main window bottom.
+- **`App::menu_bar` handlers run in the app env, and a `#[state]` type
+  extracts `State<T>` — not `T`.** `.action(|store: Store| ...)` on a
+  menu_bar command type-checks but panics `extract_or_panic::<Store>` at
+  chord dispatch unless the app env holds the `State<Store>` slot. The
+  app-level equivalent of `.state(&v)` is
+  `env.insert(waterui::extract::State(store.clone()))` — a bare
+  `env.insert(store.clone())` writes a different key (`TypeId<Store>`)
+  and fools you completely. This also satisfies
+  `handler_captures_binding` cleanly (DI instead of closure capture).
+  Skill fix: document "app-level state install = `env.insert(State(v))`"
+  next to `.state(&v)`. Fixed this round in hydrolysis (devin/menu-bar
+  057cc0b): chords arm on `MenuShortcutRegistry` app-wide; only macOS
+  renders a real menu bar (NSApp.mainMenu), Linux/Windows/web arm-only —
+  worth a "what renders where" table in the menu reference.
+- **A git `rev` pin cannot carry an unpushed fix — and fails silently.**
+  With `hydrolysis = { git, rev = "68ec29a5" }`, the checkout builds and
+  `App::menu_bar` compiles, but the fix living only in a local branch is
+  simply absent: chords armed nothing, no warning anywhere. The fix's
+  own symptom (dead shortcuts) looked like the original bug. Until the
+  branch lands upstream, `path = "../hydrolysis"` is the only correct
+  pin; a stale-Cargo.lock check (`cargo metadata --locked`) does NOT
+  catch this — the lock happily records the rev as requested.
+- **Lint candidates (new this round):**
+  - **`when` payload closures must be `Fn`, and a per-call
+    `store.X.clone()` inside `.state`-scored closures keeps that
+    property** — could a lint flag `FnOnce`-capturing `move` closures
+    passed to `when`/`watch`? Second round bitten (r41/r44); the error
+    text is clear but the pattern (`.map(...)` inside the moved closure
+    body touching `store.field`) is easy to write.
+  - none other — `Str::from(&name)` lifetime error surfaced at compile
+    time; dylint clean on all new code.

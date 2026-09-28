@@ -18,12 +18,14 @@ use tdlib_rs::enums::Update;
 pub fn spawn_client() -> (i32, Receiver<(Update, i32)>) {
     let client_id = tdlib_rs::create_client();
     let (tx, rx) = async_channel::unbounded::<(Update, i32)>();
-    std::thread::spawn(move || loop {
-        let Some((update, client_id)) = tdlib_rs::receive() else {
-            continue;
-        };
-        if tx.try_send((update, client_id)).is_err() {
-            break;
+    std::thread::spawn(move || {
+        loop {
+            let Some((update, client_id)) = tdlib_rs::receive() else {
+                continue;
+            };
+            if tx.try_send((update, client_id)).is_err() {
+                break;
+            }
         }
     });
     (client_id, rx)
