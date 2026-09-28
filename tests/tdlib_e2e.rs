@@ -26,8 +26,10 @@ use tdlib_rs::{enums, functions, types};
 /// `td_receive` queue — nothing responds unless some thread keeps pumping
 /// `receive()`. Spawns that pump; non-response updates are dropped.
 fn spawn_pump() {
-    std::thread::spawn(|| loop {
-        let _ = tdlib_rs::receive();
+    std::thread::spawn(|| {
+        loop {
+            let _ = tdlib_rs::receive();
+        }
     });
 }
 
@@ -84,8 +86,10 @@ fn login_send_receive_on_test_dc() {
         enums::AuthorizationState::WaitPhoneNumber
     ));
 
-    pollster::block_on(functions::set_authentication_phone_number(phone, None, client))
-        .expect("set_authentication_phone_number failed");
+    pollster::block_on(functions::set_authentication_phone_number(
+        phone, None, client,
+    ))
+    .expect("set_authentication_phone_number failed");
 
     assert!(matches!(
         auth_state(client),
@@ -110,8 +114,12 @@ fn login_send_receive_on_test_dc() {
     ))
     .expect("load_chats failed");
 
-    let chats = pollster::block_on(functions::get_chats(Some(enums::ChatList::Main), 50, client))
-        .expect("get_chats failed");
+    let chats = pollster::block_on(functions::get_chats(
+        Some(enums::ChatList::Main),
+        50,
+        client,
+    ))
+    .expect("get_chats failed");
     let enums::Chats::Chats(chats) = chats;
 
     let mut saved_id = 0i64;
@@ -157,9 +165,9 @@ fn login_send_receive_on_test_dc() {
     ))
     .expect("get_chat_history failed");
     let enums::Messages::Messages(msgs) = history;
-    let found = msgs.messages.iter().flatten().any(|m| {
-        matches!(&m.content, enums::MessageContent::MessageText(t) if t.text.text == text)
-    });
+    let found = msgs.messages.iter().flatten().any(
+        |m| matches!(&m.content, enums::MessageContent::MessageText(t) if t.text.text == text),
+    );
     assert!(found, "sent message not found in history");
 
     pollster::block_on(functions::edit_message_text(

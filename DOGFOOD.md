@@ -3250,3 +3250,103 @@ never fires — `menu_shortcuts.rs` only ever sees `Menu`s mounted inside a
 window's view tree. App-side posture: keep app commands in the always-
 mounted hamburger `Menu` (which is how Ctrl+W shipped); no workaround
 needed for a *visual* bar since we already keep one in-window.
+
+## r44 — repin waterui eda24225 / hydrolysis 437ef045 (typed drag; menu_bar fixed in hydrolysis; two new menu defects)
+
+### Closures
+
+- **r41-1 CLOSED** — `.visible(false)` on a mounted `List` section no longer
+  panics the a11y flush on hydrolysis `437ef045` (#274). The `when`
+  substitution is reverted back to `.visible(!collapsed)` on the settings
+  section list; the Appearance/Notifications section toggles were exercised
+  live at 1400 with accessibility on — no panic, sections collapse/expand.
+- **r43-1 CLOSED — fixed in hydrolysis itself** on branch
+  `devin/menu-bar`, head `057cc0b` off `68ec29a5` (first landed as
+  `66501fc` off `437ef045`, rebased onto dev). `App::menu_bar` is now
+  a first-class shortcut source in every runner: its commands arm on the
+  shared `MenuShortcutRegistry` exactly like a mounted `Menu` (app-scoped —
+  any window, always live while the app runs, re-register replaces). What
+  each platform renders: **macOS (winit)** gets a real `NSMenu` installed
+  as `NSApp.mainMenu` via objc2 (type-checked for
+  aarch64-apple-darwin); **Linux/Windows winit, web, and headless arm the
+  chords only** — matching gtk-backend, which also drops the visual bar —
+  since none of those surfaces own an app-level menubar UI in hydrolysis'
+  model (the in-window hamburger `Menu` remains the visible menu surface).
+  New test `menu_bar_chord_fires_without_a_mounted_menu`: a menu_bar-only
+  command's shortcut dispatches with zero `Menu`s mounted in any window;
+  the fix also closed a registry-shadowing bug found by that test (a
+  re-registered menu_bar could leave the earlier registration's chords
+  armed). Watergram declares Quit (Ctrl+W), New chat (Ctrl+N) and
+  Settings (Ctrl+,) on `App::menu_bar` — all three verified live at 1400
+  and Ctrl+N again at 600: Ctrl+W exits the process, Ctrl+N opens the New
+  chat panel, Ctrl+, opens Settings. One adoption trap recorded here: a
+  `#[state]`-marked type extracts `State<T>` from the environment (the
+  slot `.state(&v)` installs), so an app-level install must be
+  `env.insert(State(store.clone()))` — a bare `env.insert(store.clone())`
+  makes every menu_bar action panic `extract_or_panic::<Store>` at
+  dispatch (handler.rs:31) while type-checking fine. The upstream rev pin
+  also silently excludes this unpushed fix, so `hydrolysis` is
+  path-patched to `../hydrolysis` for now (Cargo.toml comment marks the
+  repin point). The hamburger keeps Quit as a pointer affordance with no
+  chord (one chord, one source).
+
+### r44-1: a conditionally-mounted nested `Menu` renders and opens, but its commands never dispatch
+
+`Menu::new` inside a `.context_menu` items list works when unconditional —
+"Auto-delete ›" in the same popup dispatches every launch. But a nested
+menu produced through a signal gate —
+
+```rust
+(!row.muted).then(|| Menu::new("Mute for…", (
+    "1 hour".action(|| set_mute(id, 3600)),
+    "8 hours".action(|| set_mute(id, 28800)),
+    "2 days".action(|| set_mute(id, 172800)),
+    "Forever".action(|| set_mute(id, i32::MAX)),
+)))
+```
+
+— renders the parent item with its `›`, opens its submenu popup on click,
+and yet **every click on the submenu's items is a no-op**: menus stay
+open, no action fires, nothing in the log. Observed on three separate
+clicks across two items. `Option<T: MenuView>` flattens to
+`MenuItem::Menu(menu)` in waterui menu.rs:399-403 — identical at item
+level to writing the `Menu` unconditionally — so the loss is in the
+backend's command wiring for conditional content, not in what waterui
+handed it. Replacing the `.then` with an unconditional `Menu::new` made
+the same four items dispatch immediately (live-verified at 1400 and 800:
+"1 hour" closes the menus and mutes the row). App-side posture: the mute
+submenu is unconditional; the conditional row only suppressed the *item
+list*, which is the defect — kept cited here.
+
+### r44-2: items in the lower band of a low-placed context-menu popup are hit-transparent
+
+On winit/X11, a `.context_menu` popup placed low enough that it extends
+below the main window's bottom edge loses hit-testing on its lower
+items. The painted menu looks complete and dismisses normally, but
+clicks in the dead band either do nothing or **pass through to the view
+beneath** — clicking the "Unmute" item at root (330,630) opened the
+`dogfood crew` chat row underneath it. Measured on one popup (600×900
+window, popup `214×524+286+411`): items above ~local-y 150 dispatch
+("Pin" fired), items below ~local-y 180–350 are dead ("Archive",
+"Unmute", "Mute for…", "Auto-delete", "Join chat" all silent or
+fall-through). On another popup the same session (800×900, popup
+`214×476+146+561`) both submenu parents at local-y 214/254 were inert.
+The same menus work when the popup lands higher (Telegram News' menu at
+`+146+411` on the 800-wide window opened its "Mute for…" submenu at
+`0x20000e 214×236+332+659` and "1 hour" dispatched). Signature matches
+the #260/r38-1 click-through family — the painted bounds outlive the
+registered hit region — but triggered by popup *placement* rather than
+row overlap; intermittent per menu instance. Expected: hit region covers
+every painted item, or the popup is clamped inside the window so no part
+of it is dead. Workaround: none applied — the mute submenu also exists
+in the top-anchored settings/row menus that don't hit the band.
+
+### Adopted this round
+
+- **Typed drag (waterui#1254 / hydrolysis#275)** — zero port needed:
+  watergram never used `draggable`/`drop_destination`/`DragData` before
+  (grep-clean). Adopted `.drop_destination(|files: Files, store| …)` +
+  `.drop_hover(&Binding<bool>)` on the app root — the last ❌ parity row.
+- **`signal_color(source)`** — live-reactive `.background(signal_color)`
+  drives the chat-pane wallpaper preset (Appearance swatches).
+- **`App::menu_bar`** — now the single source for Ctrl+W/Ctrl+N/Ctrl+,.

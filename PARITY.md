@@ -46,7 +46,7 @@
 | 输入框 Markdown（*粗* _斜_ `码` ~~删~~ \|\|剧透\|\|） | ✅ | `parse_markdown` 发送时转 `FormattedText` 实体（UTF-16 offset），demo 走本地回显行；编辑路径同样解析 | `parse_markdown_strips_delimiters_and_offsets_utf16` `send_demo_echo_appends_outgoing_row` |
 | 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | ✅ | Ctrl+W 三宽实测关窗退出进程（常驻 hamburger Menu 的 "Quit Telegram" 携带 `Shortcut::new("w").control()`，挂载 Menu 的 chord 经 MenuShortcutRegistry 全局派发→`win_state=Closed`→`remove_closed_windows` 退出事件循环）；另有 Ctrl+F 搜索、Ctrl+R 已读、Enter 发送（`on_submit`）、↑ 编辑、Esc 关弹层、←/→ 查看器、Alt+↑↓ 切会话 | 三宽实测进程退出（r43_quit_1400 关窗后根图空黑+进程退出） |
 | Alt+↑/↓ 切换会话 | ✅ | 根 `.on_key_press`（冒泡自任意焦点）→ `chat_switch(down)` 沿当前文件夹名册 ±1 步进；handler 须在 `.state(&store)` 作用域内（env 只含祖先链的 `.state`） | `chat_switch_walks_roster` + 三宽实机验证（r42_altup*/r42_altdown1400） |
-| 编辑消息 | ✅ | `editMessageText`；`message.edit_date` → 气泡内 "edited" 标记 | — |
+| 编辑消息 | ✅ | `editMessageText` + `editMessageCaption`（r44）：正文/媒体说明均可进编辑栏（item 按 `can_edit` 过滤仅出向消息），`demo_apply_edit` 落 demo 语料，`edit_date` → 气泡 "edited" | 三宽实测（r44_editbar*/r44_edited_*） |
 | 删除消息 | ✅ | `deleteMessages` + 删除确认卡（"Delete N messages?"，私聊含 "Also delete for <peer>" 勾选框驱动 `revoke` 标志，Cancel/红色 Delete，Esc/点遮罩关闭） | `delete_confirm_card_flow` |
 | 转发 | ✅ | `forwardMessages` | — |
 | 回复 / 引用（含点击引用跳转原消息） | ✅ | `inputMessageReplyTo` + `jump_to_message`（本地命中直接高亮+滚动，未加载走 `getMessage`+历史） | `reply_banner_shows` / `reply_quote_jumps_to_loaded_message` |
@@ -92,6 +92,7 @@
 | 全局消息搜索（"Messages" 区） | ✅ | `searchMessages(ChatList::Main)` → 侧栏结果区 "Messages" 分区（标题+发送者:摘要+时间）；点击 `open_hit` = `select_chat`+`jump_to_message` 高亮跳消息；demo 走语料扫描 | `global_message_search_demo` |
 | 未读回到底部浮动钮 | ✅ | 打开的会话 unread>0 → 右下 "↓ N" 圆钮 → `catch_up` = `scroll_bottom`+`mark_read`+文件夹徽标重算；scroll 读回缺失（waterui#1259）故暂按 unread>0 常驻显示 | `catch_up_chip_marks_read` |
 | 静音会话样式 | ✅ | `row.muted` → 标题 MutedForeground + `bell_off` 图标，未读徽标灰底（SurfaceVariant/MutedForeground 而非 Accent） | `mute_toggles_row_style` |
+| 静音时长选择 | ✅ | 行菜单 "Mute for…" 嵌套 `Menu`（1 hour/8 hours/2 days/Forever → `set_mute` 秒数）+ `row.muted` 时 "Unmute"（`toggle_mute`）；已知缺陷 DOGFOOD r44-1/r44-2（条件嵌套菜单不派发 / 低位弹层下缘点击穿透） | `mute_duration_submenu` `toggle_mute_roundtrip` + 实测截图（r44_mutesub*/r44_muted_800） |
 | 文件夹未读徽标 | ✅ | `updateUnreadChatCount` → `folder_unreads` 按 Main/Archive/Folder 键记入，chip 标题后加未读会话数；demo 由 `demo_recount_folders` 从名册统计 | `folder_unread_badges` |
 | 文件夹右键菜单（Mark all as read） | ✅ | 文件夹 chip 右键 → 「Edit folder / Mark all as read / Delete folder」；`mark_folder_read` 清该 folder 内未读并重算徽标（r40 实测 All 3→2 + 行徽标清除） | `folder_unread_badges` + 实测截图（r40d_foldermenu/r40d_marked） |
 | 会话列表 FAB 新建聊天钮 | ✅ | 会话列右下 ✎ 圆形 Accent 钮 → `nav.push(Route::NewChat)`（r40 实测点开 New chat 面板） | 实测截图（r40d_fab、r40_600_fab） |
@@ -99,7 +100,7 @@
 | 频道贴 footer（浏览数/签名） | ✅ | `kind_icon="channel"` 贴子行尾：👁 `view_count` + `author_signature` | `channel_post_footer_shows_views` + 实测截图（r37_channel*） |
 | 频道贴评论区 | ✅ | `interaction_info.reply_info.reply_count` → 行尾 💬 N chip → `open_comments` 弹层（`comments_list`，发送者+正文行，demo 播种）；点击 chip 开串 | `open_comments_seeds_thread` + 三宽实测（r43_comments*） |
 | 跳转到日期弹层 | ✅ | 工具栏日历钮 → 日期弹层 → `date_jump_target` 定位并高亮目标消息 | `date_jump_popup_opens` + 实测截图（r37_jump*） |
-| 拖拽文件进窗口发送 | ❌ | 框架双层缺口：waterui `DragData` 仅 Text|Url 无 File；hydrolysis 未桥接 winit DroppedFile/HoveredFile — DOGFOOD r34-1 | — |
+| 拖拽文件进窗口发送 | ✅ | waterui eda24225 类型化拖放（#1254）+ hydrolysis 437ef045 桥接 winit XDnD `HoveredFile`/`DroppedFile`（#275）：根 `.drop_destination(|f: Files| f.into_urls()→attach)` + `.drop_hover` 蒙层；落入 → 附件条+提示 → caption → 文档气泡（demo `demo_echo_attachments`，真实 `sendMessage`）；合成 XDnD 源 + file:// URI 实测 | 三宽实测（r44_drop*/r44_docsent_*） |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
 | 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条并按对端 accent 色着色；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母色圆）；组末气泡底角尾巴为气泡背景层内 Path 楔形 + `.offset` 外推（同 fill 一体、接角方角、不占布局空间）；组间间距大于组内 | `set_messages_groups_runs` |
 | 机器人内联键盘 | ✅ | `replyMarkupInlineKeyboard` → 气泡内容下方按钮行（每行按原列数等宽 pill，圆角 Accent 10%）；点击 `inline_tap` 按类型分发：Url→`open_link`、Callback→`getCallbackQueryAnswer`（show_alert/url 回落 toast/打开）、CopyText→剪贴板+toast、SwitchInline→填入输入框、User→资料卡、LoginUrl/WebApp 等未覆盖型 toast 提示 | `inline_keyboard_parses_and_dispatches` + 实测截图（r41_kb*） |
@@ -159,7 +160,8 @@
 
 | 功能 | 状态 | TDLib API | 测试 |
 |---|---|---|---|
-| 深色模式 | ✅ | env `ColorScheme` | `dark_mode_toggle` |
+| 深色模式 | ✅ | env `ColorScheme`；设置 Appearance "Dark mode" 开关 + 汉堡菜单 "Night mode" 项（`.selected(store.dark)` ✓ 态，Desktop 同款入口） | `dark_mode_toggle` + 三宽实测（r44_menu*/r44_light_*/r44_dark_*） |
+| 聊天背景预设 | ✅ | Appearance 面板五个色板（Default/Sky/Sand/Dusk/Night）→ `chat_bg` → 消息区 `.background(signal_color(bg))` 动态跟随；Desktop 壁纸选择对应项 | `chat_bg_preset_applies` + 三宽实测（r44_sky2/r44_sand_800/r44_duskchat2_600） |
 | 账号信息展示 | ✅ | `getMe` | `settings_shows_account` |
 | 通知设置（全局/按聊天） | ✅ | `setChatNotificationSettings`（单聊）+ `setScopeNotificationSettings`（私聊/群/频道三项全局开关） | — |
 | 隐私设置 | ✅ | `getUserPrivacySettingRules` + `setUserPrivacySettingRules`：预设 + 逐用户 Always/Never allow 例外（联系人选择器，AllowUsers/RestrictUsers 合并前置） | `privacy_audience_mapping`、`privacy_exception_merge` |
@@ -177,7 +179,7 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：131 项 ｜ 部分 🟡：0 项｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
+- 已实现 ✅：135 项 ｜ 部分 🟡：0 项｜ 未实现 ❌：0 项
 - r41 补录：机器人内联键盘（replyMarkup 按钮行+分类型分发）、聊天操作条（chatActionBar* 全型，替换输入框区）、消息信息卡（getMessageReadDate+getMessageViewers）、全局搜索过滤标签（All/Chats/Media/Files/Links）、文件夹编辑器会话选择器（getChatFolder 回填 + included_chat_ids 写回）—— 均 1400/800/600 实机验证；m3 锁已解除（waterui ee85dc47 含 TabItemLayout），m3→b21c79f6；waterkit 锁亦解除（video-gpu#35 已并 01f3d3fc，pin waterkit dev 11300217 software-decode），waterkit*→11300217 + video-gpu→01f3d3fc
 - r39 新增：自动删除定时器（行菜单嵌套 `Menu`）、未读回应 ❤ 徽标+浮动跳转钮、消息翻译（内联互换+还原）、复制消息链接、复制图片 —— 五项均 1400/800/600 实机验证
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
@@ -186,3 +188,4 @@
 - r40 补录：文件夹右键菜单（Mark all as read）、会话列 FAB ✎ 新建聊天、视频 m:ss 时长角标、查看器 ‹ › 边钮+←/→ 键翻页、菜单 Command::shortcut 提示（Ctrl+C/Ctrl+R/Ctrl+F）+ 键事件面落地（on_key_press/on_submit，全局快捷键 ❌→🟡）——均 1400/800/600 实机验证；新缺陷 DOGFOOD r40-1（`when` 弹层无遮挡注册）。
 - r42 补录：窗口标题未读数（`Watergram (N)`，WM_NAME 实测）、机器人 `/` 命令补全（`/st`→`/status` 弹层+点选回填）、Alt+↑↓ 切换会话（根 `.on_key_press` 冒泡）、Emoji 面板搜索（`fire`→`🔥 :fire:` 命中+插入）、回应 chip 反应者菜单（"Alice reacted with 👍" 行 + Remove your reaction）——均 1400/800/600 实机验证（r42_* 截图）；nami ebe55e7（nami#31）落地后撤销 per-consumer distinct workaround，侧栏搜索 `when(searching)` 第二订阅者复通实测（r42_searchpane1400）；DOGFOOD r40-1 经 hydrolysis#269 验证关闭。
 - r43 补录：Emoji 面板最近使用条、资料字段点按复制（@username/电话/简介→"Copied" toast）、频道贴 💬 评论弹层、停止投票（"Poll stopped"+closed footer）、保存到收藏夹（追加到 Saved Messages+toast）——均 1400/800/600 实机验证（r43_* 截图）；Ctrl+W 补全→快捷键升 ✅（根因是 app 代码：无任何 Command 携带 chord，挂载 Menu 的 shortcut 注册表本就全局派发）；紧凑宽（<700）Profile 推送不可见的 app 级修正：`show_profile` 在紧凑宽 `selected=None`，使压入侧栏栈的资料页立即可见（hydrolysis 紧凑语义：`render_compact_split` 只渲染一列，selection=Some 时详情列覆盖侧栏栈）；新缺陷 DOGFOOD r43-1（`App::menu_bar` 三个 runner 均解构丢弃）。
+- r44 补录：拖放文件发送（根 `.drop_destination(|f: Files|…)`+`.drop_hover` 蒙层，合成 XDnD 实测落入→附件条→文档气泡）、汉堡 "Night mode"（`.selected` ✓）、编辑媒体说明（`editMessageCaption` 并入既有编辑栏）、静音时长嵌套菜单（1h/8h/2d/∞+Unmute）、聊天背景五色板（`.background(signal_color)`）——均 1400/800/600 实机验证（r44_* 截图）；repin waterui eda24225/hydrolysis 437ef045（r41-1 `.visible` 还原实测 + r43-1 于 hydrolysis devin/menu-bar 66501fc 内修复，App::menu_bar 携带 Ctrl+W/N/, 实测）；新缺陷 DOGFOOD r44-1（条件嵌套 Menu 不派发）/ r44-2（低位弹层下缘点击穿透）。

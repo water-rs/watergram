@@ -8,24 +8,25 @@
 
 use chrono::Datelike;
 use std::cell::{Cell, RefCell};
-use std::sync::mpsc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
 use waterui::color::Srgb;
-use waterui::theme::color::{
-    AccentForeground, Foreground, SelectionForeground, TertiaryContainer,
-};
 use waterui::form::secure::Secure;
-use waterui::text::styled::{Style, StyledStr};
+use waterui::graphics::color::Color;
 use waterui::layout::{Rect, ScrollController, Size};
-use waterui::window::WindowState;
 use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::task::spawn_local;
+use waterui::text::styled::{Style, StyledStr};
+use waterui::theme::color::{
+    AccentForeground, Background, Foreground, SelectionForeground, TertiaryContainer,
+};
+use waterui::window::WindowState;
 
 use waterui::Identifiable;
 use waterui::log::error;
@@ -501,53 +502,163 @@ pub struct EmojiSug {
 /// Static `name → emoji` table for `:token` autocomplete (Desktop queries
 /// the server emoji index; a local set covers the common shortcodes).
 pub(crate) const EMOJI_SHORTCODES: &[(&str, &str)] = &[
-    ("smile", "😄"), ("smiley", "😃"), ("grin", "😁"), ("joy", "😂"),
-    ("rofl", "🤣"), ("wink", "😉"), ("blush", "😊"), ("yum", "😋"),
-    ("sunglasses", "😎"), ("heart_eyes", "😍"), ("kissing_heart", "😘"),
-    ("thinking", "🤔"), ("neutral_face", "😐"), ("expressionless", "😑"),
-    ("roll_eyes", "🙄"), ("smirk", "😏"), ("persevere", "😣"),
-    ("open_mouth", "😮"), ("zipper_mouth", "🤐"), ("hushed", "😯"),
-    ("sleepy", "😪"), ("tired_face", "😫"), ("sleeping", "😴"),
-    ("relieved", "😌"), ("stuck_out_tongue", "😛"), ("cry", "😢"),
-    ("sob", "😭"), ("scream", "😱"), ("triumph", "😤"), ("pensive", "😔"),
-    ("confused", "😕"), ("upside_down", "🙃"), ("money_mouth", "🤑"),
-    ("angry", "😠"), ("rage", "😡"), ("mask", "😷"), ("sneezing", "🤧"),
-    ("innocent", "😇"), ("clown", "🤡"), ("skull", "💀"), ("ghost", "👻"),
-    ("alien", "👽"), ("robot", "🤖"), ("poop", "💩"),
-    ("thumbsup", "👍"), ("thumbsdown", "👎"), ("clap", "👏"),
-    ("raised_hands", "🙌"), ("open_hands", "👐"), ("handshake", "🤝"),
-    ("pray", "🙏"), ("v", "✌️"), ("ok_hand", "👌"), ("wave", "👋"),
-    ("muscle", "💪"), ("writing_hand", "✍️"),
-    ("heart", "❤️"), ("orange_heart", "🧡"), ("yellow_heart", "💛"),
-    ("green_heart", "💚"), ("blue_heart", "💙"), ("purple_heart", "💜"),
-    ("black_heart", "🖤"), ("broken_heart", "💔"), ("two_hearts", "💕"),
-    ("fire", "🔥"), ("sparkles", "✨"), ("star", "⭐"), ("boom", "💥"),
-    ("100", "💯"), ("white_check_mark", "✅"), ("x", "❌"),
-    ("warning", "⚠️"), ("tada", "🎉"), ("confetti_ball", "🎊"),
-    ("gift", "🎁"), ("balloon", "🎈"), ("birthday", "🎂"),
-    ("trophy", "🏆"), ("soccer", "⚽"), ("basketball", "🏀"),
-    ("dart", "🎯"), ("video_game", "🎮"), ("game_die", "🎲"),
-    ("car", "🚗"), ("airplane", "✈️"), ("rocket", "🚀"), ("house", "🏠"),
-    ("iphone", "📱"), ("computer", "💻"), ("watch", "⌚"),
-    ("camera", "📷"), ("lock", "🔒"), ("key", "🔑"), ("bulb", "💡"),
-    ("pushpin", "📌"), ("pencil", "✏️"), ("memo", "📝"), ("book", "📖"),
-    ("mag", "🔍"), ("moneybag", "💰"), ("coffee", "☕"), ("pizza", "🍕"),
-    ("hamburger", "🍔"), ("apple", "🍎"), ("beer", "🍺"),
-    ("champagne", "🥂"), ("alarm_clock", "⏰"), ("calendar", "📅"),
-    ("earth_africa", "🌍"), ("moon", "🌙"), ("sunny", "☀️"),
-    ("rainbow", "🌈"), ("umbrella", "☔"), ("snowflake", "❄️"),
-    ("zap", "⚡"), ("cat", "🐱"), ("dog", "🐶"), ("mouse", "🐭"),
-    ("rabbit", "🐰"), ("fox", "🦊"), ("bear", "🐻"), ("panda", "🐼"),
-    ("koala", "🐨"), ("tiger", "🐯"), ("lion", "🦁"), ("cow", "🐮"),
-    ("pig", "🐷"), ("frog", "🐸"), ("monkey_face", "🐵"),
-    ("chicken", "🐔"), ("penguin", "🐧"), ("bird", "🐦"),
-    ("unicorn", "🦄"), ("bee", "🐝"), ("bug", "🐛"), ("butterfly", "🦋"),
-    ("snail", "🐌"), ("turtle", "🐢"), ("snake", "🐍"), ("octopus", "🐙"),
-    ("squid", "🦑"), ("shrimp", "🦐"), ("crab", "🦀"), ("fish", "🐟"),
-    ("dolphin", "🐬"), ("whale", "🐳"), ("shark", "🦈"),
-    ("crocodile", "🐊"), ("zebra", "🦓"), ("gorilla", "🦍"),
-    ("elephant", "🐘"), ("camel", "🐪"), ("giraffe", "🦒"),
-    ("horse", "🐎"), ("sheep", "🐑"), ("deer", "🦌"),
+    ("smile", "😄"),
+    ("smiley", "😃"),
+    ("grin", "😁"),
+    ("joy", "😂"),
+    ("rofl", "🤣"),
+    ("wink", "😉"),
+    ("blush", "😊"),
+    ("yum", "😋"),
+    ("sunglasses", "😎"),
+    ("heart_eyes", "😍"),
+    ("kissing_heart", "😘"),
+    ("thinking", "🤔"),
+    ("neutral_face", "😐"),
+    ("expressionless", "😑"),
+    ("roll_eyes", "🙄"),
+    ("smirk", "😏"),
+    ("persevere", "😣"),
+    ("open_mouth", "😮"),
+    ("zipper_mouth", "🤐"),
+    ("hushed", "😯"),
+    ("sleepy", "😪"),
+    ("tired_face", "😫"),
+    ("sleeping", "😴"),
+    ("relieved", "😌"),
+    ("stuck_out_tongue", "😛"),
+    ("cry", "😢"),
+    ("sob", "😭"),
+    ("scream", "😱"),
+    ("triumph", "😤"),
+    ("pensive", "😔"),
+    ("confused", "😕"),
+    ("upside_down", "🙃"),
+    ("money_mouth", "🤑"),
+    ("angry", "😠"),
+    ("rage", "😡"),
+    ("mask", "😷"),
+    ("sneezing", "🤧"),
+    ("innocent", "😇"),
+    ("clown", "🤡"),
+    ("skull", "💀"),
+    ("ghost", "👻"),
+    ("alien", "👽"),
+    ("robot", "🤖"),
+    ("poop", "💩"),
+    ("thumbsup", "👍"),
+    ("thumbsdown", "👎"),
+    ("clap", "👏"),
+    ("raised_hands", "🙌"),
+    ("open_hands", "👐"),
+    ("handshake", "🤝"),
+    ("pray", "🙏"),
+    ("v", "✌️"),
+    ("ok_hand", "👌"),
+    ("wave", "👋"),
+    ("muscle", "💪"),
+    ("writing_hand", "✍️"),
+    ("heart", "❤️"),
+    ("orange_heart", "🧡"),
+    ("yellow_heart", "💛"),
+    ("green_heart", "💚"),
+    ("blue_heart", "💙"),
+    ("purple_heart", "💜"),
+    ("black_heart", "🖤"),
+    ("broken_heart", "💔"),
+    ("two_hearts", "💕"),
+    ("fire", "🔥"),
+    ("sparkles", "✨"),
+    ("star", "⭐"),
+    ("boom", "💥"),
+    ("100", "💯"),
+    ("white_check_mark", "✅"),
+    ("x", "❌"),
+    ("warning", "⚠️"),
+    ("tada", "🎉"),
+    ("confetti_ball", "🎊"),
+    ("gift", "🎁"),
+    ("balloon", "🎈"),
+    ("birthday", "🎂"),
+    ("trophy", "🏆"),
+    ("soccer", "⚽"),
+    ("basketball", "🏀"),
+    ("dart", "🎯"),
+    ("video_game", "🎮"),
+    ("game_die", "🎲"),
+    ("car", "🚗"),
+    ("airplane", "✈️"),
+    ("rocket", "🚀"),
+    ("house", "🏠"),
+    ("iphone", "📱"),
+    ("computer", "💻"),
+    ("watch", "⌚"),
+    ("camera", "📷"),
+    ("lock", "🔒"),
+    ("key", "🔑"),
+    ("bulb", "💡"),
+    ("pushpin", "📌"),
+    ("pencil", "✏️"),
+    ("memo", "📝"),
+    ("book", "📖"),
+    ("mag", "🔍"),
+    ("moneybag", "💰"),
+    ("coffee", "☕"),
+    ("pizza", "🍕"),
+    ("hamburger", "🍔"),
+    ("apple", "🍎"),
+    ("beer", "🍺"),
+    ("champagne", "🥂"),
+    ("alarm_clock", "⏰"),
+    ("calendar", "📅"),
+    ("earth_africa", "🌍"),
+    ("moon", "🌙"),
+    ("sunny", "☀️"),
+    ("rainbow", "🌈"),
+    ("umbrella", "☔"),
+    ("snowflake", "❄️"),
+    ("zap", "⚡"),
+    ("cat", "🐱"),
+    ("dog", "🐶"),
+    ("mouse", "🐭"),
+    ("rabbit", "🐰"),
+    ("fox", "🦊"),
+    ("bear", "🐻"),
+    ("panda", "🐼"),
+    ("koala", "🐨"),
+    ("tiger", "🐯"),
+    ("lion", "🦁"),
+    ("cow", "🐮"),
+    ("pig", "🐷"),
+    ("frog", "🐸"),
+    ("monkey_face", "🐵"),
+    ("chicken", "🐔"),
+    ("penguin", "🐧"),
+    ("bird", "🐦"),
+    ("unicorn", "🦄"),
+    ("bee", "🐝"),
+    ("bug", "🐛"),
+    ("butterfly", "🦋"),
+    ("snail", "🐌"),
+    ("turtle", "🐢"),
+    ("snake", "🐍"),
+    ("octopus", "🐙"),
+    ("squid", "🦑"),
+    ("shrimp", "🦐"),
+    ("crab", "🦀"),
+    ("fish", "🐟"),
+    ("dolphin", "🐬"),
+    ("whale", "🐳"),
+    ("shark", "🦈"),
+    ("crocodile", "🐊"),
+    ("zebra", "🦓"),
+    ("gorilla", "🦍"),
+    ("elephant", "🐘"),
+    ("camel", "🐪"),
+    ("giraffe", "🦒"),
+    ("horse", "🐎"),
+    ("sheep", "🐑"),
+    ("deer", "🦌"),
 ];
 
 /// A three-cell row of the shared-media grid.
@@ -724,6 +835,9 @@ pub struct Store {
     /// Message ids whose spoiler spans have been revealed by tap.
     pub revealed_spoilers: Binding<Vec<i64>>,
     pub attach: Binding<Vec<Url>>,
+    /// Chat-background preset key: "" = theme default, else a named preset
+    /// (Appearance settings → `chat_bg_color`).
+    pub chat_bg: Binding<Str>,
     pub clipboard: Binding<Str>,
     pub new_chat_input: Binding<Str>,
     pub new_chat_kind: Binding<i32>,
@@ -924,8 +1038,7 @@ pub struct Store {
     pub video_recording: Binding<bool>,
     pub video_elapsed: Binding<Str>,
     /// Shared state with the sheet's GpuView (None while the sheet is closed).
-    pub video_shared:
-        Rc<RefCell<Option<Rc<RefCell<crate::capture::VideoNoteShared>>>>>,
+    pub video_shared: Rc<RefCell<Option<Rc<RefCell<crate::capture::VideoNoteShared>>>>>,
     /// Encoder-thread result channel while a finish is in flight.
     #[allow(clippy::type_complexity)]
     pub video_done_rx:
@@ -1010,9 +1123,7 @@ impl Identifiable for SearchRow {
     type Id = i64;
     fn id(&self) -> i64 {
         match self {
-            SearchRow::Header(t) => {
-                i64::MIN + 2 + i64::from(t.as_str().contains("Global"))
-            }
+            SearchRow::Header(t) => i64::MIN + 2 + i64::from(t.as_str().contains("Global")),
             SearchRow::Empty => i64::MIN,
             // Hit keys are chat_id * 1_000_000 + msg_id — they never
             // collide with chat ids or the sentinels above.
@@ -1123,11 +1234,7 @@ pub struct SessionRow {
 
 fn fmt_time(ts: i32) -> Str {
     chrono::DateTime::from_timestamp(ts as i64, 0)
-        .map(|d| {
-            d.with_timezone(&chrono::Local)
-                .format("%H:%M")
-                .to_string()
-        })
+        .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
         .unwrap_or_default()
         .into()
 }
@@ -1140,7 +1247,11 @@ fn fmt_count(n: i32) -> String {
         format!("{}", n as i64)
     } else if n < 1_000_000.0 {
         let v = n / 1_000.0;
-        if v < 10.0 { format!("{v:.1}K") } else { format!("{}K", v.round() as i64) }
+        if v < 10.0 {
+            format!("{v:.1}K")
+        } else {
+            format!("{}K", v.round() as i64)
+        }
     } else {
         format!("{:.1}M", n / 1_000_000.0)
     }
@@ -1183,7 +1294,10 @@ fn fmt_day_label(day: i64) -> Str {
 /// drops per-span `background` until #207 lands, so the text shows
 /// unmasked for now — see DOGFOOD r32-2. `None` leaves spoiler text
 /// visible.
-pub(crate) fn styled_from_formatted_mask(ft: &types::FormattedText, mask: Option<Color>) -> StyledStr {
+pub(crate) fn styled_from_formatted_mask(
+    ft: &types::FormattedText,
+    mask: Option<Color>,
+) -> StyledStr {
     let mut styled = StyledStr::empty();
     if ft.entities.is_empty() {
         styled.push_str(ft.text.clone());
@@ -1234,8 +1348,9 @@ pub(crate) fn styled_from_formatted_mask(ft: &types::FormattedText, mask: Option
                 enums::TextEntityType::Code
                 | enums::TextEntityType::Pre
                 | enums::TextEntityType::PreCode(_) => mono = true,
-                enums::TextEntityType::BlockQuote
-                | enums::TextEntityType::ExpandableBlockQuote => quote = true,
+                enums::TextEntityType::BlockQuote | enums::TextEntityType::ExpandableBlockQuote => {
+                    quote = true
+                }
                 enums::TextEntityType::Url
                 | enums::TextEntityType::TextUrl(_)
                 | enums::TextEntityType::EmailAddress
@@ -1269,9 +1384,7 @@ pub(crate) fn styled_from_formatted_mask(ft: &types::FormattedText, mask: Option
         if link {
             st = st.foreground(Srgb::try_from_hex("#1F6FC0").unwrap());
         }
-        if spoiler
-            && let Some(mask) = &mask
-        {
+        if spoiler && let Some(mask) = &mask {
             st = st.background((*mask).clone());
         }
         if quote {
@@ -1340,12 +1453,7 @@ pub(crate) fn styled_from_formatted(ft: &types::FormattedText) -> StyledStr {
 /// runs on the lowercased copy, which is only safe while lowercasing
 /// preserves byte length — otherwise fall back to a case-sensitive match so
 /// offsets never mis-slice the original.
-pub(crate) fn highlight_styled(
-    base: &StyledStr,
-    q: &str,
-    hl_bg: Color,
-    hl_fg: Color,
-) -> StyledStr {
+pub(crate) fn highlight_styled(base: &StyledStr, q: &str, hl_bg: Color, hl_fg: Color) -> StyledStr {
     if q.is_empty() {
         return base.clone();
     }
@@ -1437,7 +1545,10 @@ pub(crate) fn parse_markdown(input: &str) -> types::FormattedText {
     }
 }
 
-fn position_in<'a>(chat: &'a types::Chat, list: &enums::ChatList) -> Option<&'a types::ChatPosition> {
+fn position_in<'a>(
+    chat: &'a types::Chat,
+    list: &enums::ChatList,
+) -> Option<&'a types::ChatPosition> {
     chat.positions.iter().find(|p| &p.list == list)
 }
 
@@ -1472,9 +1583,12 @@ pub(crate) fn privacy_audience(rules: &[enums::UserPrivacySettingRule]) -> &'sta
     }
     let allow_contacts = rules.iter().any(|r| matches!(r, R::AllowContacts));
     let restrict_contacts = rules.iter().any(|r| matches!(r, R::RestrictContacts));
-    if allow_contacts && !restrict_contacts && rules.iter().all(|r| {
-        matches!(r, R::AllowContacts | R::RestrictAll | R::RestrictUsers(_))
-    }) {
+    if allow_contacts
+        && !restrict_contacts
+        && rules
+            .iter()
+            .all(|r| matches!(r, R::AllowContacts | R::RestrictAll | R::RestrictUsers(_)))
+    {
         return "My contacts";
     }
     if rules.is_empty() {
@@ -1613,7 +1727,9 @@ impl Store {
             recent_emojis: Binding::container(
                 ["😂", "👍", "🔥", "❤️", "🎉", "👏", "😮", "🤔"]
                     .iter()
-                    .map(|e| RecentEmoji { emoji: Str::from(*e) })
+                    .map(|e| RecentEmoji {
+                        emoji: Str::from(*e),
+                    })
                     .collect::<Vec<_>>(),
             ),
             saved_demo_msgs: Rc::new(RefCell::new(Vec::new())),
@@ -1631,6 +1747,7 @@ impl Store {
             shared_media: Binding::<Vec<SharedMediaRow>>::default(),
             // Attachment preview caption.
             attach_caption: Binding::<Str>::default(),
+            chat_bg: Binding::<Str>::default(),
             win_frame: Binding::container(Rect::from_size(Size::zero())),
             // Poll creator (attach menu → Poll).
             poll_open: Binding::bool(false),
@@ -1661,8 +1778,7 @@ impl Store {
             accounts_open: Binding::bool(false),
             lang_packs: Binding::<Vec<LangRow>>::default(),
             lang_id: Binding::container(Str::from("en")),
-            lang_strings:
-                Binding::<HashMap<String, enums::LanguagePackStringValue>>::default(),
+            lang_strings: Binding::<HashMap<String, enums::LanguagePackStringValue>>::default(),
             sticker_packs: Binding::<Vec<PackRow>>::default(),
             voice_session: Rc::new(RefCell::new(None)),
             recording_voice: Binding::bool(false),
@@ -1701,8 +1817,14 @@ impl Store {
         self.pinned_label.set_from("Alice: shipping it 🚀");
         self.pinned_id.set(14);
         self.pinned_msgs.set(vec![
-            PinnedRow { id: 14, label: Str::from("Alice: shipping it 🚀") },
-            PinnedRow { id: 12, label: Str::from("Alice: nice. and the NV12 conversion?") },
+            PinnedRow {
+                id: 14,
+                label: Str::from("Alice: shipping it 🚀"),
+            },
+            PinnedRow {
+                id: 12,
+                label: Str::from("Alice: nice. and the NV12 conversion?"),
+            },
         ]);
         self.pinned_idx.set(0);
     }
@@ -1721,7 +1843,16 @@ impl Store {
         self.connection.set_from("");
         self.dark.set(true);
         self.screen.set(Screen::Main);
-        let mk = |id: i64, title: &str, preview: &str, order: i64, unread: i32, pinned: bool, muted: bool, typing: bool, online: bool, icon: &str| {
+        let mk = |id: i64,
+                  title: &str,
+                  preview: &str,
+                  order: i64,
+                  unread: i32,
+                  pinned: bool,
+                  muted: bool,
+                  typing: bool,
+                  online: bool,
+                  icon: &str| {
             ChatRow {
                 id,
                 title: Str::from(title.to_string()),
@@ -1753,28 +1884,164 @@ impl Store {
         // kind_icon mirrors the real path's values (state.rs `kind_icon`
         // mapping): saved/person/group/channel — never an emoji.
         let mut roster = vec![
-            mk(1, "WaterUI devs", "Lexo: preview lands on GpuSurface now", 100, 3, true, false, false, false, "group"),
-            mk(2, "Alice", "typing…", 90, 0, false, false, true, true, "person"),
-            mk(3, "Saved Messages", "git bundle sha256 a6d3c8…", 80, 0, false, false, false, false, "saved"),
-            mk(4, "Telegram News", "Stories are now available for…", 70, 0, false, true, false, false, "channel"),
-            mk(5, "Rust China", "anyone tried hydrolysis on wayland?", 60, 12, false, false, false, false, "group"),
-            mk(6, "Bob", "see you at the rust meetup", 50, 0, false, false, false, false, "person"),
-            mk(7, "dogfood crew", "heap corruption is upstream", 40, 0, false, false, false, false, "group"),
-            mk(8, "Mom", "call me when free", 30, 1, false, false, false, false, "person"),
-            mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "channel"),
-            mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, "person"),
+            mk(
+                1,
+                "WaterUI devs",
+                "Lexo: preview lands on GpuSurface now",
+                100,
+                3,
+                true,
+                false,
+                false,
+                false,
+                "group",
+            ),
+            mk(
+                2,
+                "Alice",
+                "typing…",
+                90,
+                0,
+                false,
+                false,
+                true,
+                true,
+                "person",
+            ),
+            mk(
+                3,
+                "Saved Messages",
+                "git bundle sha256 a6d3c8…",
+                80,
+                0,
+                false,
+                false,
+                false,
+                false,
+                "saved",
+            ),
+            mk(
+                4,
+                "Telegram News",
+                "Stories are now available for…",
+                70,
+                0,
+                false,
+                true,
+                false,
+                false,
+                "channel",
+            ),
+            mk(
+                5,
+                "Rust China",
+                "anyone tried hydrolysis on wayland?",
+                60,
+                12,
+                false,
+                false,
+                false,
+                false,
+                "group",
+            ),
+            mk(
+                6,
+                "Bob",
+                "see you at the rust meetup",
+                50,
+                0,
+                false,
+                false,
+                false,
+                false,
+                "person",
+            ),
+            mk(
+                7,
+                "dogfood crew",
+                "heap corruption is upstream",
+                40,
+                0,
+                false,
+                false,
+                false,
+                false,
+                "group",
+            ),
+            mk(
+                8,
+                "Mom",
+                "call me when free",
+                30,
+                1,
+                false,
+                false,
+                false,
+                false,
+                "person",
+            ),
+            mk(
+                9,
+                "nokhwa nokhwa",
+                "camera frames stream borrows &Camera",
+                20,
+                0,
+                false,
+                false,
+                false,
+                false,
+                "channel",
+            ),
+            mk(
+                10,
+                "TDLib",
+                "updateAuthorizationState received",
+                10,
+                0,
+                false,
+                false,
+                false,
+                false,
+                "person",
+            ),
             // A bot DM so the `/` command autocomplete has a real surface
             // (chat 1's inline-keyboard bot is group-only).
-            mk(11, "CI Bot", "pipeline green · try /status", 5, 0, false, false, false, true, "person"),
+            mk(
+                11,
+                "CI Bot",
+                "pipeline green · try /status",
+                5,
+                0,
+                false,
+                false,
+                false,
+                true,
+                "person",
+            ),
         ];
         self.bot_cmds.borrow_mut().insert(
             11,
             vec![
-                BotCmd { cmd: "status".into(), desc: "Show pipeline status".into() },
-                BotCmd { cmd: "build".into(), desc: "Trigger a build".into() },
-                BotCmd { cmd: "deploy".into(), desc: "Deploy to production".into() },
-                BotCmd { cmd: "logs".into(), desc: "Tail build logs".into() },
-                BotCmd { cmd: "cancel".into(), desc: "Cancel the running build".into() },
+                BotCmd {
+                    cmd: "status".into(),
+                    desc: "Show pipeline status".into(),
+                },
+                BotCmd {
+                    cmd: "build".into(),
+                    desc: "Trigger a build".into(),
+                },
+                BotCmd {
+                    cmd: "deploy".into(),
+                    desc: "Deploy to production".into(),
+                },
+                BotCmd {
+                    cmd: "logs".into(),
+                    desc: "Tail build logs".into(),
+                },
+                BotCmd {
+                    cmd: "cancel".into(),
+                    desc: "Cancel the running build".into(),
+                },
             ],
         );
         // Folder membership (Work = 2 groups/channels, Personal = 3
@@ -1813,13 +2080,8 @@ impl Store {
         // Chip badges come from the same recount the real path gets from
         // `updateUnreadChatCount` (All = 3, Work = 1, Personal = 1).
         self.demo_recount_folders();
-        self.chats.set(
-            roster
-                .iter()
-                .filter(|r| !r.in_archive)
-                .cloned()
-                .collect(),
-        );
+        self.chats
+            .set(roster.iter().filter(|r| !r.in_archive).cloned().collect());
         // Demo draft on a visible row (Telegram Desktop shows "Draft: …").
         self.set_draft(3, Some("release notes proofread".into()));
         self.update_chat_row(5, |r| r.unread_mentions = 2);
@@ -1829,8 +2091,20 @@ impl Store {
         // Mirrors TDLib `chatFolders`: only user-created folders — the
         // built-in All/Archive lists are synthesized by the sidebar itself.
         self.folders.set(vec![
-            FolderRow { id: 2, title: "Work".into(), active: false, unread: 0, include: vec![1, 9] },
-            FolderRow { id: 3, title: "Personal".into(), active: false, unread: 0, include: vec![2, 6, 8] },
+            FolderRow {
+                id: 2,
+                title: "Work".into(),
+                active: false,
+                unread: 0,
+                include: vec![1, 9],
+            },
+            FolderRow {
+                id: 3,
+                title: "Personal".into(),
+                active: false,
+                unread: 0,
+                include: vec![2, 6, 8],
+            },
         ]);
         self.set_messages(Self::demo_conversation());
         // Seed the photo message's local file so its thumbnail renders —
@@ -1848,48 +2122,184 @@ impl Store {
         // `demo_conversation` ids so `jump_to_message` highlights the
         // seeded row after the chat opens.
         *self.demo_corpus.borrow_mut() = vec![
-            (1, 10, "Alice".into(), "morning! did the camera filters example work?".into(), 0),
-            (1, 11, "Lexo".into(), "device.clone() into Arc, preview straight on the GpuSurface".into(), 0),
-            (1, 12, "Alice".into(), "nice. and the NV12 conversion?".into(), 0),
+            (
+                1,
+                10,
+                "Alice".into(),
+                "morning! did the camera filters example work?".into(),
+                0,
+            ),
+            (
+                1,
+                11,
+                "Lexo".into(),
+                "device.clone() into Arc, preview straight on the GpuSurface".into(),
+                0,
+            ),
+            (
+                1,
+                12,
+                "Alice".into(),
+                "nice. and the NV12 conversion?".into(),
+                0,
+            ),
             (1, 17, "Alice".into(), "photo.jpg".into(), 1),
             (1, 43, "Alice".into(), "clip.mp4".into(), 1),
-            (1, 13, "".into(), "check https://waterui.dev for the docs".into(), 3),
-            (2, 14, "Alice".into(), "shipping it 🚀 — GPU filters all pass".into(), 0),
-            (4, 21, "".into(), "Telegram Desktop adds GPU-accelerated previews".into(), 0),
-            (5, 12, "Fan".into(), "nice. and the NV12 conversion?".into(), 0),
-            (5, 16, "Wei".into(), "hydrolysis on wayland works now".into(), 0),
+            (
+                1,
+                13,
+                "".into(),
+                "check https://waterui.dev for the docs".into(),
+                3,
+            ),
+            (
+                2,
+                14,
+                "Alice".into(),
+                "shipping it 🚀 — GPU filters all pass".into(),
+                0,
+            ),
+            (
+                4,
+                21,
+                "".into(),
+                "Telegram Desktop adds GPU-accelerated previews".into(),
+                0,
+            ),
+            (
+                5,
+                12,
+                "Fan".into(),
+                "nice. and the NV12 conversion?".into(),
+                0,
+            ),
+            (
+                5,
+                16,
+                "Wei".into(),
+                "hydrolysis on wayland works now".into(),
+                0,
+            ),
             (6, 19, "Bob".into(), "see you at the rust meetup".into(), 0),
             (6, 20, "Bob".into(), "meetup-notes.pdf".into(), 2),
             (8, 10, "Mom".into(), "call me when free".into(), 0),
-            (10, 11, "TDLib".into(), "updateAuthorizationState received".into(), 0),
+            (
+                10,
+                11,
+                "TDLib".into(),
+                "updateAuthorizationState received".into(),
+                0,
+            ),
         ];
         self.sessions.set(vec![
-            SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
-            SessionRow { id: 2, title: "Telegram Desktop · macOS".into(), subtitle: "Shanghai · 2 hours ago".into(), current: false },
+            SessionRow {
+                id: 1,
+                title: "Watergram · Linux".into(),
+                subtitle: "this device".into(),
+                current: true,
+            },
+            SessionRow {
+                id: 2,
+                title: "Telegram Desktop · macOS".into(),
+                subtitle: "Shanghai · 2 hours ago".into(),
+                current: false,
+            },
         ]);
         self.privacy_rows.set(vec![
-            PrivacyRow { setting: "Phone number".into(), audience: "My contacts".into(), key: enums::UserPrivacySetting::ShowPhoneNumber },
-            PrivacyRow { setting: "Last seen & online".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowStatus },
-            PrivacyRow { setting: "Profile photos".into(), audience: "Everyone".into(), key: enums::UserPrivacySetting::ShowProfilePhoto },
+            PrivacyRow {
+                setting: "Phone number".into(),
+                audience: "My contacts".into(),
+                key: enums::UserPrivacySetting::ShowPhoneNumber,
+            },
+            PrivacyRow {
+                setting: "Last seen & online".into(),
+                audience: "Everyone".into(),
+                key: enums::UserPrivacySetting::ShowStatus,
+            },
+            PrivacyRow {
+                setting: "Profile photos".into(),
+                audience: "Everyone".into(),
+                key: enums::UserPrivacySetting::ShowProfilePhoto,
+            },
         ]);
         self.contacts.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0, accent: -1 },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0, accent: -1 },
+            MemberRow {
+                key: 11,
+                name: "Alice".into(),
+                status: "online".into(),
+                sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }),
+                username: "alice".into(),
+                photo: 0,
+                accent: -1,
+            },
+            MemberRow {
+                key: 12,
+                name: "Bob".into(),
+                status: "last seen recently".into(),
+                sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }),
+                username: "bob".into(),
+                photo: 0,
+                accent: -1,
+            },
         ]);
         // Chat 1 (WaterUI devs) is a group — the info panel's member list.
         self.members.set(vec![
-            MemberRow { key: 11, name: "Alice".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }), username: "alice".into(), photo: 0, accent: -1 },
-            MemberRow { key: 12, name: "Bob".into(), status: "last seen recently".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }), username: "bob".into(), photo: 0, accent: -1 },
-            MemberRow { key: 13, name: "Lexo".into(), status: "online".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }), username: "lexoliu".into(), photo: 0, accent: -1 },
-            MemberRow { key: 14, name: "Carol".into(), status: "last seen 1 hour ago".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }), username: "".into(), photo: 0, accent: -1 },
-            MemberRow { key: 15, name: "Dan".into(), status: "last seen yesterday".into(), sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }), username: "".into(), photo: 0, accent: -1 },
+            MemberRow {
+                key: 11,
+                name: "Alice".into(),
+                status: "online".into(),
+                sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 11 }),
+                username: "alice".into(),
+                photo: 0,
+                accent: -1,
+            },
+            MemberRow {
+                key: 12,
+                name: "Bob".into(),
+                status: "last seen recently".into(),
+                sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 12 }),
+                username: "bob".into(),
+                photo: 0,
+                accent: -1,
+            },
+            MemberRow {
+                key: 13,
+                name: "Lexo".into(),
+                status: "online".into(),
+                sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 13 }),
+                username: "lexoliu".into(),
+                photo: 0,
+                accent: -1,
+            },
+            MemberRow {
+                key: 14,
+                name: "Carol".into(),
+                status: "last seen 1 hour ago".into(),
+                sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 14 }),
+                username: "".into(),
+                photo: 0,
+                accent: -1,
+            },
+            MemberRow {
+                key: 15,
+                name: "Dan".into(),
+                status: "last seen yesterday".into(),
+                sender: enums::MessageSender::User(types::MessageSenderUser { user_id: 15 }),
+                username: "".into(),
+                photo: 0,
+                accent: -1,
+            },
         ]);
         self.members_count.set_from("5 members");
         self.twofa.set_from("enabled");
-        self.sticker_packs.set(vec![
-            PackRow { id: 1, title: "Hot Cherry".into() },
-        ]);
-        self.accounts.set(vec![AccountRow { id: 1, label: "Lexo · current".into() }]);
+        self.sticker_packs.set(vec![PackRow {
+            id: 1,
+            title: "Hot Cherry".into(),
+        }]);
+        self.accounts.set(vec![AccountRow {
+            id: 1,
+            label: "Lexo · current".into(),
+        }]);
     }
 
     /// The seeded conversation `seed_demo` installs and `select_chat`
@@ -1904,7 +2314,16 @@ impl Store {
                 r#type: enums::TextEntityType::Bold,
             }],
         });
-        let m = |id: i64, sender: &str, text: &str, time: &str, outgoing: bool, read_out: bool, reply: &str, reactions: &str, fwd: &str, media: &str| MessageRow {
+        let m = |id: i64,
+                 sender: &str,
+                 text: &str,
+                 time: &str,
+                 outgoing: bool,
+                 read_out: bool,
+                 reply: &str,
+                 reactions: &str,
+                 fwd: &str,
+                 media: &str| MessageRow {
             id,
             sender: Str::from(sender.to_string()),
             // Demo senders carry no TDLib accent id — the peer color
@@ -1967,10 +2386,54 @@ impl Store {
             r
         };
         let mut msgs = vec![
-            m(10, "Alice", "morning! did the camera filters example work?", "09:41", false, false, "", "", "", ""),
-            m(11, "", "yes — device.clone() into Arc, preview straight on the GpuSurface", "09:42", true, true, "morning! did the camera…", "", "", ""),
-            m(12, "Alice", "nice. and the NV12 conversion?", "09:42", false, false, "", "👍2 ❤️1", "", ""),
-            m(13, "", "compute pass now — only the encoder input buffer ever leaves the GPU", "09:43", true, true, "", "", "", ""),
+            m(
+                10,
+                "Alice",
+                "morning! did the camera filters example work?",
+                "09:41",
+                false,
+                false,
+                "",
+                "",
+                "",
+                "",
+            ),
+            m(
+                11,
+                "",
+                "yes — device.clone() into Arc, preview straight on the GpuSurface",
+                "09:42",
+                true,
+                true,
+                "morning! did the camera…",
+                "",
+                "",
+                "",
+            ),
+            m(
+                12,
+                "Alice",
+                "nice. and the NV12 conversion?",
+                "09:42",
+                false,
+                false,
+                "",
+                "👍2 ❤️1",
+                "",
+                "",
+            ),
+            m(
+                13,
+                "",
+                "compute pass now — only the encoder input buffer ever leaves the GPU",
+                "09:43",
+                true,
+                true,
+                "",
+                "",
+                "",
+                "",
+            ),
         ];
         msgs[3].styled = styled;
         // real rows carry plain text alongside the styled body
@@ -1979,19 +2442,54 @@ impl Store {
         // A link message carries a page preview card (r32-1).
         msgs[3].link_site = Str::from("waterui.dev");
         msgs[3].link_title = Str::from("WaterUI — native apps in Rust");
-        msgs[3].link_desc = Str::from("One Rust codebase for iOS, Android, web and desktop — declarative views, fine-grained reactive state, native widgets.");
+        msgs[3].link_desc = Str::from(
+            "One Rust codebase for iOS, Android, web and desktop — declarative views, fine-grained reactive state, native widgets.",
+        );
         // The card opens the URL on tap (Desktop: the whole card is a link).
         msgs[3].link_url = Str::from("https://waterui.dev");
         msgs[1].reply_to_id = 10;
         // r35: the first message mentions us — the floating `@` button
         // jumps to it.
         msgs[0].mentions_me = true;
-        msgs.push(m(14, "Alice", "shipping it 🚀", "09:44", false, false, "", "👍3 ❤️1", "", ""));
+        msgs.push(m(
+            14,
+            "Alice",
+            "shipping it 🚀",
+            "09:44",
+            false,
+            false,
+            "",
+            "👍3 ❤️1",
+            "",
+            "",
+        ));
         // Service rows (Desktop's centered grey lines): the pin that put
         // m14 on the banner, and a member join before Bob's first message.
         msgs.push(svc(15, "Alice pinned a message"));
-        msgs.push(m(16, "", "deploying the bundle round 6", "09:45", true, false, "", "", "", ""));
-        msgs.push(m(17, "Alice", "📷 photo.jpg", "09:46", false, false, "", "", "", "photo · 182 KB"));
+        msgs.push(m(
+            16,
+            "",
+            "deploying the bundle round 6",
+            "09:45",
+            true,
+            false,
+            "",
+            "",
+            "",
+            "",
+        ));
+        msgs.push(m(
+            17,
+            "Alice",
+            "📷 photo.jpg",
+            "09:46",
+            false,
+            false,
+            "",
+            "",
+            "",
+            "photo · 182 KB",
+        ));
         // A real file id so tapping the media slot opens the viewer (demo
         // has no downloaded bytes, so the viewer shows "Downloading…").
         // A real file id resolves via the seeded demo PNG (`demo_photo_png`)
@@ -2003,7 +2501,18 @@ impl Store {
         msgs.push(svc(18, "Bob joined the group"));
         // A second named sender exercises per-peer colors on the sender name
         // and the run avatar in group chats.
-        msgs.push(m(19, "Bob", "last one from the forwarded channel", "09:47", false, false, "", "", "Telegram News", ""));
+        msgs.push(m(
+            19,
+            "Bob",
+            "last one from the forwarded channel",
+            "09:47",
+            false,
+            false,
+            "",
+            "",
+            "Telegram News",
+            "",
+        ));
         // The forward badge opens the source channel's profile (demo chat 4).
         msgs.last_mut().unwrap().fwd_chat = 4;
         {
@@ -2011,8 +2520,18 @@ impl Store {
             poll_msg.poll = Some(PollRow {
                 question: "Ship the r8 bundle today?".into(),
                 options: vec![
-                    PollOptRow { ix: 0, text: "Yes".into(), pct: 67, chosen: true },
-                    PollOptRow { ix: 1, text: "Tomorrow".into(), pct: 33, chosen: false },
+                    PollOptRow {
+                        ix: 0,
+                        text: "Yes".into(),
+                        pct: 67,
+                        chosen: true,
+                    },
+                    PollOptRow {
+                        ix: 1,
+                        text: "Tomorrow".into(),
+                        pct: 33,
+                        chosen: false,
+                    },
                 ],
                 voters: 3,
                 closed: false,
@@ -2021,14 +2540,71 @@ impl Store {
         }
         // Emoji-only messages render large on no bubble (Telegram Desktop).
         msgs.push(m(21, "", "🎉🎉🎉", "09:49", true, true, "", "", "", ""));
-        msgs.push(m(22, "Alice", "🔥", "09:50", false, false, "", "❤️1", "", ""));
+        msgs.push(m(
+            22, "Alice", "🔥", "09:50", false, false, "", "❤️1", "", "",
+        ));
         // 1/3/6-chip reaction bands on text and emoji-only rows — the r24
         // no-overlap layout matrix in demo form.
-        msgs.push(m(23, "Alice", "single reaction on text", "09:51", false, false, "", "👍1", "", ""));
-        msgs.push(m(24, "Alice", "three reactions on this one", "09:52", false, false, "", "👍1 ❤️1 🔥1", "", ""));
-        msgs.push(m(25, "Alice", "six distinct reactions", "09:53", false, false, "", "👍4 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
-        msgs.push(m(26, "", "🚀🚀", "09:54", true, true, "", "👍1 ❤️1 🔥1", "", ""));
-        msgs.push(m(27, "Alice", "👀", "09:55", false, false, "", "👍2 🔥2 🎉1 👀1 🚀1 ❤️1", "", ""));
+        msgs.push(m(
+            23,
+            "Alice",
+            "single reaction on text",
+            "09:51",
+            false,
+            false,
+            "",
+            "👍1",
+            "",
+            "",
+        ));
+        msgs.push(m(
+            24,
+            "Alice",
+            "three reactions on this one",
+            "09:52",
+            false,
+            false,
+            "",
+            "👍1 ❤️1 🔥1",
+            "",
+            "",
+        ));
+        msgs.push(m(
+            25,
+            "Alice",
+            "six distinct reactions",
+            "09:53",
+            false,
+            false,
+            "",
+            "👍4 🔥2 🎉1 👀1 🚀1 ❤️1",
+            "",
+            "",
+        ));
+        msgs.push(m(
+            26,
+            "",
+            "🚀🚀",
+            "09:54",
+            true,
+            true,
+            "",
+            "👍1 ❤️1 🔥1",
+            "",
+            "",
+        ));
+        msgs.push(m(
+            27,
+            "Alice",
+            "👀",
+            "09:55",
+            false,
+            false,
+            "",
+            "👍2 🔥2 🎉1 👀1 🚀1 ❤️1",
+            "",
+            "",
+        ));
         // A trailing service line — the bottom of the chat carries a
         // service row after the last message row too.
         msgs.push(svc(28, "Lexo created the group"));
@@ -2036,8 +2612,18 @@ impl Store {
         // black forever; r32-2 makes it reveal on tap like Desktop.
         {
             let spoiler_text = "no spoilers please — it's a trap";
-            let mut spoiler_msg =
-                m(29, "Carol", spoiler_text, "09:56", false, false, "", "", "", "");
+            let mut spoiler_msg = m(
+                29,
+                "Carol",
+                spoiler_text,
+                "09:56",
+                false,
+                false,
+                "",
+                "",
+                "",
+                "",
+            );
             let ft = types::FormattedText {
                 text: spoiler_text.into(),
                 entities: vec![types::TextEntity {
@@ -2047,10 +2633,7 @@ impl Store {
                 }],
             };
             spoiler_msg.has_spoiler = true;
-            spoiler_msg.styled = styled_from_formatted_mask(
-                &ft,
-                Some(Color::from(Foreground)),
-            );
+            spoiler_msg.styled = styled_from_formatted_mask(&ft, Some(Color::from(Foreground)));
             spoiler_msg.styled_open = styled_from_formatted_mask(&ft, None);
             msgs.push(spoiler_msg);
         }
@@ -2083,7 +2666,18 @@ impl Store {
         // A three-photo album (TDLib media_album_id): the rows merge into
         // one bubble grid at set_messages.
         for (mid, caption) in [(40, "first of the set"), (41, ""), (42, "")] {
-            let mut a = m(mid, "Alice", caption, "09:57", false, false, "", "", "", "photo · 240 KB");
+            let mut a = m(
+                mid,
+                "Alice",
+                caption,
+                "09:57",
+                false,
+                false,
+                "",
+                "",
+                "",
+                "photo · 240 KB",
+            );
             a.media_file = 1;
             a.album_id = 777;
             msgs.push(a);
@@ -2092,25 +2686,63 @@ impl Store {
         // payload still downloading — Desktop draws the m:ss duration badge
         // on the thumbnail corner in this state.
         {
-            let mut v = m(43, "Alice", "clip.mp4", "09:58", false, false, "", "", "", "video");
+            let mut v = m(
+                43, "Alice", "clip.mp4", "09:58", false, false, "", "", "", "video",
+            );
             v.media_file = 1;
             v.play_file = 2;
             v.media_secs = 65;
             msgs.push(v);
         }
+        // An outgoing photo with a caption — exercises the editMessageCaption
+        // route (incoming media can't be edited).
+        {
+            let mut o = m(
+                46,
+                "",
+                "my sketch — first pass",
+                "10:01",
+                true,
+                true,
+                "",
+                "",
+                "",
+                "photo · 210 KB",
+            );
+            o.media_file = 1;
+            msgs.push(o);
+        }
         // A bot message with an inline keyboard (`replyMarkupInlineKeyboard`):
         // URL opens the browser, Callback answers the bot's query, CopyText
         // puts the token on the clipboard — the three dispatchable kinds.
         {
-            let mut kb = m(44, "CI bot", "Build #4127 passed on dev — 3m 42s", "09:59", false, false, "", "", "", "");
+            let mut kb = m(
+                44,
+                "CI bot",
+                "Build #4127 passed on dev — 3m 42s",
+                "09:59",
+                false,
+                false,
+                "",
+                "",
+                "",
+                "",
+            );
             kb.kb_rows = vec![
                 vec![
-                    KbBtn { text: "Open build".into(), kind: KbKind::Url("https://waterui.dev".into()) },
-                    KbBtn { text: "Notify me".into(), kind: KbKind::Callback("sub:4127".into()) },
+                    KbBtn {
+                        text: "Open build".into(),
+                        kind: KbKind::Url("https://waterui.dev".into()),
+                    },
+                    KbBtn {
+                        text: "Notify me".into(),
+                        kind: KbKind::Callback("sub:4127".into()),
+                    },
                 ],
-                vec![
-                    KbBtn { text: "Copy token".into(), kind: KbKind::Copy("tok-4127".into()) },
-                ],
+                vec![KbBtn {
+                    text: "Copy token".into(),
+                    kind: KbKind::Copy("tok-4127".into()),
+                }],
             ];
             msgs.push(kb);
         }
@@ -2121,8 +2753,18 @@ impl Store {
             my_poll.poll = Some(PollRow {
                 question: "Merge the r43 bundle today?".into(),
                 options: vec![
-                    PollOptRow { ix: 0, text: "Yes".into(), pct: 80, chosen: true },
-                    PollOptRow { ix: 1, text: "Later".into(), pct: 20, chosen: false },
+                    PollOptRow {
+                        ix: 0,
+                        text: "Yes".into(),
+                        pct: 80,
+                        chosen: true,
+                    },
+                    PollOptRow {
+                        ix: 1,
+                        text: "Later".into(),
+                        pct: 20,
+                        chosen: false,
+                    },
                 ],
                 voters: 5,
                 closed: false,
@@ -2171,8 +2813,7 @@ impl Store {
         let pct = if file.local.is_downloading_completed {
             100
         } else if file.expected_size > 0 {
-            ((file.local.downloaded_size * 100) / file.expected_size)
-                .clamp(0, 99) as i32
+            ((file.local.downloaded_size * 100) / file.expected_size).clamp(0, 99) as i32
         } else {
             0
         };
@@ -2211,8 +2852,7 @@ impl Store {
         let files = self.files.clone();
         let version = self.files_version.clone();
         spawn_local(async move {
-            if let Ok(enums::File::File(f)) = functions::get_file(file_id, client).await
-            {
+            if let Ok(enums::File::File(f)) = functions::get_file(file_id, client).await {
                 let completed = f.local.is_downloading_completed;
                 files.borrow_mut().insert(
                     file_id,
@@ -2224,8 +2864,7 @@ impl Store {
                 );
                 version.add_assign(1);
                 if !completed && f.local.can_be_downloaded {
-                    let _ =
-                        functions::download_file(file_id, 8, 0, 0, false, client).await;
+                    let _ = functions::download_file(file_id, 8, 0, 0, false, client).await;
                 }
             }
         })
@@ -2257,18 +2896,14 @@ impl Store {
             .map(move |(rows, mc)| {
                 rows.iter()
                     .find(|r| r.id == chat_id)
-                    .map(|r| {
-                        match (
-                            r.typing,
-                            r.kind_icon.to_string().as_str(),
-                            r.online,
-                        ) {
+                    .map(
+                        |r| match (r.typing, r.kind_icon.to_string().as_str(), r.online) {
                             (true, _, _) => Str::from("typing…"),
                             (false, "group" | "channel", _) => mc.clone(),
                             (false, _, true) => Str::from("online"),
                             _ => Str::from(""),
-                        }
-                    })
+                        },
+                    )
                     .unwrap_or_default()
             })
             .distinct()
@@ -2287,7 +2922,11 @@ impl Store {
         self.users
             .borrow()
             .get(&user_id)
-            .map(|u| format!("{} {}", u.first_name, u.last_name).trim().to_string())
+            .map(|u| {
+                format!("{} {}", u.first_name, u.last_name)
+                    .trim()
+                    .to_string()
+            })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "User".to_string())
     }
@@ -2306,7 +2945,11 @@ impl Store {
                 .users
                 .borrow()
                 .get(&u.user_id)
-                .map(|u| format!("{} {}", u.first_name, u.last_name).trim().to_string())
+                .map(|u| {
+                    format!("{} {}", u.first_name, u.last_name)
+                        .trim()
+                        .to_string()
+                })
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "User".to_string())
                 .into(),
@@ -2320,7 +2963,7 @@ impl Store {
         }
     }
 
-#[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
+    #[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
     fn content_preview(content: &enums::MessageContent) -> (Str, i32, Str, i32, i32) {
         // (text/caption, thumbnail file id, media label, playable file id, secs)
         match content {
@@ -2328,12 +2971,7 @@ impl Store {
                 (t.text.text.clone().into(), 0, Str::from(""), 0, 0)
             }
             enums::MessageContent::MessagePhoto(p) => {
-                let file = p
-                    .photo
-                    .sizes
-                    .last()
-                    .map(|s| s.photo.id)
-                    .unwrap_or_default();
+                let file = p.photo.sizes.last().map(|s| s.photo.id).unwrap_or_default();
                 let caption = p.caption.text.clone();
                 (
                     if caption.is_empty() {
@@ -2384,28 +3022,24 @@ impl Store {
                 a.audio.audio.id,
                 a.audio.duration,
             ),
-            enums::MessageContent::MessageVoiceNote(v) => {
-                (
-                    format!("Voice message ({}s)", v.voice_note.duration).into(),
-                    0,
-                    "Voice".into(),
-                    v.voice_note.voice.id,
-                    v.voice_note.duration,
-                )
-            }
-            enums::MessageContent::MessageVideoNote(v) => {
-                (
-                    format!("Video note ({}s)", v.video_note.duration).into(),
-                    v.video_note
-                        .thumbnail
-                        .as_ref()
-                        .map(|t| t.file.id)
-                        .unwrap_or_default(),
-                    "Video note".into(),
-                    v.video_note.video.id,
-                    v.video_note.duration,
-                )
-            }
+            enums::MessageContent::MessageVoiceNote(v) => (
+                format!("Voice message ({}s)", v.voice_note.duration).into(),
+                0,
+                "Voice".into(),
+                v.voice_note.voice.id,
+                v.voice_note.duration,
+            ),
+            enums::MessageContent::MessageVideoNote(v) => (
+                format!("Video note ({}s)", v.video_note.duration).into(),
+                v.video_note
+                    .thumbnail
+                    .as_ref()
+                    .map(|t| t.file.id)
+                    .unwrap_or_default(),
+                "Video note".into(),
+                v.video_note.video.id,
+                v.video_note.duration,
+            ),
             enums::MessageContent::MessageSticker(s) => (
                 format!("{} Sticker", s.sticker.emoji).into(),
                 0,
@@ -2428,22 +3062,21 @@ impl Store {
                 ("Location".into(), 0, "Location".into(), 0, 0)
             }
             enums::MessageContent::MessageContact(c) => (
-                format!("Contact: {} {}", c.contact.first_name, c.contact.last_name)
-                    .into(),
+                format!("Contact: {} {}", c.contact.first_name, c.contact.last_name).into(),
                 0,
                 "Contact".into(),
                 0,
                 0,
             ),
-            enums::MessageContent::MessagePoll(p) => {
-                (format!("Poll: {}", p.poll.question.text).into(), 0, "Poll".into(), 0, 0)
-            }
+            enums::MessageContent::MessagePoll(p) => (
+                format!("Poll: {}", p.poll.question.text).into(),
+                0,
+                "Poll".into(),
+                0,
+                0,
+            ),
             enums::MessageContent::MessageCall(c) => (
-                format!(
-                    "Call ({})",
-                    if c.is_video { "video" } else { "voice" }
-                )
-                .into(),
+                format!("Call ({})", if c.is_video { "video" } else { "voice" }).into(),
                 0,
                 "Call".into(),
                 0,
@@ -2489,10 +3122,7 @@ impl Store {
 
     /// Build reaction chips + the chosen-emoji string from TDLib's
     /// `messageInteractionInfo.reactions`.
-    fn chips_from_td(
-        &self,
-        reactions: &types::MessageReactions,
-    ) -> (Vec<ReactionChip>, Str) {
+    fn chips_from_td(&self, reactions: &types::MessageReactions) -> (Vec<ReactionChip>, Str) {
         let mut mine = String::new();
         let chips = reactions
             .reactions
@@ -2559,7 +3189,8 @@ impl Store {
     /// may borrow the caches and kick off file downloads.
     #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
     pub fn message_row(&self, m: &types::Message) -> MessageRow {
-        let (mut text, media_file, media_label, play_file, media_secs) = Self::content_preview(&m.content);
+        let (mut text, media_file, media_label, play_file, media_secs) =
+            Self::content_preview(&m.content);
         if let enums::MessageContent::MessageText(t) = &m.content {
             text = t.text.text.clone().into();
         }
@@ -2585,10 +3216,7 @@ impl Store {
                         .member_user_ids
                         .iter()
                         .filter_map(|uid| {
-                            self.users
-                                .borrow()
-                                .get(uid)
-                                .map(|u| u.first_name.clone())
+                            self.users.borrow().get(uid).map(|u| u.first_name.clone())
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -2614,11 +3242,7 @@ impl Store {
                     .as_ref()
                     .map(|c| {
                         let (t, _, l, _, _) = Self::content_preview(c);
-                        if t.is_empty() {
-                            l
-                        } else {
-                            t
-                        }
+                        if t.is_empty() { l } else { t }
                     })
                     .unwrap_or_else(|| "Reply".into()),
                 r.message_id,
@@ -2655,12 +3279,21 @@ impl Store {
                         StyledStr::empty()
                     },
                     spoiler,
-                    t.link_preview.as_ref().map(|p| p.site_name.clone().into()).unwrap_or_default(),
-                    t.link_preview.as_ref().map(|p| p.title.clone().into()).unwrap_or_default(),
-                    t.link_preview.as_ref().map(|p| {
-                        p.description.text.clone().into()
-                    }).unwrap_or_default(),
-                    t.link_preview.as_ref().map(|p| Str::from(p.url.clone()))
+                    t.link_preview
+                        .as_ref()
+                        .map(|p| p.site_name.clone().into())
+                        .unwrap_or_default(),
+                    t.link_preview
+                        .as_ref()
+                        .map(|p| p.title.clone().into())
+                        .unwrap_or_default(),
+                    t.link_preview
+                        .as_ref()
+                        .map(|p| p.description.text.clone().into())
+                        .unwrap_or_default(),
+                    t.link_preview
+                        .as_ref()
+                        .map(|p| Str::from(p.url.clone()))
                         .filter(|u: &Str| !u.is_empty())
                         .or_else(|| first_url_entity(&t.text))
                         .unwrap_or_default(),
@@ -2680,21 +3313,17 @@ impl Store {
             .forward_info
             .as_ref()
             .map(|f| match &f.origin {
-                enums::MessageOrigin::User(u) => format!(
-                    "Forwarded from {}",
-                    self.user_name(u.sender_user_id)
-                )
-                .into(),
+                enums::MessageOrigin::User(u) => {
+                    format!("Forwarded from {}", self.user_name(u.sender_user_id)).into()
+                }
                 enums::MessageOrigin::HiddenUser(h) => {
                     format!("Forwarded from {}", h.sender_name).into()
                 }
                 enums::MessageOrigin::Chat(c) => {
-                    format!("Forwarded from {}", self.chat_name(c.sender_chat_id))
-                        .into()
+                    format!("Forwarded from {}", self.chat_name(c.sender_chat_id)).into()
                 }
                 enums::MessageOrigin::Channel(c) => {
-                    format!("Forwarded from {}", self.chat_name(c.chat_id))
-                        .into()
+                    format!("Forwarded from {}", self.chat_name(c.chat_id)).into()
                 }
             })
             .unwrap_or_else(|| Str::from(""));
@@ -2760,9 +3389,7 @@ impl Store {
                                 enums::InlineKeyboardButtonType::SwitchInline(s) => {
                                     KbKind::SwitchInline(s.query.clone().into())
                                 }
-                                enums::InlineKeyboardButtonType::User(u) => {
-                                    KbKind::User(u.user_id)
-                                }
+                                enums::InlineKeyboardButtonType::User(u) => KbKind::User(u.user_id),
                                 _ => KbKind::Unsupported,
                             };
                             KbBtn {
@@ -2854,7 +3481,7 @@ impl Store {
         }
     }
 
-#[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
+    #[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
     fn preview_text(&self, m: &types::Message) -> Str {
         let (t, _, label, _, _) = Self::content_preview(&m.content);
         if matches!(m.content, enums::MessageContent::MessageText(_)) {
@@ -3007,7 +3634,13 @@ impl Store {
             let key = if r.in_archive { -1 } else { r.folder_id };
             *map.entry(key).or_insert(0) += i32::from(r.unread > 0 || r.marked_unread);
         }
-        map.insert(0, roster.iter().filter(|r| !r.in_archive && (r.unread > 0 || r.marked_unread)).count() as i32);
+        map.insert(
+            0,
+            roster
+                .iter()
+                .filter(|r| !r.in_archive && (r.unread > 0 || r.marked_unread))
+                .count() as i32,
+        );
         self.folder_unreads.set(map);
     }
 
@@ -3022,8 +3655,7 @@ impl Store {
     fn patch_positions(&self, chat_id: i64, positions: Vec<types::ChatPosition>) {
         if let Some(c) = self.chat_objs.borrow_mut().get_mut(&chat_id) {
             for p in &positions {
-                c.positions
-                    .retain(|e| e.list != p.list);
+                c.positions.retain(|e| e.list != p.list);
                 c.positions.push(p.clone());
             }
         }
@@ -3044,7 +3676,7 @@ impl Store {
     }
 
     /// The one big dispatch — runs on the UI executor for every Update.
-#[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
+    #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
     pub fn update(&self, u: enums::Update, client: i32) {
         if client != self.client_id.get() {
             // Updates belonging to a background (non-active) account are
@@ -3052,9 +3684,7 @@ impl Store {
             return;
         }
         match u {
-            enums::Update::AuthorizationState(s) => {
-                self.on_auth_state(s.authorization_state)
-            }
+            enums::Update::AuthorizationState(s) => self.on_auth_state(s.authorization_state),
             enums::Update::User(u) => {
                 self.users.borrow_mut().insert(u.user.id, u.user);
             }
@@ -3180,22 +3810,16 @@ impl Store {
                 if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
                     c.is_marked_as_unread = u.is_marked_as_unread;
                 }
-                self.update_chat_row(u.chat_id, |r| {
-                    r.marked_unread = u.is_marked_as_unread
-                });
+                self.update_chat_row(u.chat_id, |r| r.marked_unread = u.is_marked_as_unread);
             }
             enums::Update::ChatUnreadMentionCount(u) => {
                 if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
                     c.unread_mention_count = u.unread_mention_count;
                 }
-                self.update_chat_row(u.chat_id, |r| {
-                    r.unread_mentions = u.unread_mention_count
-                });
+                self.update_chat_row(u.chat_id, |r| r.unread_mentions = u.unread_mention_count);
             }
             enums::Update::ChatUnreadReactionCount(u) => {
-                self.update_chat_row(u.chat_id, |r| {
-                    r.unread_reactions = u.unread_reaction_count
-                });
+                self.update_chat_row(u.chat_id, |r| r.unread_reactions = u.unread_reaction_count);
             }
             // Per-message unread reactions (supergroups/channels): flag the
             // earliest one so the floating ❤ button can jump to it.
@@ -3302,14 +3926,9 @@ impl Store {
                     if !m.is_outgoing {
                         let (client, chat_id, mid) = (self.client_id.get(), m.chat_id, m.id);
                         spawn_local(async move {
-                            let _ = functions::view_messages(
-                                chat_id,
-                                vec![mid],
-                                None,
-                                false,
-                                client,
-                            )
-                            .await;
+                            let _ =
+                                functions::view_messages(chat_id, vec![mid], None, false, client)
+                                    .await;
                         })
                         .detach();
                     }
@@ -3349,8 +3968,7 @@ impl Store {
                     let store = self.clone();
                     spawn_local(async move {
                         if let Ok(enums::Message::Message(m)) =
-                            functions::get_message(u.chat_id, u.message_id, client)
-                                .await
+                            functions::get_message(u.chat_id, u.message_id, client).await
                         {
                             let row = store.message_row(&m);
                             store.update_message_row(u.message_id, |r| *r = row.clone());
@@ -3370,9 +3988,7 @@ impl Store {
                 self.patch_positions(u.chat_id, u.positions);
                 let text = match u.draft_message.as_ref() {
                     Some(d) => match &d.input_message_text {
-                        enums::InputMessageContent::InputMessageText(t) => {
-                            t.text.text.clone()
-                        }
+                        enums::InputMessageContent::InputMessageText(t) => t.text.text.clone(),
                         _ => String::new(),
                     },
                     _ => String::new(),
@@ -3568,7 +4184,8 @@ impl Store {
         let id: i32 = self.api_id.snapshot().trim().parse().unwrap_or(0);
         let hash = self.api_hash.snapshot().to_string();
         if id <= 0 || hash.is_empty() {
-            self.auth_note.set_from("Enter a valid api_id and api_hash (from my.telegram.org).");
+            self.auth_note
+                .set_from("Enter a valid api_id and api_hash (from my.telegram.org).");
             return;
         }
         let cfg = Config {
@@ -3591,9 +4208,7 @@ impl Store {
         let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
-            match functions::set_authentication_phone_number(phone, None, client)
-                .await
-            {
+            match functions::set_authentication_phone_number(phone, None, client).await {
                 Ok(()) => {}
                 Err(e) => {
                     store.busy.set(false);
@@ -3612,9 +4227,7 @@ impl Store {
         let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
-            if let Err(e) =
-                functions::request_qr_code_authentication(Vec::new(), client).await
-            {
+            if let Err(e) = functions::request_qr_code_authentication(Vec::new(), client).await {
                 store.busy.set(false);
                 store
                     .auth_note
@@ -3733,16 +4346,14 @@ impl Store {
                         None,
                         None,
                         None,
-                        enums::InputMessageContent::InputMessageText(
-                            types::InputMessageText {
-                                text: types::FormattedText {
-                                    text: comment.into(),
-                                    entities: Vec::new(),
-                                },
-                                link_preview_options: None,
-                                clear_draft: false,
+                        enums::InputMessageContent::InputMessageText(types::InputMessageText {
+                            text: types::FormattedText {
+                                text: comment.into(),
+                                entities: Vec::new(),
                             },
-                        ),
+                            link_preview_options: None,
+                            clear_draft: false,
+                        }),
                         client,
                     )
                     .await;
@@ -3800,7 +4411,14 @@ impl Store {
         self.members.set(Vec::new());
         if prev != 0 {
             let cur = self.composer.snapshot();
-            self.set_draft(prev, if cur.is_empty() { None } else { Some(cur.clone()) });
+            self.set_draft(
+                prev,
+                if cur.is_empty() {
+                    None
+                } else {
+                    Some(cur.clone())
+                },
+            );
             self.sync_draft(prev, cur);
         }
         if let Some(d) = self.drafts.borrow().get(&chat_id) {
@@ -3933,27 +4551,29 @@ impl Store {
                 for m in found.messages.iter() {
                     let (file, label) = match &m.content {
                         enums::MessageContent::MessagePhoto(p) => {
-                            let fid = p
-                                .photo
-                                .sizes
-                                .first()
-                                .map(|s| s.photo.id)
-                                .unwrap_or(0);
+                            let fid = p.photo.sizes.first().map(|s| s.photo.id).unwrap_or(0);
                             (fid, "🖼️".to_string())
                         }
-                        enums::MessageContent::MessageVideo(v) => {
-                            (v.video.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0),
-                             "🎬".to_string())
-                        }
-                        enums::MessageContent::MessageAnimation(a) => {
-                            (a.animation.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0),
-                             "🎞️".to_string())
-                        }
+                        enums::MessageContent::MessageVideo(v) => (
+                            v.video.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0),
+                            "🎬".to_string(),
+                        ),
+                        enums::MessageContent::MessageAnimation(a) => (
+                            a.animation
+                                .thumbnail
+                                .as_ref()
+                                .map(|t| t.file.id)
+                                .unwrap_or(0),
+                            "🎞️".to_string(),
+                        ),
                         _ => (0, String::new()),
                     };
                     if file != 0 {
                         store.want_file_id(file);
-                        rows.push(SharedMediaRow { file, label: label.into() });
+                        rows.push(SharedMediaRow {
+                            file,
+                            label: label.into(),
+                        });
                     }
                 }
                 store.shared_media.set(rows);
@@ -4091,8 +4711,7 @@ impl Store {
             Ok(enums::Message::Message(m)) => {
                 let (t, _, label, _, _) = Self::content_preview(&m.content);
                 self.pinned_id.set(m.id);
-                self.pinned_label
-                    .set(if t.is_empty() { label } else { t });
+                self.pinned_label.set(if t.is_empty() { label } else { t });
             }
             _ => {
                 self.pinned_id.set(0);
@@ -4102,18 +4721,19 @@ impl Store {
         // Full pinned list for the popup (searchChatMessages with the
         // Pinned filter — Desktop's "View all pinned" path). Keep the
         // single-pin state working if the search fails.
-        if let Ok(enums::FoundChatMessages::FoundChatMessages(found)) = functions::search_chat_messages(
-            chat_id,
-            None,
-            String::new(),
-            None,
-            0,
-            0,
-            100,
-            Some(enums::SearchMessagesFilter::Pinned),
-            self.client_id.get(),
-        )
-        .await
+        if let Ok(enums::FoundChatMessages::FoundChatMessages(found)) =
+            functions::search_chat_messages(
+                chat_id,
+                None,
+                String::new(),
+                None,
+                0,
+                0,
+                100,
+                Some(enums::SearchMessagesFilter::Pinned),
+                self.client_id.get(),
+            )
+            .await
         {
             let mut entries: Vec<PinnedRow> = found
                 .messages
@@ -4266,26 +4886,36 @@ impl Store {
             // Demo seeds so all three tabs render content.
             match tab {
                 1 => self.shared_files.set(
-                    [("spec-draft.md", "182 KB"), ("hydrolysis-trace.log", "4.1 MB"), ("r36-repo.bundle", "41 MB")]
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (t, d))| SharedLinkRow {
-                            id: -(i as i64) - 100,
-                            title: Str::from(*t),
-                            detail: Str::from(*d),
-                        })
-                        .collect(),
+                    [
+                        ("spec-draft.md", "182 KB"),
+                        ("hydrolysis-trace.log", "4.1 MB"),
+                        ("r36-repo.bundle", "41 MB"),
+                    ]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (t, d))| SharedLinkRow {
+                        id: -(i as i64) - 100,
+                        title: Str::from(*t),
+                        detail: Str::from(*d),
+                    })
+                    .collect(),
                 ),
                 2 => self.shared_links.set(
-                    [("WaterUI — native apps in Rust", "waterui.dev"), ("hydrolysis#251", "github.com/water-rs/hydrolysis/issues/251")]
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (t, d))| SharedLinkRow {
-                            id: -(i as i64) - 200,
-                            title: Str::from(*t),
-                            detail: Str::from(*d),
-                        })
-                        .collect(),
+                    [
+                        ("WaterUI — native apps in Rust", "waterui.dev"),
+                        (
+                            "hydrolysis#251",
+                            "github.com/water-rs/hydrolysis/issues/251",
+                        ),
+                    ]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (t, d))| SharedLinkRow {
+                        id: -(i as i64) - 200,
+                        title: Str::from(*t),
+                        detail: Str::from(*d),
+                    })
+                    .collect(),
                 ),
                 _ => self.load_shared_media(),
             }
@@ -4362,7 +4992,13 @@ impl Store {
             self.pinned_label.set(label.clone());
             let mut pins = self.pinned_msgs.snapshot();
             pins.retain(|r| r.id != message_id);
-            pins.insert(0, PinnedRow { id: message_id, label });
+            pins.insert(
+                0,
+                PinnedRow {
+                    id: message_id,
+                    label,
+                },
+            );
             self.pinned_msgs.set(pins);
             self.pinned_idx.set(0);
             // A real pinChatMessage(notify) produces a service row in
@@ -4520,10 +5156,8 @@ impl Store {
             if chosen {
                 let _ = functions::remove_message_reaction(chat_id, mid, rt, client).await;
             } else {
-                let _ = functions::add_message_reaction(
-                    chat_id, mid, rt, false, true, client,
-                )
-                .await;
+                let _ =
+                    functions::add_message_reaction(chat_id, mid, rt, false, true, client).await;
             }
         })
         .detach();
@@ -4546,9 +5180,7 @@ impl Store {
             .unwrap_or(false);
         let client = self.client_id.get();
         spawn_local(async move {
-            let _ =
-                functions::toggle_chat_is_marked_as_unread(chat_id, !current, client)
-                    .await;
+            let _ = functions::toggle_chat_is_marked_as_unread(chat_id, !current, client).await;
         })
         .detach();
     }
@@ -4563,8 +5195,7 @@ impl Store {
         let mut list = self.messages.snapshot();
         let mut ids = Vec::new();
         for r in list.iter_mut() {
-            let hit = !lower_q.is_empty()
-                && r.text.to_lowercase().contains(&lower_q);
+            let hit = !lower_q.is_empty() && r.text.to_lowercase().contains(&lower_q);
             r.search_hit = hit;
             r.search_styled = if hit {
                 let base = if r.styled.is_empty() {
@@ -4682,11 +5313,8 @@ impl Store {
             // Demo store: the local pass already found every match in the
             // loaded window; mirror them into the dropdown result rows.
             let list = self.messages.snapshot();
-            self.chat_search_results.set(
-                list.into_iter()
-                    .filter(|r| ids.contains(&r.id))
-                    .collect(),
-            );
+            self.chat_search_results
+                .set(list.into_iter().filter(|r| ids.contains(&r.id)).collect());
             return;
         }
         let client = self.client_id.get();
@@ -4835,9 +5463,12 @@ impl Store {
         // deduped, capped at 16.
         let mut rec = self.recent_emojis.snapshot();
         rec.retain(|e| e.emoji.as_str() != emoji);
-        rec.insert(0, RecentEmoji {
-            emoji: Str::from(emoji.to_string()),
-        });
+        rec.insert(
+            0,
+            RecentEmoji {
+                emoji: Str::from(emoji.to_string()),
+            },
+        );
         rec.truncate(16);
         self.recent_emojis.set(rec);
     }
@@ -4931,10 +5562,7 @@ impl Store {
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::Messages::Messages(m)) =
-                functions::get_message_thread_history(
-                    chat_id, msg_id, 0, 0, 50, client,
-                )
-                .await
+                functions::get_message_thread_history(chat_id, msg_id, 0, 0, 50, client).await
             {
                 let list = m
                     .messages
@@ -4959,14 +5587,22 @@ impl Store {
     /// Demo comment thread rows — deterministic per post id.
     fn demo_comments(seed: i64) -> Vec<CommentRow> {
         let bodies = [
-            "first!", "great post 👏", "link worked for me",
-            "same question here", "works on my machine", "ship it",
+            "first!",
+            "great post 👏",
+            "link worked for me",
+            "same question here",
+            "works on my machine",
+            "ship it",
         ];
         let n = 3 + (seed as usize) % 3;
         (0..n)
             .map(|i| CommentRow {
                 id: i as i64,
-                sender: if i % 2 == 0 { "Alice".into() } else { "Bob".into() },
+                sender: if i % 2 == 0 {
+                    "Alice".into()
+                } else {
+                    "Bob".into()
+                },
                 text: bodies[(i + seed as usize) % bodies.len()].into(),
             })
             .collect()
@@ -5034,8 +5670,7 @@ impl Store {
         let client = self.client_id.get();
         spawn_local(async move {
             let _ =
-                functions::set_poll_answer(chat_id, message_id, vec![option as i32], client)
-                    .await;
+                functions::set_poll_answer(chat_id, message_id, vec![option as i32], client).await;
         })
         .detach();
     }
@@ -5110,35 +5745,33 @@ impl Store {
         self.poll_correct.set(0);
         let client = self.client_id.get();
         spawn_local(async move {
-            let content = enums::InputMessageContent::InputMessagePoll(
-                types::InputMessagePoll {
-                    question: types::FormattedText {
-                        text: question,
-                        entities: Vec::new(),
-                    },
-                    options: options
-                        .into_iter()
-                        .map(|text| types::FormattedText {
-                            text,
-                            entities: Vec::new(),
-                        })
-                        .collect(),
-                    is_anonymous: anonymous,
-                    r#type: if quiz {
-                        enums::PollType::Quiz(types::PollTypeQuiz {
-                            correct_option_id: correct,
-                            explanation: types::FormattedText {
-                                text: String::new(),
-                                entities: Vec::new(),
-                            },
-                        })
-                    } else {
-                        enums::PollType::Regular(types::PollTypeRegular {
-                            allow_multiple_answers: multiple,
-                        })
-                    },
+            let content = enums::InputMessageContent::InputMessagePoll(types::InputMessagePoll {
+                question: types::FormattedText {
+                    text: question,
+                    entities: Vec::new(),
                 },
-            );
+                options: options
+                    .into_iter()
+                    .map(|text| types::FormattedText {
+                        text,
+                        entities: Vec::new(),
+                    })
+                    .collect(),
+                is_anonymous: anonymous,
+                r#type: if quiz {
+                    enums::PollType::Quiz(types::PollTypeQuiz {
+                        correct_option_id: correct,
+                        explanation: types::FormattedText {
+                            text: String::new(),
+                            entities: Vec::new(),
+                        },
+                    })
+                } else {
+                    enums::PollType::Regular(types::PollTypeRegular {
+                        allow_multiple_answers: multiple,
+                    })
+                },
+            });
             let _ = functions::send_message(chat_id, None, None, None, content, client).await;
         })
         .detach();
@@ -5163,13 +5796,7 @@ impl Store {
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::MessageSenders::MessageSenders(list)) =
-                functions::get_blocked_message_senders(
-                    enums::BlockList::Main,
-                    0,
-                    50,
-                    client,
-                )
-                .await
+                functions::get_blocked_message_senders(enums::BlockList::Main, 0, 50, client).await
             {
                 let mut rows = Vec::new();
                 for sender in list.senders {
@@ -5183,9 +5810,7 @@ impl Store {
                         }
                     }
                     let name = match &sender {
-                        enums::MessageSender::User(_) => {
-                            store.sender_name(&sender).to_string()
-                        }
+                        enums::MessageSender::User(_) => store.sender_name(&sender).to_string(),
                         enums::MessageSender::Chat(c) => store.chat_name(c.chat_id),
                     };
                     let key = match &sender {
@@ -5208,7 +5833,11 @@ impl Store {
                     };
                     rows.push(MemberRow {
                         key,
-                        name: if name.is_empty() { "Blocked".into() } else { name.into() },
+                        name: if name.is_empty() {
+                            "Blocked".into()
+                        } else {
+                            name.into()
+                        },
                         status: "".into(),
                         sender: sender.clone(),
                         username: "".into(),
@@ -5228,8 +5857,7 @@ impl Store {
         let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
-            let _ =
-                functions::set_message_sender_block_list(sender, None, client).await;
+            let _ = functions::set_message_sender_block_list(sender, None, client).await;
             store.load_blocked();
         })
         .detach();
@@ -5290,10 +5918,8 @@ impl Store {
         let client = self.client_id.get();
         let store = self.clone();
         spawn_local(async move {
-            let _ = functions::edit_message_scheduling_state(
-                chat_id, message_id, None, client,
-            )
-            .await;
+            let _ =
+                functions::edit_message_scheduling_state(chat_id, message_id, None, client).await;
             store.load_scheduled();
         })
         .detach();
@@ -5345,15 +5971,9 @@ impl Store {
 
     async fn load_history(&self, chat_id: i64, from: i64, offset: i32) {
         self.loading_history.set(true);
-        if let Ok(enums::Messages::Messages(msgs)) = functions::get_chat_history(
-            chat_id,
-            from,
-            offset,
-            50,
-            false,
-            self.client_id.get(),
-        )
-        .await
+        if let Ok(enums::Messages::Messages(msgs)) =
+            functions::get_chat_history(chat_id, from, offset, 50, false, self.client_id.get())
+                .await
         {
             let mut rows: Vec<MessageRow> = msgs
                 .messages
@@ -5367,8 +5987,7 @@ impl Store {
                     self.oldest_message.set(min);
                 }
             }
-            self.no_more_history
-                .set(msgs.messages.len() < 50);
+            self.no_more_history.set(msgs.messages.len() < 50);
             let mut list = self.messages.snapshot();
             for row in rows.drain(..) {
                 if !list.iter().any(|r| r.id == row.id) {
@@ -5386,9 +6005,7 @@ impl Store {
                 let client = self.client_id.get();
                 let mid = last.id;
                 spawn_local(async move {
-                    let _ =
-                        functions::view_messages(chat_id, vec![mid], None, false, client)
-                            .await;
+                    let _ = functions::view_messages(chat_id, vec![mid], None, false, client).await;
                 })
                 .detach();
             }
@@ -5735,9 +6352,7 @@ impl Store {
                 .and_then(|cmds| {
                     let tok = Self::botcmd_token(&q).unwrap_or_default();
                     cmds.iter()
-                        .find(|c| {
-                            c.cmd.to_lowercase().starts_with(&tok.to_lowercase())
-                        })
+                        .find(|c| c.cmd.to_lowercase().starts_with(&tok.to_lowercase()))
                         .map(|c| c.cmd.clone())
                 })
         {
@@ -5862,9 +6477,11 @@ impl Store {
         if q.is_empty() {
             return false;
         }
-        if let Some(r) = self.chats.snapshot().iter().find(|r| {
-            r.title.to_lowercase().contains(&q) || r.preview.to_lowercase().contains(&q)
-        }) {
+        if let Some(r) =
+            self.chats.snapshot().iter().find(|r| {
+                r.title.to_lowercase().contains(&q) || r.preview.to_lowercase().contains(&q)
+            })
+        {
             self.select_chat(r.id);
             return true;
         }
@@ -5919,23 +6536,44 @@ impl Store {
             self.editing.set(None);
             self.composer.set_from("");
             self.set_draft(chat_id, None);
+            // Media messages edit their caption via `editMessageCaption` —
+            // `editMessageText` rejects them (captions live in `row.text`
+            // for both kinds).
+            let is_media = self
+                .messages
+                .snapshot()
+                .iter()
+                .find(|r| r.id == msg_id)
+                .map(|r| r.media_file != 0 || r.play_file != 0)
+                .unwrap_or(false);
             let client = self.client_id.get();
-            spawn_local(async move {
-                let _ = functions::edit_message_text(
-                    chat_id,
-                    msg_id,
-                    enums::InputMessageContent::InputMessageText(
-                        types::InputMessageText {
+            if client == 0 {
+                self.demo_apply_edit(msg_id, &ft);
+                return;
+            }
+            if is_media {
+                spawn_local(async move {
+                    let _ =
+                        functions::edit_message_caption(chat_id, msg_id, Some(ft), false, client)
+                            .await;
+                })
+                .detach();
+            } else {
+                spawn_local(async move {
+                    let _ = functions::edit_message_text(
+                        chat_id,
+                        msg_id,
+                        enums::InputMessageContent::InputMessageText(types::InputMessageText {
                             text: ft,
                             link_preview_options: None,
                             clear_draft: true,
-                        },
-                    ),
-                    client,
-                )
-                .await;
-            })
-            .detach();
+                        }),
+                        client,
+                    )
+                    .await;
+                })
+                .detach();
+            }
             return;
         }
         let reply_to_id = self.reply_to.snapshot();
@@ -5962,13 +6600,11 @@ impl Store {
                 None,
                 reply,
                 options,
-                enums::InputMessageContent::InputMessageText(
-                    types::InputMessageText {
-                        text: ft,
-                        link_preview_options: None,
-                        clear_draft: true,
-                    },
-                ),
+                enums::InputMessageContent::InputMessageText(types::InputMessageText {
+                    text: ft,
+                    link_preview_options: None,
+                    clear_draft: true,
+                }),
                 client,
             )
             .await;
@@ -6057,15 +6693,89 @@ impl Store {
         self.scroll_bottom();
     }
 
+    /// Demo echo for `send_attachment`: one outgoing document row per path
+    /// (file icon + basename chip), caption on the last row like an album.
+    fn demo_echo_attachments(&self, paths: Vec<String>, caption: String) {
+        let mut rows = self.messages.snapshot();
+        let now = chrono::Local::now().timestamp() as i32;
+        let last = paths.len().saturating_sub(1);
+        for (i, path) in paths.iter().enumerate() {
+            let next_id = rows.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+            let name = path
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|n| !n.is_empty())
+                .unwrap_or(path.as_str());
+            let text = if i == last {
+                Str::from(caption.clone())
+            } else {
+                Str::from("")
+            };
+            rows.push(MessageRow {
+                id: next_id,
+                sender: Str::from(""),
+                sender_accent: -1,
+                text,
+                time: fmt_time(now),
+                outgoing: true,
+                read_out: false,
+                can_edit: true,
+                reply_excerpt: Str::from(""),
+                reply_to_id: 0,
+                media_file: 0,
+                play_file: 0,
+                media_label: Str::from(name.to_string()),
+                media_secs: 0,
+                reaction_chips: Vec::new(),
+                failed: false,
+                pending: true,
+                highlighted: false,
+                unread_divider: false,
+                unread_reaction: false,
+                group_first: true,
+                group_last: true,
+                avatar_col: false,
+                show_avatar: false,
+                sender_photo: 0,
+                day_header: false,
+                day_label: Str::from(""),
+                edited: false,
+                my_reaction: Str::from(""),
+                styled: StyledStr::empty(),
+                styled_open: StyledStr::empty(),
+                has_spoiler: false,
+                search_hit: false,
+                search_styled: StyledStr::empty(),
+                mentions_me: false,
+                link_site: Str::from(""),
+                link_title: Str::from(""),
+                link_desc: Str::from(""),
+                forwarded_from: Str::from(""),
+                sender_user: self.my_id.get(),
+                sender_chat: 0,
+                fwd_user: 0,
+                fwd_chat: 0,
+                link_url: Str::from(""),
+                poll: None,
+                is_service: false,
+                view_count: 0,
+                author_sig: Str::from(""),
+                comments: 0,
+                album_id: 0,
+                album_files: Vec::new(),
+                kb_rows: Vec::new(),
+                day: local_day(now),
+            });
+        }
+        self.set_messages(rows);
+        self.scroll_bottom();
+    }
+
     /// Build the right `InputMessageContent` for a local file path based on
     /// its extension: photos, videos, and audio get their native message
     /// types; everything else goes as a document.
     pub(crate) fn attachment_content(path: String, caption: String) -> enums::InputMessageContent {
-        let ext = path
-            .rsplit('.')
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
+        let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
         let file = enums::InputFile::Local(types::InputFileLocal { path });
         let caption = if caption.is_empty() {
             None
@@ -6107,15 +6817,13 @@ impl Store {
                 })
             }
             "ogg" | "opus" => {
-                enums::InputMessageContent::InputMessageVoiceNote(
-                    types::InputMessageVoiceNote {
-                        voice_note: file,
-                        duration: 0,
-                        waveform: String::new(),
-                        caption,
-                        self_destruct_type: None,
-                    },
-                )
+                enums::InputMessageContent::InputMessageVoiceNote(types::InputMessageVoiceNote {
+                    voice_note: file,
+                    duration: 0,
+                    waveform: String::new(),
+                    caption,
+                    self_destruct_type: None,
+                })
             }
             "mp3" | "m4a" | "flac" | "wav" => {
                 enums::InputMessageContent::InputMessageAudio(types::InputMessageAudio {
@@ -6127,8 +6835,8 @@ impl Store {
                     caption,
                 })
             }
-            "gif" => enums::InputMessageContent::InputMessageAnimation(
-                types::InputMessageAnimation {
+            "gif" => {
+                enums::InputMessageContent::InputMessageAnimation(types::InputMessageAnimation {
                     animation: file,
                     thumbnail: None,
                     added_sticker_file_ids: Vec::new(),
@@ -6138,16 +6846,14 @@ impl Store {
                     caption,
                     show_caption_above_media: false,
                     has_spoiler: false,
-                },
-            ),
-            _ => enums::InputMessageContent::InputMessageDocument(
-                types::InputMessageDocument {
-                    document: file,
-                    thumbnail: None,
-                    disable_content_type_detection: false,
-                    caption,
-                },
-            ),
+                })
+            }
+            _ => enums::InputMessageContent::InputMessageDocument(types::InputMessageDocument {
+                document: file,
+                thumbnail: None,
+                disable_content_type_detection: false,
+                caption,
+            }),
         }
     }
 
@@ -6175,6 +6881,13 @@ impl Store {
         self.attach_caption.set_from("");
         self.composer.set_from("");
         let client = self.client_id.get();
+        if client == 0 {
+            // Demo: echo each dropped/attached file as a document row
+            // locally so the whole drop → send → bubble path is
+            // exercisable without a TDLib connection.
+            self.demo_echo_attachments(paths, caption);
+            return;
+        }
         spawn_local(async move {
             match Self::plan_attachments(paths, caption) {
                 AttachmentPlan::Album(items) => {
@@ -6182,10 +6895,9 @@ impl Store {
                         .into_iter()
                         .map(|(path, caption)| Self::attachment_content(path, caption))
                         .collect();
-                    let _ = functions::send_message_album(
-                        chat_id, None, None, None, contents, client,
-                    )
-                    .await;
+                    let _ =
+                        functions::send_message_album(chat_id, None, None, None, contents, client)
+                            .await;
                 }
                 AttachmentPlan::Singles(items) => {
                     for (path, caption) in items {
@@ -6284,17 +6996,13 @@ impl Store {
                 None,
                 None,
                 None,
-                enums::InputMessageContent::InputMessageVoiceNote(
-                    types::InputMessageVoiceNote {
-                        voice_note: enums::InputFile::Local(types::InputFileLocal {
-                            path,
-                        }),
-                        duration,
-                        waveform,
-                        caption: None,
-                        self_destruct_type: None,
-                    },
-                ),
+                enums::InputMessageContent::InputMessageVoiceNote(types::InputMessageVoiceNote {
+                    voice_note: enums::InputFile::Local(types::InputFileLocal { path }),
+                    duration,
+                    waveform,
+                    caption: None,
+                    self_destruct_type: None,
+                }),
                 client,
             )
             .await;
@@ -6341,7 +7049,10 @@ impl Store {
         };
         let path = self.next_capture_path("mp4");
         *self.video_path.borrow_mut() = path;
-        crate::capture::video_note_start_recording(&shared, self.video_path.borrow().clone().into());
+        crate::capture::video_note_start_recording(
+            &shared,
+            self.video_path.borrow().clone().into(),
+        );
         self.video_recording.set(true);
         self.refresh_video_elapsed();
     }
@@ -6426,23 +7137,17 @@ impl Store {
                 None,
                 None,
                 None,
-                enums::InputMessageContent::InputMessageVideoNote(
-                    types::InputMessageVideoNote {
-                        video_note: enums::InputFile::Local(types::InputFileLocal {
-                            path,
-                        }),
-                        thumbnail: Some(types::InputThumbnail {
-                            thumbnail: enums::InputFile::Local(types::InputFileLocal {
-                                path: thumb,
-                            }),
-                            width: crate::capture::VIDEO_NOTE_SIZE as i32,
-                            height: crate::capture::VIDEO_NOTE_SIZE as i32,
-                        }),
-                        duration,
-                        length: crate::capture::VIDEO_NOTE_SIZE as i32,
-                        self_destruct_type: None,
-                    },
-                ),
+                enums::InputMessageContent::InputMessageVideoNote(types::InputMessageVideoNote {
+                    video_note: enums::InputFile::Local(types::InputFileLocal { path }),
+                    thumbnail: Some(types::InputThumbnail {
+                        thumbnail: enums::InputFile::Local(types::InputFileLocal { path: thumb }),
+                        width: crate::capture::VIDEO_NOTE_SIZE as i32,
+                        height: crate::capture::VIDEO_NOTE_SIZE as i32,
+                    }),
+                    duration,
+                    length: crate::capture::VIDEO_NOTE_SIZE as i32,
+                    self_destruct_type: None,
+                }),
                 client,
             )
             .await;
@@ -6477,7 +7182,16 @@ impl Store {
         let is_media = |p: &str| {
             matches!(
                 p.rsplit('.').next().unwrap_or("").to_lowercase().as_str(),
-                "jpg" | "jpeg" | "png" | "webp" | "bmp" | "mp4" | "mov" | "mkv" | "webm" | "avi"
+                "jpg"
+                    | "jpeg"
+                    | "png"
+                    | "webp"
+                    | "bmp"
+                    | "mp4"
+                    | "mov"
+                    | "mkv"
+                    | "webm"
+                    | "avi"
                     | "m4v"
             )
         };
@@ -6486,7 +7200,16 @@ impl Store {
             let items = paths
                 .into_iter()
                 .enumerate()
-                .map(|(i, p)| (p, if i == 0 { caption.clone() } else { String::new() }))
+                .map(|(i, p)| {
+                    (
+                        p,
+                        if i == 0 {
+                            caption.clone()
+                        } else {
+                            String::new()
+                        },
+                    )
+                })
                 .collect();
             return AttachmentPlan::Album(items);
         }
@@ -6512,13 +7235,9 @@ impl Store {
         self.last_typing_sent.set(Instant::now());
         let client = self.client_id.get();
         spawn_local(async move {
-            let _ = functions::send_chat_action(
-                chat_id,
-                None,
-                Some(enums::ChatAction::Typing),
-                client,
-            )
-            .await;
+            let _ =
+                functions::send_chat_action(chat_id, None, Some(enums::ChatAction::Typing), client)
+                    .await;
         })
         .detach();
     }
@@ -6579,8 +7298,7 @@ impl Store {
         }
         let client = self.client_id.get();
         spawn_local(async move {
-            let _ =
-                functions::delete_messages(chat_id, ask.ids, revoke, client).await;
+            let _ = functions::delete_messages(chat_id, ask.ids, revoke, client).await;
         })
         .detach();
     }
@@ -6592,7 +7310,7 @@ impl Store {
         self.ask_delete_message(message_id);
     }
 
-#[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
+    #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
     pub fn start_reply(&self, row: &MessageRow) {
         self.reply_to.set(Some(row.id));
         let label = if row.text.is_empty() {
@@ -6638,16 +7356,10 @@ impl Store {
     fn action_bar_parts(ab: Option<&enums::ChatActionBar>) -> (Str, Str) {
         match ab {
             Some(enums::ChatActionBar::ReportSpam(_)) => ("report_spam".into(), "".into()),
-            Some(enums::ChatActionBar::ReportAddBlock(_)) => {
-                ("report_add_block".into(), "".into())
-            }
+            Some(enums::ChatActionBar::ReportAddBlock(_)) => ("report_add_block".into(), "".into()),
             Some(enums::ChatActionBar::AddContact) => ("add_contact".into(), "".into()),
-            Some(enums::ChatActionBar::SharePhoneNumber) => {
-                ("share_phone".into(), "".into())
-            }
-            Some(enums::ChatActionBar::InviteMembers) => {
-                ("invite_members".into(), "".into())
-            }
+            Some(enums::ChatActionBar::SharePhoneNumber) => ("share_phone".into(), "".into()),
+            Some(enums::ChatActionBar::InviteMembers) => ("invite_members".into(), "".into()),
             Some(enums::ChatActionBar::JoinRequest(j)) => {
                 ("join_request".into(), j.title.clone().into())
             }
@@ -6739,9 +7451,8 @@ impl Store {
             ("report_add_block", 1) => {
                 self.notify("User blocked");
                 if client != 0 && peer != 0 {
-                    let sender = enums::MessageSender::User(types::MessageSenderUser {
-                        user_id: peer,
-                    });
+                    let sender =
+                        enums::MessageSender::User(types::MessageSenderUser { user_id: peer });
                     spawn_local(async move {
                         let _ = functions::set_message_sender_block_list(
                             sender,
@@ -6856,14 +7567,13 @@ impl Store {
                 let store = self.clone();
                 let client = self.client_id.get();
                 spawn_local(async move {
-                    let payload = enums::CallbackQueryPayload::Data(
-                        types::CallbackQueryPayloadData { data: data.to_string() },
-                    );
+                    let payload =
+                        enums::CallbackQueryPayload::Data(types::CallbackQueryPayloadData {
+                            data: data.to_string(),
+                        });
                     if let Ok(enums::CallbackQueryAnswer::CallbackQueryAnswer(ans)) =
-                        functions::get_callback_query_answer(
-                            chat_id, message_id, payload, client,
-                        )
-                        .await
+                        functions::get_callback_query_answer(chat_id, message_id, payload, client)
+                            .await
                     {
                         if !ans.url.is_empty() {
                             store.open_link(ans.url.clone().into());
@@ -6904,7 +7614,11 @@ impl Store {
             },
             sent: sent.into(),
             read: if row.outgoing {
-                if row.read_out { format!("Read {}", row.time).into() } else { "Unread".into() }
+                if row.read_out {
+                    format!("Read {}", row.time).into()
+                } else {
+                    "Unread".into()
+                }
             } else {
                 String::new().into()
             },
@@ -7080,7 +7794,11 @@ impl Store {
                 let ok = arboard::Clipboard::new()
                     .and_then(|mut cb| cb.set_image(data))
                     .is_ok();
-                self.notify(if ok { "Image copied" } else { "Clipboard unavailable" });
+                self.notify(if ok {
+                    "Image copied"
+                } else {
+                    "Clipboard unavailable"
+                });
             }
             Err(_) => self.notify("Could not decode image"),
         }
@@ -7149,15 +7867,72 @@ impl Store {
             .unwrap_or(false);
         let client = self.client_id.get();
         spawn_local(async move {
-            let _ = functions::toggle_chat_is_pinned(
-                enums::ChatList::Main,
-                chat_id,
-                !pinned,
-                client,
-            )
-            .await;
+            let _ =
+                functions::toggle_chat_is_pinned(enums::ChatList::Main, chat_id, !pinned, client)
+                    .await;
         })
         .detach();
+    }
+
+    /// Desktop's "Mute for…" submenu: set `mute_for` seconds directly
+    /// (i32::MAX = forever, 0 = unmute).
+    pub fn set_mute(&self, chat_id: i64, mute_for: i32) {
+        if self.client_id.get() == 0 {
+            self.update_chat_row(chat_id, |r| r.muted = mute_for > 0);
+            return;
+        }
+        let Some(settings) = self
+            .chat_objs
+            .borrow()
+            .get(&chat_id)
+            .map(|c| c.notification_settings.clone())
+        else {
+            return;
+        };
+        let mut next = settings;
+        next.use_default_mute_for = false;
+        next.mute_for = mute_for;
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ = functions::set_chat_notification_settings(chat_id, next, client).await;
+        })
+        .detach();
+    }
+
+    /// Appearance setting: preset key → the `Color` the message pane paints
+    /// behind the bubbles (`signal_color` keeps it a live signal).
+    pub fn chat_bg_color(&self) -> Computed<Color> {
+        self.chat_bg
+            .map(|k: Str| match &*k {
+                "sky" => Color::srgb_hex("#9CC3E8"),
+                "sand" => Color::srgb_hex("#D8C8A4"),
+                "dusk" => Color::srgb_hex("#44506E"),
+                "night" => Color::srgb_hex("#1B2634"),
+                _ => Color::from(Background),
+            })
+            .computed()
+    }
+
+    /// Demo-mode edit apply: `editMessageText`/`editMessageCaption` round-
+    /// trip through updateMessageEdited; offline we patch the row in place
+    /// (caption lives in `text`/`styled` for media messages).
+    fn demo_apply_edit(&self, msg_id: i64, ft: &types::FormattedText) {
+        let spoiler = has_spoiler_entity(ft);
+        let mask = spoiler.then(|| Color::from(AccentForeground));
+        let styled = styled_from_formatted_mask(ft, mask);
+        let styled_open = if spoiler {
+            styled_from_formatted_mask(ft, None)
+        } else {
+            StyledStr::empty()
+        };
+        let text = Str::from(ft.text.clone());
+        self.update_message_row(msg_id, |r| {
+            r.text = text.clone();
+            r.styled = styled.clone();
+            r.styled_open = styled_open.clone();
+            r.edited = true;
+        });
+        self.notify("Message edited");
     }
 
     pub fn toggle_mute(&self, chat_id: i64) {
@@ -7265,7 +8040,9 @@ impl Store {
 
     /// Switch the sidebar list: 0 = All chats, -1 = Archive, n = folder.
     pub fn set_list(&self, list_id: i32) {
-        if self.active_folder.snapshot() == list_id && self.archive_mode.snapshot() == (list_id == -1) {
+        if self.active_folder.snapshot() == list_id
+            && self.archive_mode.snapshot() == (list_id == -1)
+        {
             return;
         }
         self.active_folder.set(list_id);
@@ -7387,8 +8164,7 @@ impl Store {
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::ChatMembers::ChatMembers(m)) =
-                functions::search_chat_members(chat_id, String::new(), 50, None, client)
-                    .await
+                functions::search_chat_members(chat_id, String::new(), 50, None, client).await
             {
                 store
                     .members_count
@@ -7431,10 +8207,7 @@ impl Store {
                             if photo != 0 {
                                 store.want_file_id(photo);
                             }
-                            let accent = user
-                                .as_ref()
-                                .map(|u| u.accent_color_id)
-                                .unwrap_or(-1);
+                            let accent = user.as_ref().map(|u| u.accent_color_id).unwrap_or(-1);
                             (uid, name, member.member_id.clone(), uname, photo, accent)
                         }
                         enums::MessageSender::Chat(c) => {
@@ -7450,7 +8223,14 @@ impl Store {
                                     )
                                 })
                                 .unwrap_or_else(|| (format!("Chat {}", c.chat_id), 0, -1));
-                            (c.chat_id, title, member.member_id.clone(), String::new(), photo, accent)
+                            (
+                                c.chat_id,
+                                title,
+                                member.member_id.clone(),
+                                String::new(),
+                                photo,
+                                accent,
+                            )
                         }
                     };
                     let status = match &member.status {
@@ -7502,7 +8282,11 @@ impl Store {
                             .to_string();
                         rows.push(MemberRow {
                             key: uid,
-                            name: if name.is_empty() { uname.clone().into() } else { name.into() },
+                            name: if name.is_empty() {
+                                uname.clone().into()
+                            } else {
+                                name.into()
+                            },
                             status: uname.clone().into(),
                             sender: enums::MessageSender::User(types::MessageSenderUser {
                                 user_id: uid,
@@ -7574,8 +8358,7 @@ impl Store {
                 for st in r.stickers {
                     let thumb = st.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0);
                     if thumb != 0 {
-                        let _ =
-                            functions::download_file(thumb, 8, 0, 0, false, client).await;
+                        let _ = functions::download_file(thumb, 8, 0, 0, false, client).await;
                     }
                     items.push(StickerItem {
                         file_id: st.sticker.id,
@@ -7591,8 +8374,7 @@ impl Store {
                 for an in a.animations {
                     let thumb = an.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0);
                     if thumb != 0 {
-                        let _ =
-                            functions::download_file(thumb, 8, 0, 0, false, client).await;
+                        let _ = functions::download_file(thumb, 8, 0, 0, false, client).await;
                     }
                     items.push(StickerItem {
                         file_id: an.animation.id,
@@ -7616,11 +8398,7 @@ impl Store {
         let store = self.clone();
         spawn_local(async move {
             if let Ok(enums::StickerSets::StickerSets(ss)) =
-                functions::get_installed_sticker_sets(
-                    enums::StickerType::Regular,
-                    client,
-                )
-                .await
+                functions::get_installed_sticker_sets(enums::StickerType::Regular, client).await
             {
                 store.sticker_packs.set(
                     ss.sets
@@ -7664,10 +8442,9 @@ impl Store {
             (self.notif_channels.clone(), "channels"),
         ] {
             let store = self.clone();
-            let guard = Signal::watch(
-                &binding,
-                move |ctx| store.set_scope_notifications(scope, ctx.into_value()),
-            );
+            let guard = Signal::watch(&binding, move |ctx| {
+                store.set_scope_notifications(scope, ctx.into_value())
+            });
             self.notif_watchers
                 .borrow_mut()
                 .push(Box::new(guard) as Box<dyn std::any::Any>);
@@ -7697,12 +8474,7 @@ impl Store {
             disable_mention_notifications: false,
         };
         spawn_local(async move {
-            let _ = functions::set_scope_notification_settings(
-                ns_scope,
-                settings,
-                client,
-            )
-            .await;
+            let _ = functions::set_scope_notification_settings(ns_scope, settings, client).await;
         })
         .detach();
     }
@@ -7716,8 +8488,7 @@ impl Store {
             for st in stickers {
                 let thumb = st.thumbnail.as_ref().map(|t| t.file.id).unwrap_or(0);
                 if thumb != 0 {
-                    let _ =
-                        functions::download_file(thumb, 8, 0, 0, false, client).await;
+                    let _ = functions::download_file(thumb, 8, 0, 0, false, client).await;
                 }
                 items.push(StickerItem {
                     file_id: st.sticker.id,
@@ -7740,19 +8511,17 @@ impl Store {
         }
         self.stickers_open.set(false);
         let content = if item.gif {
-            enums::InputMessageContent::InputMessageAnimation(
-                types::InputMessageAnimation {
-                    animation: enums::InputFile::Id(types::InputFileId { id: item.file_id }),
-                    thumbnail: None,
-                    added_sticker_file_ids: Vec::new(),
-                    duration: 0,
-                    width: 0,
-                    height: 0,
-                    caption: None,
-                    show_caption_above_media: false,
-                    has_spoiler: false,
-                },
-            )
+            enums::InputMessageContent::InputMessageAnimation(types::InputMessageAnimation {
+                animation: enums::InputFile::Id(types::InputFileId { id: item.file_id }),
+                thumbnail: None,
+                added_sticker_file_ids: Vec::new(),
+                duration: 0,
+                width: 0,
+                height: 0,
+                caption: None,
+                show_caption_above_media: false,
+                has_spoiler: false,
+            })
         } else {
             enums::InputMessageContent::InputMessageSticker(types::InputMessageSticker {
                 sticker: enums::InputFile::Id(types::InputFileId { id: item.file_id }),
@@ -7808,7 +8577,10 @@ impl Store {
         }
         let store = self.clone();
         spawn_local(async move {
-            if functions::remove_contacts(vec![user_id], client).await.is_ok() {
+            if functions::remove_contacts(vec![user_id], client)
+                .await
+                .is_ok()
+            {
                 store.load_contacts();
             }
         })
@@ -7863,7 +8635,16 @@ impl Store {
         let store = self.clone();
         spawn_local(async move {
             if functions::optimize_storage(
-                0, -1, -1, 0, Vec::new(), Vec::new(), Vec::new(), true, 0, client,
+                0,
+                -1,
+                -1,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                0,
+                client,
             )
             .await
             .is_ok()
@@ -8280,9 +9061,7 @@ impl Store {
                         .map(|t| t.file.id)
                         .unwrap_or(0);
                     if thumb != 0 {
-                        let _ =
-                            functions::download_file(thumb, 8, 0, 0, false, client)
-                                .await;
+                        let _ = functions::download_file(thumb, 8, 0, 0, false, client).await;
                     }
                     items.push(StickerItem {
                         file_id: a.animation.animation.id,
@@ -8313,11 +9092,9 @@ impl Store {
         spawn_local(async move {
             let _ = functions::set_chat_photo(
                 chat_id,
-                Some(enums::InputChatPhoto::Static(
-                    types::InputChatPhotoStatic {
-                        photo: enums::InputFile::Local(types::InputFileLocal { path }),
-                    },
-                )),
+                Some(enums::InputChatPhoto::Static(types::InputChatPhotoStatic {
+                    photo: enums::InputFile::Local(types::InputFileLocal { path }),
+                })),
                 client,
             )
             .await;
@@ -8402,9 +9179,11 @@ impl Store {
             .await
             .is_ok();
             store.avatar_pick.set(Vec::new());
-            store
-                .profile_note
-                .set_from(if ok { "Avatar updated" } else { "Avatar upload failed" });
+            store.profile_note.set_from(if ok {
+                "Avatar updated"
+            } else {
+                "Avatar upload failed"
+            });
         })
         .detach();
     }
@@ -8423,9 +9202,7 @@ impl Store {
         }
         let client = self.client_id.get();
         spawn_local(async move {
-            let _ =
-                functions::resend_messages(chat_id, vec![message_id], None, 0, client)
-                    .await;
+            let _ = functions::resend_messages(chat_id, vec![message_id], None, 0, client).await;
         })
         .detach();
     }
@@ -8455,16 +9232,7 @@ impl Store {
         }
         let store = self.clone();
         spawn_local(async move {
-            match functions::set_password(
-                old,
-                new,
-                hint,
-                !email.is_empty(),
-                email,
-                client,
-            )
-            .await
-            {
+            match functions::set_password(old, new, hint, !email.is_empty(), email, client).await {
                 Ok(enums::PasswordState::PasswordState(p)) => {
                     store
                         .twofa
@@ -8499,8 +9267,7 @@ impl Store {
         let store = self.clone();
         spawn_local(async move {
             let Ok(enums::UserPrivacySettingRules::UserPrivacySettingRules(rs)) =
-                functions::get_user_privacy_setting_rules(key.clone(), client)
-                    .await
+                functions::get_user_privacy_setting_rules(key.clone(), client).await
             else {
                 return;
             };
@@ -8547,9 +9314,7 @@ impl Store {
             out.insert(
                 0,
                 enums::UserPrivacySettingRule::RestrictUsers(
-                    types::UserPrivacySettingRuleRestrictUsers {
-                        user_ids: deny_ids,
-                    },
+                    types::UserPrivacySettingRuleRestrictUsers { user_ids: deny_ids },
                 ),
             );
         }
@@ -8587,11 +9352,7 @@ impl Store {
             let mut rows = Vec::new();
             for (setting, label) in keys {
                 if let Ok(enums::UserPrivacySettingRules::UserPrivacySettingRules(rs)) =
-                    functions::get_user_privacy_setting_rules(
-                        setting.clone(),
-                        client,
-                    )
-                    .await
+                    functions::get_user_privacy_setting_rules(setting.clone(), client).await
                 {
                     rows.push(PrivacyRow {
                         setting: label.into(),
@@ -8613,9 +9374,7 @@ impl Store {
         }
         let store = self.clone();
         spawn_local(async move {
-            if let Ok(enums::Sessions::Sessions(s)) =
-                functions::get_active_sessions(client).await
-            {
+            if let Ok(enums::Sessions::Sessions(s)) = functions::get_active_sessions(client).await {
                 let rows: Vec<SessionRow> = s
                     .sessions
                     .iter()
@@ -8626,8 +9385,11 @@ impl Store {
                             sess.application_name, sess.application_version, sess.device_model
                         )
                         .into(),
-                        subtitle: format!("{} · {} {}", sess.location, sess.ip_address, sess.platform)
-                            .into(),
+                        subtitle: format!(
+                            "{} · {} {}",
+                            sess.location, sess.ip_address, sess.platform
+                        )
+                        .into(),
                         current: sess.is_current,
                     })
                     .collect();
@@ -8696,8 +9458,7 @@ impl Store {
         if client != 0 {
             let _ = functions::synchronize_language_pack(id.into(), client).await;
             if let Ok(enums::LanguagePackStrings::LanguagePackStrings(pack)) =
-                functions::get_language_pack_strings(id.into(), vec![], client)
-                    .await
+                functions::get_language_pack_strings(id.into(), vec![], client).await
             {
                 let mut map = HashMap::new();
                 for s in pack.strings {
@@ -8748,17 +9509,15 @@ impl Store {
                 current = s.value.clone();
             }
             store.refresh_language(&current, client).await;
-            if let Ok(enums::LocalizationTargetInfo::LocalizationTargetInfo(
-                info,
-            )) = functions::get_localization_target_info(false, client).await
+            if let Ok(enums::LocalizationTargetInfo::LocalizationTargetInfo(info)) =
+                functions::get_localization_target_info(false, client).await
             {
                 store.lang_packs.set(
                     info.language_packs
                         .iter()
                         .map(|p| LangRow {
                             id: p.id.clone().into(),
-                            name: format!("{} — {}", p.native_name, p.name)
-                                .into(),
+                            name: format!("{} — {}", p.native_name, p.name).into(),
                             beta: p.is_beta,
                             active: p.id.as_str() == current,
                         })
@@ -8995,9 +9754,7 @@ impl Store {
             {
                 let mut found = Vec::new();
                 for id in c.chat_ids {
-                    if let Ok(enums::Chat::Chat(chat)) =
-                        functions::get_chat(id, client).await
-                    {
+                    if let Ok(enums::Chat::Chat(chat)) = functions::get_chat(id, client).await {
                         found.push(chat);
                     }
                 }
@@ -9066,7 +9823,10 @@ impl Store {
                     let snippet = store_msgs.preview_text(m);
                     let sender = store_msgs.sender_name(&m.sender_id);
                     hits.push(MsgHit {
-                        key: m.chat_id.saturating_mul(1_000_000).saturating_add(m.id % 1_000_000),
+                        key: m
+                            .chat_id
+                            .saturating_mul(1_000_000)
+                            .saturating_add(m.id % 1_000_000),
                         chat_id: m.chat_id,
                         message_id: m.id,
                         title: title.into(),
@@ -9176,8 +9936,7 @@ impl Store {
                     let mut user_id: i64 = uname.parse().unwrap_or(0);
                     if user_id == 0
                         && let Ok(enums::Chats::Chats(c)) =
-                            functions::search_chats_on_server(format!("@{uname}"), 5, client)
-                                .await
+                            functions::search_chats_on_server(format!("@{uname}"), 5, client).await
                     {
                         for cid in c.chat_ids {
                             if let Ok(enums::Chat::Chat(chat)) =
@@ -9191,42 +9950,39 @@ impl Store {
                     }
                     if user_id != 0
                         && let Ok(enums::Chat::Chat(chat)) =
-                            functions::create_private_chat(user_id, false, client)
-                                .await
+                            functions::create_private_chat(user_id, false, client).await
                     {
                         store.select_chat(chat.id);
                     }
                 }
                 1 => {
-                    if let Ok(enums::Chat::Chat(chat)) =
-                        functions::create_new_supergroup_chat(
-                            input,
-                            false,
-                            false,
-                            String::new(),
-                            None,
-                            0,
-                            false,
-                            client,
-                        )
-                        .await
+                    if let Ok(enums::Chat::Chat(chat)) = functions::create_new_supergroup_chat(
+                        input,
+                        false,
+                        false,
+                        String::new(),
+                        None,
+                        0,
+                        false,
+                        client,
+                    )
+                    .await
                     {
                         store.select_chat(chat.id);
                     }
                 }
                 _ => {
-                    if let Ok(enums::Chat::Chat(chat)) =
-                        functions::create_new_supergroup_chat(
-                            input,
-                            false,
-                            true,
-                            String::new(),
-                            None,
-                            0,
-                            false,
-                            client,
-                        )
-                        .await
+                    if let Ok(enums::Chat::Chat(chat)) = functions::create_new_supergroup_chat(
+                        input,
+                        false,
+                        true,
+                        String::new(),
+                        None,
+                        0,
+                        false,
+                        client,
+                    )
+                    .await
                     {
                         store.select_chat(chat.id);
                     }

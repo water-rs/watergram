@@ -12,21 +12,21 @@
 //! back for `waterkit-codec`'s CPU-side `encode_nv12` -> `VideoWriter` mp4.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::path::PathBuf;
 use std::time::Instant;
 
+use futures_lite::StreamExt;
 use waterkit_audio::AudioRecorder;
+use waterkit_camera::Camera;
+use waterkit_codec::{CodecType, Encoder, EncoderProfile};
+use waterkit_video_container::{MuxerCodecType, VideoWriter};
 use waterui::Str;
 use waterui::binding::Binding;
 use waterui::graphics::{GpuContext, GpuFrame, GpuView};
 use waterui::prelude::Environment;
-use waterkit_camera::Camera;
-use waterkit_codec::{CodecType, Encoder, EncoderProfile};
-use waterkit_video_container::{MuxerCodecType, VideoWriter};
-use futures_lite::StreamExt;
 
 /// Voice notes record at 48 kHz mono and encode Opus frames of 20 ms.
 const VOICE_SAMPLE_RATE: u32 = 48_000;
@@ -110,14 +110,12 @@ impl VoiceCapture {
 /// Encode mono f32 samples into an Ogg Opus container.
 fn encode_opus_ogg(samples: &[f32], input_rate: u32) -> Result<Vec<u8>, String> {
     use opus_pure::{Application, OggOpusWriter, OpusEncoder, OpusHead};
-    let mut enc =
-        OpusEncoder::new(VOICE_SAMPLE_RATE as i32, 1, Application::Voip)
-            .map_err(|e| e.to_string())?;
+    let mut enc = OpusEncoder::new(VOICE_SAMPLE_RATE as i32, 1, Application::Voip)
+        .map_err(|e| e.to_string())?;
     let head = OpusHead::for_encoder(&enc, input_rate);
     let mut out = Vec::new();
     {
-        let mut writer =
-            OggOpusWriter::new(&mut out, head).map_err(|e| e.to_string())?;
+        let mut writer = OggOpusWriter::new(&mut out, head).map_err(|e| e.to_string())?;
         let mut packet = [0u8; opus_pure::MAX_PACKET_BYTES];
         for frame in samples.chunks(VOICE_FRAME) {
             if frame.len() < VOICE_FRAME {
@@ -149,12 +147,8 @@ fn encode_waveform(samples: &[f32], _rate: u32) -> String {
     for i in 0..BARS {
         let start = i * per_bar;
         let end = (start + per_bar).min(samples.len());
-        let rms = (samples[start..end]
-            .iter()
-            .map(|s| s * s)
-            .sum::<f32>()
-            / (end - start) as f32)
-            .sqrt();
+        let rms =
+            (samples[start..end].iter().map(|s| s * s).sum::<f32>() / (end - start) as f32).sqrt();
         let v = (rms * 64.0).clamp(0.0, 31.0) as u8;
         acc |= u64::from(v) << acc_bits;
         acc_bits += 5;
@@ -169,7 +163,6 @@ fn encode_waveform(samples: &[f32], _rate: u32) -> String {
     }
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
-
 
 // ---------------------------------------------------------------------------
 // Video notes — GPU-resident pipeline
@@ -371,9 +364,7 @@ impl VideoNoteGpu {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float {
-                            filterable: true,
-                        },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -402,31 +393,33 @@ impl VideoNoteGpu {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        self.pipeline = Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("watergram-preview-pipe"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: ctx.surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+        self.pipeline = Some(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("watergram-preview-pipe"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: ctx.surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        }));
+        );
         self.render_bgl = Some(bgl);
         self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("watergram-preview-sampler"),
@@ -455,9 +448,7 @@ impl VideoNoteGpu {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float {
-                            filterable: false,
-                        },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -490,14 +481,16 @@ impl VideoNoteGpu {
             bind_group_layouts: &[Some(&cbgl)],
             immediate_size: 0,
         });
-        self.compute = Some(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("watergram-nv12-pipe"),
-            layout: Some(&cpl),
-            module: &cshader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        }));
+        self.compute = Some(
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("watergram-nv12-pipe"),
+                layout: Some(&cpl),
+                module: &cshader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            }),
+        );
         self.compute_bgl = Some(cbgl);
         self.params_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("watergram-nv12-params"),
@@ -565,15 +558,12 @@ impl VideoNoteGpu {
             }
             sh.map_in_flight.store(true, Ordering::Release);
         }
-        let params: [u32; 4] = [
-            texture.width(),
-            texture.height(),
-            VIDEO_NOTE_SIZE,
+        let params: [u32; 4] = [texture.width(), texture.height(), VIDEO_NOTE_SIZE, 0];
+        frame.queue.write_buffer(
+            self.params_buf.as_ref().unwrap(),
             0,
-        ];
-        frame
-            .queue
-            .write_buffer(self.params_buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&params));
+            bytemuck::cast_slice(&params),
+        );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("watergram-nv12-bind"),
@@ -617,12 +607,14 @@ impl VideoNoteGpu {
 
         let in_flight = self.shared.borrow().map_in_flight.clone();
         let ready = self.shared.borrow().mapped_ready.clone();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            in_flight.store(false, Ordering::Release);
-            if res.is_ok() {
-                ready.store(true, Ordering::Release);
-            }
-        });
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                in_flight.store(false, Ordering::Release);
+                if res.is_ok() {
+                    ready.store(true, Ordering::Release);
+                }
+            });
     }
 
     /// Drain a mapped staging buffer into the encoder channel.
@@ -722,7 +714,10 @@ impl GpuView for VideoNoteGpu {
                 self.shared.borrow().status.set_from("");
             }
             Err(e) => {
-                self.shared.borrow().status.set_from(Str::from(format!("camera: {e}")));
+                self.shared
+                    .borrow()
+                    .status
+                    .set_from(Str::from(format!("camera: {e}")));
             }
         }
     }
@@ -744,10 +739,7 @@ pub(crate) fn new_video_note_shared() -> Rc<RefCell<VideoNoteShared>> {
 }
 
 /// Start recording: spawn the encoder thread and mark shared state live.
-pub(crate) fn video_note_start_recording(
-    shared: &Rc<RefCell<VideoNoteShared>>,
-    path: PathBuf,
-) {
+pub(crate) fn video_note_start_recording(shared: &Rc<RefCell<VideoNoteShared>>, path: PathBuf) {
     let (tx, rx) = mpsc::channel::<RecMsg>();
     let (dtx, drx) = mpsc::channel::<Result<VideoNoteDone, String>>();
     std::thread::spawn(move || recorder_thread(rx, dtx, path));
@@ -784,8 +776,13 @@ fn recorder_thread(
     path: PathBuf,
 ) {
     let run = || -> Result<VideoNoteDone, String> {
-        let mut enc = Encoder::new(CodecType::H264, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE, EncoderProfile::Realtime)
-            .map_err(|e| e.to_string())?;
+        let mut enc = Encoder::new(
+            CodecType::H264,
+            VIDEO_NOTE_SIZE,
+            VIDEO_NOTE_SIZE,
+            EncoderProfile::Realtime,
+        )
+        .map_err(|e| e.to_string())?;
         let mut writer = VideoWriter::new(
             &path,
             VIDEO_NOTE_SIZE,
@@ -820,8 +817,7 @@ fn recorder_thread(
             .as_deref()
             .map(|nv| {
                 let rgba = nv12_to_rgba(nv, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE);
-                rgba_to_jpeg(&rgba, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE)
-                    .unwrap_or_default()
+                rgba_to_jpeg(&rgba, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE).unwrap_or_default()
             })
             .unwrap_or_default();
         Ok(VideoNoteDone {
@@ -902,9 +898,7 @@ mod tests {
     /// Waveform is base64 of 100 5-bit bars packed into bytes.
     #[test]
     fn waveform_encodes_100_bars() {
-        let samples: Vec<f32> = (0..4800)
-            .map(|i| (i as f32 / 480.0).sin() * 0.5)
-            .collect();
+        let samples: Vec<f32> = (0..4800).map(|i| (i as f32 / 480.0).sin() * 0.5).collect();
         let w = encode_waveform(&samples, VOICE_SAMPLE_RATE);
         assert!(!w.is_empty());
         let raw = base64::prelude::BASE64_STANDARD.decode(&w).unwrap();
