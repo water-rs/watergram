@@ -214,6 +214,9 @@ mod tests {
             in_archive: false,
             folder_id: 0,
             accent: -1,
+            action_bar: "".into(),
+            action_title: "".into(),
+            peer_user: 0,
             title_styled: waterui::text::styled::StyledStr::empty(),
             preview_styled: waterui::text::styled::StyledStr::empty(),
         }
@@ -272,6 +275,7 @@ mod tests {
             author_sig: Str::from(""),
             album_id: 0,
             album_files: Vec::new(),
+            kb_rows: Vec::new(),
         }
     }
 
@@ -779,7 +783,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(commands.len(), 8); // Reply Edit Copy Link Pin Forward Select Delete
+        assert_eq!(commands.len(), 9); // Reply Edit Copy Link Pin Forward Select Info Delete
         assert_eq!(items.iter().filter(|i| matches!(i, MenuItem::Divider)).count(), 1);
         let delete = commands.last().unwrap();
         assert_eq!(delete.role, CommandRole::Destructive);
@@ -1480,8 +1484,8 @@ mod tests {
     fn folder_tabs_render(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
         store.folders.set(vec![
-            crate::state::FolderRow { id: 5, title: "Work".into(), active: false, unread: 0 },
-            crate::state::FolderRow { id: 9, title: "Chats".into(), active: false, unread: 0 },
+            crate::state::FolderRow { id: 5, title: "Work".into(), active: false, unread: 0, include: Vec::new() },
+            crate::state::FolderRow { id: 9, title: "Chats".into(), active: false, unread: 0, include: Vec::new() },
         ]);
         let mut app = ui.mount(move || views::sidebar_view(store.clone()).state(&store));
         app.query().label("Work").assert_exists();
@@ -1527,6 +1531,7 @@ mod tests {
             title: "Work".into(),
             active: false,
             unread: 0,
+            include: Vec::new(),
         }]);
         store.folder_open.set(true);
         let mut app =
@@ -1841,6 +1846,9 @@ mod tests {
                     online: false,
                     kind_icon: "group".into(),
                     accent: -1,
+                    action_bar: "".into(),
+                    action_title: "".into(),
+                    peer_user: 0,
                     title_styled: waterui::text::styled::StyledStr::empty(),
                     preview_styled: waterui::text::styled::StyledStr::empty(),
                 },
@@ -1926,6 +1934,9 @@ mod tests {
                     online: false,
                     kind_icon: "group".into(),
                     accent: -1,
+                    action_bar: "".into(),
+                    action_title: "".into(),
+                    peer_user: 0,
                     title_styled: waterui::text::styled::StyledStr::empty(),
                     preview_styled: waterui::text::styled::StyledStr::empty(),
                 },
@@ -4370,6 +4381,207 @@ mod tests {
         assert_eq!((img.width(), img.height()), (640, 360));
         store.copy_image(&row);
         assert!(!store.notice.snapshot().1.is_empty());
+    }
+
+    /// r41: bot inline-keyboard rows parse off `replyMarkup` and each button
+    /// kind dispatches to its Desktop action.
+    #[test]
+    fn inline_keyboard_parses_and_dispatches() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 44)
+            .expect("demo msg 44 carries the keyboard");
+        assert_eq!(row.kb_rows.len(), 2);
+        assert_eq!(row.kb_rows[0].len(), 2);
+        assert_eq!(row.kb_rows[1][0].text.as_str(), "Copy token");
+        use crate::state::KbKind;
+        // Callback → demo toast (real path fires getCallbackQueryAnswer).
+        store.inline_tap(44, &row.kb_rows[0][1].kind);
+        assert_eq!(store.notice.snapshot().1.as_str(), "Callback sent to bot");
+        // CopyText → clipboard write + toast.
+        store.inline_tap(44, &row.kb_rows[1][0].kind);
+        assert_eq!(store.notice.snapshot().1.as_str(), "Copied");
+        // SwitchInline → query lands in the composer.
+        store.inline_tap(44, &KbKind::SwitchInline("ci status".into()));
+        assert_eq!(store.composer.snapshot().as_str(), "ci status ");
+        // Unsupported kinds surface the "not supported" toast, not a panic.
+        store.inline_tap(44, &KbKind::Unsupported);
+        assert_eq!(
+            store.notice.snapshot().1.as_str(),
+            "This button type is not supported yet"
+        );
+    }
+
+    /// r41: `chatActionBar*` — the seeded bars dispatch their buttons and
+    /// hide (`removeChatActionBar`) afterward.
+    #[test]
+    fn action_bar_dispatches_and_dismisses() {
+        let store = store();
+        store.seed_demo();
+        // Chat 9 carries the report-spam bar.
+        store.select_chat(9);
+        let (kind, _, peer) = store.open_action_bar().expect("chat 9 has a bar");
+        assert_eq!(kind.as_str(), "report_spam");
+        assert_eq!(peer, 0);
+        store.action_bar_run(0);
+        assert_eq!(store.notice.snapshot().1.as_str(), "Reported as spam");
+        assert!(
+            store.open_action_bar().is_none(),
+            "bar hidden after its action ran"
+        );
+        // Chat 6 carries the add-contact bar.
+        store.select_chat(6);
+        let (kind, _, peer) = store.open_action_bar().expect("chat 6 has a bar");
+        assert_eq!(kind.as_str(), "add_contact");
+        assert_eq!(peer, 12);
+        store.action_bar_run(0);
+        assert_eq!(store.notice.snapshot().1.as_str(), "Added to contacts");
+        assert!(store.open_action_bar().is_none());
+    }
+
+    /// r41: "Show message info" fills sent/read/views/seen from the row.
+    #[test]
+    fn message_info_card_fields() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.outgoing)
+            .expect("demo has an outgoing message");
+        store.open_msg_info(&row);
+        let info = store.msg_info.snapshot().expect("info card opens");
+        assert_eq!(info.from.as_str(), "You");
+        assert!(info.sent.starts_with("Sent"));
+        // Seeded outgoing rows are read → "Read <time>".
+        assert!(info.read.starts_with("Read"), "got {}", info.read);
+        assert!(info.views.is_empty());
+        store.dismiss_msg_info();
+        assert!(store.msg_info.snapshot().is_none());
+        // A channel post carries views (chat 4 = Telegram News).
+        store.select_chat(4);
+        let post = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.view_count > 0)
+            .expect("a demo post has views");
+        store.open_msg_info(&post);
+        let info = store.msg_info.snapshot().expect("info card opens");
+        assert!(info.views.ends_with("views"), "got {}", info.views);
+    }
+
+    /// r41: the sidebar's All/Chats/Media/Files/Links tabs scope the demo
+    /// corpus by hit kind.
+    #[test]
+    fn search_filter_tabs_scope_results() {
+        let store = store();
+        store.seed_demo();
+        // All: mixed kinds.
+        store.search.set_from("a");
+        store.run_search(store.search.snapshot());
+        assert!(!store.msg_results.snapshot().is_empty());
+        // Media: only kind-1 hits (photo.jpg / clip.mp4).
+        store.search_filter.set(2);
+        store.run_search(store.search.snapshot());
+        let hits = store.msg_results.snapshot();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|h| h.kind == 1));
+        // Chats: no message hits at all.
+        store.search_filter.set(1);
+        store.run_search(store.search.snapshot());
+        assert!(store.msg_results.snapshot().is_empty());
+        // Links: the link corpus entry.
+        store.search_filter.set(4);
+        store.run_search(store.search.snapshot());
+        let hits = store.msg_results.snapshot();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|h| h.kind == 3));
+        store.search_filter.set(0);
+    }
+
+    /// DOGFOOD r41-2 (nami): clones of one `Distinct` share the dedup cell —
+    /// after the first watcher consumes a transition, a second watcher on a
+    /// clone sees `changed == false` and never fires. The sidebar therefore
+    // derives `searching` (tab strip) and `show_results` (results pane) as
+    /// two independent `map().distinct()` chains; this guards that pattern.
+    #[test]
+    fn distinct_clones_share_dedup_cell() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let src = Binding::container(Str::from(""));
+        let first = src.map(|q: Str| !q.is_empty()).distinct();
+        let second = src.map(|q: Str| !q.is_empty()).distinct();
+        let (na, nb) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let (ha, hb) = (na.clone(), nb.clone());
+        let _ga = first.watch(move |_| ha.set(ha.get() + 1));
+        let _gb = second.watch(move |_| hb.set(hb.get() + 1));
+        src.set(Str::from("x"));
+        assert_eq!(na.get(), 1);
+        assert_eq!(nb.get(), 1);
+    }
+
+    /// r41: the folder editor's chat picker toggles membership and
+    /// `save_folder` applies it to the roster + folder row.
+    #[test]
+    fn folder_editor_picker_round_trip() {
+        let store = store();
+        store.seed_demo();
+        // The Work folder (id 2) seeds chats 1 and 9.
+        store.open_folder_editor(2);
+        assert_eq!(store.folder_chats.snapshot(), vec![1, 9]);
+        store.toggle_folder_chat(9);
+        store.toggle_folder_chat(2);
+        assert_eq!(store.folder_chats.snapshot(), vec![1, 2]);
+        store.folder_name.set_from("Work");
+        store.save_folder();
+        let f = store
+            .folders
+            .snapshot()
+            .into_iter()
+            .find(|f| f.id == 2)
+            .expect("folder 2");
+        assert_eq!(f.include, vec![1, 2]);
+        assert_eq!(
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 9)
+                .unwrap()
+                .folder_id,
+            0,
+            "removed chat leaves the folder"
+        );
+        assert_eq!(
+            store
+                .chats
+                .snapshot()
+                .iter()
+                .find(|r| r.id == 2)
+                .unwrap()
+                .folder_id,
+            2,
+            "added chat joins the folder"
+        );
+        assert!(!store.folder_open.snapshot());
+        // New folder from the picker.
+        store.open_folder_editor(0);
+        store.folder_name.set_from("Trips");
+        store.toggle_folder_chat(5);
+        store.save_folder();
+        assert!(store
+            .folders
+            .snapshot()
+            .iter()
+            .any(|f| f.title.as_str() == "Trips" && f.include == vec![5]));
     }
 
 }

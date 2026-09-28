@@ -3024,7 +3024,8 @@ gesture fires.
 ### r40-1: `#262` occluders only cover `anchored_overlay`/`context_menu` — a `when`-mounted overlay layer lets a click reach targets beneath it
 
 **Framework defect — adjacent to water-rs/hydrolysis#260/#262, not fixed by
-it.** `register_hit_test_occluder` is invoked from exactly two call sites —
+it. A fix is in progress upstream in a separate session (per maintainer);
+kept documented, no app-side workaround.** `register_hit_test_occluder` is invoked from exactly two call sites —
 `anchored_overlay.rs:198` and `context_menu.rs:601`. A layer mounted with
 `when(open, || overlay_view)` inside a `zstack` (the only way to build an
 app-level modal like the media viewer) registers no occluder at all, so the
@@ -3067,3 +3068,121 @@ at all, per the r36-2/#251 nested-`when` defect.)
   render their hints in menus, and Ctrl+R marks the open chat read via the
   window-scoped MenuShortcutRegistry.
 - **hydrolysis#262** — see the r38-1 resolution above.
+
+## r41 — repin waterui ee85dc47 / hydrolysis fc03f46b / m3 b21c79f6 (TabItemLayout landed; one new a11y panic)
+
+### r41-1: `.visible(false)` on a mounted section containing a `List` panics the a11y flush — "parent stack contains an unknown node"
+
+**Framework defect.** Toggling `.visible(cond)` to `false` on a mounted
+subtree that contains a `List::for_each` crashes the renderer on the next
+frame:
+
+```
+thread 'main' panicked at hydrolysis/src/renderer/accessibility/accessibility_impl.rs:567:
+hydrolysis accessibility parent stack contains an unknown node
+```
+
+Observed on hydrolysis `fc03f46b` / waterui `ee85dc47` at 1400pt (winit,
+lavapipe). Trigger in watergram: clicking the "Media" search tab sets
+`search_filter=2`, which flipped `chats_visible=false` on a
+`vstack(...).visible(chats_visible)` wrapping two mounted
+`List::for_each` sections, while a `HStack::for_each(SignalCollection)`
+chip strip rebuilt in the same flush. Panic path is `render_window`'s
+accessibility pass; the renderer pushed the row's `ListItem` id via
+`push_accessibility_parent` (`list.rs:1796` /
+`accessibility_impl.rs:1325`) after the row's node registration had been
+declined under the hidden subtree's suppression
+(`accessibility_impl.rs:1421-1456` — the id still resolves through the
+interaction-key map from an earlier flush via `focus_node_for_key`,
+`list.rs:1787`), so the child node's `attach` finds a parent id that was
+never pushed into `self.nodes` this flush.
+
+Minimal repro: `zstack((when(open, || vstack((scroll(
+List::for_each(rows, |r| row(r))), when(show, || vstack((
+List::for_each(rows2, |r| row2(r)), Divider)))))))` — mount with
+`show=true`, then set `show=false`; expected: the section hides;
+observed: panic at `accessibility_impl.rs:567` on the next frame.
+Reproduced twice (two consecutive Media clicks on builds `app43`/`app44`
+logs, backtraces identical). Verified the sibling `SignalCollection`
+rebuild is not required — after replacing the section gating with `when`
+(keeping the same chip-strip rebuild), the same interaction no longer
+panics.
+
+App-side disposition: the section gate was switched to `when(cond)`
+(unmount) — the semantically correct API anyway since the section leaves
+the results pane entirely, and verified live to fix the interaction.
+Flagged rather than silent because `.visible` on a List section is a
+reasonable thing for an app author to write, and it currently kills the
+app.
+
+### r41-2: `SignalExt::distinct()` clones share one dedup cell — only the first watcher sees each transition
+
+**Framework defect (nami).** `nami::SignalExt::distinct` returns a
+`Distinct` whose `last_value: Rc<RefCell<Option<S::Output>>>` is shared
+by every clone (`nami/src/reactive_core/distinct.rs:42-62` on
+`78d8fd4f`): `Clone` copies the `Rc`, and each `watch` clones that same
+cell into its closure. The first watcher to observe a transition writes
+`Some(new)` into the shared cell, so every other watcher on a clone of
+the same `Distinct` computes `changed == false` and never fires — for
+that transition and, since each watcher only sees "no change" forever,
+for all subsequent transitions too (each fired watcher keeps racing to
+consume the transition first).
+
+App manifestation: `views.rs` built `let searching =
+store.search.map(|q| !q.is_empty()).distinct()` for the tab-strip gate,
+then `let show_results = searching.clone()` for the results-pane gate.
+`when(searching)` consumed every transition, so
+`when(show_results)` — the pane that owns the entire results list —
+never fired once. The pane stayed stuck on whatever arm was mounted
+first: typing a query left the plain chat list on screen, and clearing
+the search left the results list on screen. Every earlier symptom this
+session chased (stale paint after tab switch, "dead nested `when`",
+rows that never updated) traced to this single dead watcher — the
+`.otherwise` arm was still mounted and still re-rendered on its own
+signals, which is why partial repaints appeared to work.
+
+Minimal repro:
+
+```rust
+let src = Binding::container(Str::from("a"));
+let d = src.clone().map(|s: Str| !s.is_empty()).distinct();
+let hits1 = Rc::new(Cell::new(0));
+let hits2 = Rc::new(Cell::new(0));
+let h1 = hits1.clone();
+let _g1 = d.clone().watch(move |_: &bool| h1.set(h1.get() + 1));
+let h2 = hits2.clone();
+let _g2 = d.watch(move |_: &bool| h2.set(h2.get() + 1));
+src.set(Str::from("x"));
+// expected: hits1 == 1 && hits2 == 1
+// observed: hits1 == 1 && hits2 == 0 — the second watcher never fires
+```
+
+Correct behavior: `distinct` semantics are per-consumer — each watcher
+should dedup against the values IT has seen. A shared cell makes the
+type's behavior order-dependent: which watcher fires depends on poll
+order inside the runtime, not on what the consumer asked for.
+
+App-side disposition: each consumer now derives its own `distinct`
+instance — `let show_results =
+store.search.map(|q: Str| !q.is_empty()).distinct();` — so the two
+watches hold independent dedup cells. Guarded by
+`distinct_clones_share_dedup_cell` in lib.rs, which builds two
+independent chains the way app code must (the test documents the
+pattern; a two-watchers-on-one-clone test belongs in nami once fixed).
+Possible nami fix, forwarded to the maintainer via SKILL_FEEDBACK:
+allocate the dedup cell inside `watch` (seeded with the current value)
+instead of sharing it across clones.
+
+### Adopted this round
+
+- **waterui `TabItemLayout`** (waterui ee85dc47 / hydrolysis-m3
+  b21c79f6) — evaluated for the folder-chip strip and rejected: `Tabs` is
+  a pane-switching container and its items accept no per-item context
+  menu / icon+count badge / tap-vs-context split that chat folder chips
+  need (Telegram folders right-click → Edit/Remove). Kept the hand-rolled
+  `HStack::for_each(SignalCollection)` chips; recorded in
+  SKILL_FEEDBACK.
+- **Search results pane stays a `when` + `SignalCollection`** — after
+  r41-2 the pane's dead updates were nami-side, not `when`-semantics;
+  the `when(cond).otherwise(...)` gate on an independent `distinct`
+  instance now drives it correctly (all five filter tabs verified live).

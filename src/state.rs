@@ -152,6 +152,15 @@ pub struct ChatRow {
     /// `title`/`preview`). Built in the filtered map, not on the wire path.
     pub title_styled: StyledStr,
     pub preview_styled: StyledStr,
+    /// `chatActionBar*` kind for the panel above the composer
+    /// (""/report_spam/report_add_block/add_contact/share_phone/
+    /// invite_members/join_request); empty = normal composer.
+    pub action_bar: Str,
+    /// Aux label for the bar (join-request chat title).
+    pub action_title: Str,
+    /// Private-chat peer user id — the action bar's add-contact and
+    /// share-phone calls need it.
+    pub peer_user: i64,
 }
 
 /// Style metadata isn't `PartialEq`, so styled fields compare by plain text
@@ -186,6 +195,9 @@ impl PartialEq for ChatRow {
             && self.kind_icon == o.kind_icon
             && styled_row_eq(&self.title_styled, &o.title_styled)
             && styled_row_eq(&self.preview_styled, &o.preview_styled)
+            && self.action_bar == o.action_bar
+            && self.action_title == o.action_title
+            && self.peer_user == o.peer_user
     }
 }
 impl Eq for ChatRow {}
@@ -320,6 +332,9 @@ pub struct MessageRow {
     pub album_id: i64,
     /// Media file ids of a merged album (non-empty only on album rows).
     pub album_files: Vec<i32>,
+    /// Inline keyboard rows (`replyMarkupInlineKeyboard`) rendered as
+    /// button pills under the bubble content.
+    pub kb_rows: Vec<Vec<KbBtn>>,
 }
 
 impl MessageRow {
@@ -358,6 +373,51 @@ pub struct PollRow {
     pub options: Vec<PollOptRow>,
     pub voters: i32,
     pub closed: bool,
+}
+
+/// What an inline-keyboard tap does (`inlineKeyboardButtonType*`).
+/// Telegram Desktop draws every kind; Watergram dispatches the ones with
+/// a usable effect and toasts the rest as unsupported.
+#[derive(Clone, PartialEq)]
+pub enum KbKind {
+    /// `inlineKeyboardButtonTypeUrl` — open in the browser.
+    Url(Str),
+    /// `inlineKeyboardButtonTypeCallback` — answer the bot via
+    /// `getCallbackQueryAnswer`; its `text`/`url` drive the toast/open.
+    Callback(Str),
+    /// `inlineKeyboardButtonTypeCopyText` — clipboard + "Copied" toast.
+    Copy(Str),
+    /// `inlineKeyboardButtonTypeSwitchInline` — seed the composer.
+    SwitchInline(Str),
+    /// `inlineKeyboardButtonTypeUser` — open the user's profile.
+    User(i64),
+    /// Button kinds without a client-side action yet (LoginUrl, WebApp,
+    /// CallbackWithPassword, CallbackGame, Buy, …).
+    Unsupported,
+}
+
+/// One cell of a bot's inline keyboard (`replyMarkupInlineKeyboard` row).
+#[derive(Clone, PartialEq)]
+pub struct KbBtn {
+    pub text: Str,
+    pub kind: KbKind,
+}
+
+/// The "Show message info" card contents (TDLib `getMessageReadDate` /
+/// `getMessageViewers` on real accounts, synthesized in demo mode).
+#[derive(Clone, PartialEq)]
+pub struct MsgInfo {
+    /// Sender display name — the card title.
+    pub from: Str,
+    /// "Sent <day> <time>".
+    pub sent: Str,
+    /// "Read <time>" / "Unread" / privacy-restricted label; empty while
+    /// loading or when the row is incoming.
+    pub read: Str,
+    /// "N views" for channel posts; empty otherwise.
+    pub views: Str,
+    /// "Seen by" names for group posts (Desktop's viewer list).
+    pub seen: Vec<Str>,
 }
 
 /// A day in the jump-to-date popup (loaded days locally,
@@ -528,6 +588,7 @@ impl PartialEq for MessageRow {
             && self.author_sig == o.author_sig
             && self.album_id == o.album_id
             && self.album_files == o.album_files
+            && self.kb_rows == o.kb_rows
     }
 }
 impl Eq for MessageRow {}
@@ -767,8 +828,16 @@ pub struct Store {
     pub folder_contacts: Binding<bool>,
     pub folder_groups: Binding<bool>,
     pub folder_channels: Binding<bool>,
+    /// Folder editor: the chats the folder explicitly includes
+    /// (`ChatFolder.included_chat_ids`) — the picker's checked set.
+    pub folder_chats: Binding<Vec<i64>>,
     /// Folder being edited; 0 = creating a new one.
     pub editing_folder: Binding<i32>,
+    /// "Show message info" card payload; None = hidden.
+    pub msg_info: Binding<Option<MsgInfo>>,
+    /// Sidebar global-search filter tab (0 All / 1 Chats / 2 Media /
+    /// 3 Files / 4 Links) — mirrors Desktop's tab row under the field.
+    pub search_filter: Binding<i32>,
     /// Account switcher rows + dropdown state.
     pub accounts: Binding<Vec<AccountRow>>,
     pub accounts_open: Binding<bool>,
@@ -836,6 +905,9 @@ pub struct FolderRow {
     /// Unread chats in this list (TDLib `updateUnreadChatCount`), shown
     /// as a badge on the chip like Telegram Desktop's folder bar.
     pub unread: i32,
+    /// Chat ids the folder explicitly includes (`included_chat_ids`) —
+    /// seeded into the folder editor's chat picker.
+    pub include: Vec<i64>,
 }
 
 /// One hit in the sidebar's global "Messages" search section
@@ -853,6 +925,40 @@ pub struct MsgHit {
     pub sender: Str,
     pub snippet: Str,
     pub time: Str,
+    /// Hit kind for the sidebar's search filter tabs (0 text, 1 media,
+    /// 2 file, 3 link). The TDLib path fills it from the message content.
+    pub kind: i32,
+}
+
+/// One row in the sidebar search results pane. Local chat matches, the
+/// "Global search results" section, message hits and the empty state all
+/// flow through a single `SignalCollection` so a filter-tab switch is a
+/// plain data update — a nested `when` inside the results pane never
+/// re-evaluates on winit (DOGFOOD r41-2 / hydrolysis#251).
+#[derive(Clone)]
+pub enum SearchRow {
+    /// Section label row ("Global search results" / "Messages").
+    Header(Str),
+    Chat(ChatRow),
+    Hit(MsgHit),
+    /// "No results" marker.
+    Empty,
+}
+
+impl Identifiable for SearchRow {
+    type Id = i64;
+    fn id(&self) -> i64 {
+        match self {
+            SearchRow::Header(t) => {
+                i64::MIN + 2 + i64::from(t.as_str().contains("Global"))
+            }
+            SearchRow::Empty => i64::MIN,
+            // Hit keys are chat_id * 1_000_000 + msg_id — they never
+            // collide with chat ids or the sentinels above.
+            SearchRow::Chat(r) => r.id,
+            SearchRow::Hit(h) => h.key,
+        }
+    }
 }
 
 /// A destructive message delete awaiting user confirmation — the card
@@ -865,8 +971,10 @@ pub struct DeleteAsk {
     pub peer: Str,
 }
 
-/// (chat_id, msg_id, sender, text) — the searchable demo message set.
-pub type DemoCorpusEntry = (i64, i64, Str, Str);
+/// (chat_id, msg_id, sender, text, kind) — the searchable demo message
+/// set. kind drives the global-search filter tabs: 0 text, 1 media,
+/// 2 file, 3 link (mirrors `SearchMessagesFilter`).
+pub type DemoCorpusEntry = (i64, i64, Str, Str, i32);
 
 /// An installed sticker pack for the picker.
 #[derive(Clone, Identifiable)]
@@ -1351,6 +1459,8 @@ impl Store {
             chats: Binding::<Vec<ChatRow>>::default(),
             server_results: Binding::<Vec<ChatRow>>::default(),
             msg_results: Binding::<Vec<MsgHit>>::default(),
+            msg_info: Binding::default(),
+            search_filter: Binding::default(),
             confirm_delete: Binding::<Option<DeleteAsk>>::default(),
             delete_revoke: Binding::bool(false),
             folder_unreads: Binding::<HashMap<i32, i32>>::default(),
@@ -1471,6 +1581,7 @@ impl Store {
             folder_contacts: Binding::bool(true),
             folder_groups: Binding::bool(true),
             folder_channels: Binding::bool(true),
+            folder_chats: Binding::<Vec<i64>>::default(),
             editing_folder: Binding::i32(0),
             accounts: Binding::<Vec<AccountRow>>::default(),
             accounts_open: Binding::bool(false),
@@ -1560,6 +1671,9 @@ impl Store {
                 kind_icon: Str::from(icon.to_string()),
                 title_styled: StyledStr::empty(),
                 preview_styled: StyledStr::empty(),
+                action_bar: "".into(),
+                action_title: "".into(),
+                peer_user: 0,
             }
         };
         // kind_icon mirrors the real path's values (state.rs `kind_icon`
@@ -1593,6 +1707,20 @@ impl Store {
                 2 => r.auto_delete = 86_400,
                 _ => {}
             }
+            // Private-chat peers carry their user id for the action bar's
+            // add-contact / share-phone calls; nokhwa is an unknown
+            // channel→user … (seeded rows mirror `chatActionBarReportSpam`
+            // and `chatActionBarAddContact`).
+            match r.id {
+                2 => r.peer_user = 11,
+                6 => {
+                    r.peer_user = 12;
+                    r.action_bar = "add_contact".into();
+                }
+                8 => r.peer_user = 14,
+                9 => r.action_bar = "report_spam".into(),
+                _ => {}
+            }
         }
         *self.demo_roster.borrow_mut() = roster.clone();
         // Chip badges come from the same recount the real path gets from
@@ -1614,8 +1742,8 @@ impl Store {
         // Mirrors TDLib `chatFolders`: only user-created folders — the
         // built-in All/Archive lists are synthesized by the sidebar itself.
         self.folders.set(vec![
-            FolderRow { id: 2, title: "Work".into(), active: false, unread: 0 },
-            FolderRow { id: 3, title: "Personal".into(), active: false, unread: 0 },
+            FolderRow { id: 2, title: "Work".into(), active: false, unread: 0, include: vec![1, 9] },
+            FolderRow { id: 3, title: "Personal".into(), active: false, unread: 0, include: vec![2, 6, 8] },
         ]);
         self.set_messages(Self::demo_conversation());
         // Seed the photo message's local file so its thumbnail renders —
@@ -1628,20 +1756,25 @@ impl Store {
             self.files_version.add_assign(1);
         }
         self.demo_seed_pinned(1);
-        // Global-search demo corpus (chat_id, message_id, sender, text).
-        // Ids are `demo_conversation` ids so `jump_to_message` highlights
-        // the seeded row after the chat opens.
+        // Global-search demo corpus (chat_id, message_id, sender, text,
+        // kind: 0 text / 1 media / 2 file / 3 link). Ids are
+        // `demo_conversation` ids so `jump_to_message` highlights the
+        // seeded row after the chat opens.
         *self.demo_corpus.borrow_mut() = vec![
-            (1, 10, "Alice".into(), "morning! did the camera filters example work?".into()),
-            (1, 11, "Lexo".into(), "device.clone() into Arc, preview straight on the GpuSurface".into()),
-            (1, 12, "Alice".into(), "nice. and the NV12 conversion?".into()),
-            (2, 14, "Alice".into(), "shipping it 🚀 — GPU filters all pass".into()),
-            (4, 21, "".into(), "Telegram Desktop adds GPU-accelerated previews".into()),
-            (5, 12, "Fan".into(), "nice. and the NV12 conversion?".into()),
-            (5, 16, "Wei".into(), "hydrolysis on wayland works now".into()),
-            (6, 19, "Bob".into(), "see you at the rust meetup".into()),
-            (8, 10, "Mom".into(), "call me when free".into()),
-            (10, 11, "TDLib".into(), "updateAuthorizationState received".into()),
+            (1, 10, "Alice".into(), "morning! did the camera filters example work?".into(), 0),
+            (1, 11, "Lexo".into(), "device.clone() into Arc, preview straight on the GpuSurface".into(), 0),
+            (1, 12, "Alice".into(), "nice. and the NV12 conversion?".into(), 0),
+            (1, 17, "Alice".into(), "photo.jpg".into(), 1),
+            (1, 43, "Alice".into(), "clip.mp4".into(), 1),
+            (1, 13, "".into(), "check https://waterui.dev for the docs".into(), 3),
+            (2, 14, "Alice".into(), "shipping it 🚀 — GPU filters all pass".into(), 0),
+            (4, 21, "".into(), "Telegram Desktop adds GPU-accelerated previews".into(), 0),
+            (5, 12, "Fan".into(), "nice. and the NV12 conversion?".into(), 0),
+            (5, 16, "Wei".into(), "hydrolysis on wayland works now".into(), 0),
+            (6, 19, "Bob".into(), "see you at the rust meetup".into(), 0),
+            (6, 20, "Bob".into(), "meetup-notes.pdf".into(), 2),
+            (8, 10, "Mom".into(), "call me when free".into(), 0),
+            (10, 11, "TDLib".into(), "updateAuthorizationState received".into(), 0),
         ];
         self.sessions.set(vec![
             SessionRow { id: 1, title: "Watergram · Linux".into(), subtitle: "this device".into(), current: true },
@@ -1738,6 +1871,7 @@ impl Store {
             author_sig: Str::from(""),
             album_id: 0,
             album_files: Vec::new(),
+            kb_rows: Vec::new(),
         };
         let svc = |id: i64, text: &str| {
             let mut r = m(id, "", text, "", false, false, "", "", "", "");
@@ -1875,6 +2009,22 @@ impl Store {
             v.play_file = 2;
             v.media_secs = 65;
             msgs.push(v);
+        }
+        // A bot message with an inline keyboard (`replyMarkupInlineKeyboard`):
+        // URL opens the browser, Callback answers the bot's query, CopyText
+        // puts the token on the clipboard — the three dispatchable kinds.
+        {
+            let mut kb = m(44, "CI bot", "Build #4127 passed on dev — 3m 42s", "09:59", false, false, "", "", "", "");
+            kb.kb_rows = vec![
+                vec![
+                    KbBtn { text: "Open build".into(), kind: KbKind::Url("https://waterui.dev".into()) },
+                    KbBtn { text: "Notify me".into(), kind: KbKind::Callback("sub:4127".into()) },
+                ],
+                vec![
+                    KbBtn { text: "Copy token".into(), kind: KbKind::Copy("tok-4127".into()) },
+                ],
+            ];
+            msgs.push(kb);
         }
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
@@ -2470,6 +2620,41 @@ impl Store {
         if sender_photo != 0 {
             self.want_file_id(sender_photo);
         }
+        let kb_rows = match &m.reply_markup {
+            Some(enums::ReplyMarkup::InlineKeyboard(kb)) => kb
+                .rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|b| {
+                            let kind = match &b.r#type {
+                                enums::InlineKeyboardButtonType::Url(u) => {
+                                    KbKind::Url(u.url.clone().into())
+                                }
+                                enums::InlineKeyboardButtonType::Callback(c) => {
+                                    KbKind::Callback(c.data.clone().into())
+                                }
+                                enums::InlineKeyboardButtonType::CopyText(c) => {
+                                    KbKind::Copy(c.text.clone().into())
+                                }
+                                enums::InlineKeyboardButtonType::SwitchInline(s) => {
+                                    KbKind::SwitchInline(s.query.clone().into())
+                                }
+                                enums::InlineKeyboardButtonType::User(u) => {
+                                    KbKind::User(u.user_id)
+                                }
+                                _ => KbKind::Unsupported,
+                            };
+                            KbBtn {
+                                text: b.text.clone().into(),
+                                kind,
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         MessageRow {
             id: m.id,
             sender: self.sender_name(&m.sender_id),
@@ -2539,6 +2724,7 @@ impl Store {
             author_sig: Str::from(m.author_signature.clone()),
             album_id: m.media_album_id,
             album_files: Vec::new(),
+            kb_rows,
         }
     }
 
@@ -2610,6 +2796,12 @@ impl Store {
                 _ => None,
             })
             .unwrap_or(0);
+        let peer_user = match &chat.r#type {
+            enums::ChatType::Private(p) => p.user_id,
+            enums::ChatType::Secret(s) => s.user_id,
+            _ => 0,
+        };
+        let (action_bar, action_title) = Self::action_bar_parts(chat.action_bar.as_ref());
         let row = ChatRow {
             id: chat.id,
             title: chat.title.clone().into(),
@@ -2638,6 +2830,9 @@ impl Store {
             kind_icon: kind_icon.into(),
             title_styled: StyledStr::empty(),
             preview_styled: StyledStr::empty(),
+            action_bar,
+            action_title,
+            peer_user,
         };
         let mut list = self.chats.snapshot();
         match list.iter().position(|r| r.id == chat.id) {
@@ -2764,9 +2959,22 @@ impl Store {
                             title: f.name.text.text.clone().into(),
                             active: false,
                             unread: 0,
+                            // ChatFolderInfo carries no membership — the
+                            // editor refetches the full ChatFolder on open.
+                            include: Vec::new(),
                         })
                         .collect(),
                 );
+            }
+            enums::Update::ChatActionBar(u) => {
+                if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
+                    c.action_bar = u.action_bar.clone();
+                }
+                let (kind, title) = Self::action_bar_parts(u.action_bar.as_ref());
+                self.update_chat_row(u.chat_id, |r| {
+                    r.action_bar = kind.clone();
+                    r.action_title = title.clone();
+                });
             }
             enums::Update::ChatTitle(u) => {
                 if let Some(c) = self.chat_objs.borrow_mut().get_mut(&u.chat_id) {
@@ -4082,6 +4290,7 @@ impl Store {
                 author_sig: Str::from(""),
                 album_id: 0,
                 album_files: Vec::new(),
+                kb_rows: Vec::new(),
             });
             self.set_messages(rows);
             return;
@@ -5421,6 +5630,7 @@ impl Store {
             author_sig: Str::from(""),
             album_id: 0,
             album_files: Vec::new(),
+            kb_rows: Vec::new(),
             day: local_day(now),
         });
         self.set_messages(rows);
@@ -6003,6 +6213,353 @@ impl Store {
     pub fn notify(&self, msg: impl Into<Str>) {
         let (seq, _) = self.notice.snapshot();
         self.notice.set((seq + 1, msg.into()));
+    }
+
+    /// Map `chatActionBar*` to the row's (kind, aux title) strings.
+    fn action_bar_parts(ab: Option<&enums::ChatActionBar>) -> (Str, Str) {
+        match ab {
+            Some(enums::ChatActionBar::ReportSpam(_)) => ("report_spam".into(), "".into()),
+            Some(enums::ChatActionBar::ReportAddBlock(_)) => {
+                ("report_add_block".into(), "".into())
+            }
+            Some(enums::ChatActionBar::AddContact) => ("add_contact".into(), "".into()),
+            Some(enums::ChatActionBar::SharePhoneNumber) => {
+                ("share_phone".into(), "".into())
+            }
+            Some(enums::ChatActionBar::InviteMembers) => {
+                ("invite_members".into(), "".into())
+            }
+            Some(enums::ChatActionBar::JoinRequest(j)) => {
+                ("join_request".into(), j.title.clone().into())
+            }
+            None => ("".into(), "".into()),
+        }
+    }
+
+    /// The open chat's action-bar triple (kind, aux title, peer user id),
+    /// or None when the chat has no bar (normal composer).
+    pub fn open_action_bar(&self) -> Option<(Str, Str, i64)> {
+        let id = self.selected.snapshot()?;
+        self.chats
+            .snapshot()
+            .iter()
+            .find(|r| r.id == id)
+            .filter(|r| !r.action_bar.is_empty())
+            .map(|r| (r.action_bar.clone(), r.action_title.clone(), r.peer_user))
+    }
+
+    /// Clear the open chat's action bar locally and call
+    /// `removeChatActionBar` — Desktop's ✕ / hide path.
+    pub fn action_bar_dismiss(&self) {
+        let Some(id) = self.selected.snapshot() else {
+            return;
+        };
+        self.update_chat_row(id, |r| {
+            r.action_bar = "".into();
+            r.action_title = "".into();
+        });
+        if let Some(c) = self.chat_objs.borrow_mut().get_mut(&id) {
+            c.action_bar = None;
+        }
+        let client = self.client_id.get();
+        if client != 0 {
+            spawn_local(async move {
+                let _ = functions::remove_chat_action_bar(id, client).await;
+            })
+            .detach();
+        }
+    }
+
+    /// Button press on the open chat's action bar. `n` indexes the
+    /// bar kind's buttons in render order (last rendered = dismiss).
+    pub fn action_bar_run(&self, n: i32) {
+        let Some((kind, _title, peer)) = self.open_action_bar() else {
+            return;
+        };
+        let Some(chat_id) = self.selected.snapshot() else {
+            return;
+        };
+        let client = self.client_id.get();
+        match (kind.as_str(), n) {
+            // report_spam: [Report spam and leave, Hide].
+            ("report_spam", 0) => {
+                self.notify("Reported as spam");
+                if client != 0 {
+                    spawn_local(async move {
+                        let _ = functions::report_chat(
+                            chat_id,
+                            String::new(),
+                            Vec::new(),
+                            "spam".to_string(),
+                            client,
+                        )
+                        .await;
+                    })
+                    .detach();
+                }
+                self.action_bar_dismiss();
+            }
+            // report_add_block: [Report, Add to blocklist, Hide].
+            ("report_add_block", 0) => {
+                self.notify("Reported");
+                if client != 0 {
+                    spawn_local(async move {
+                        let _ = functions::report_chat(
+                            chat_id,
+                            String::new(),
+                            Vec::new(),
+                            String::new(),
+                            client,
+                        )
+                        .await;
+                    })
+                    .detach();
+                }
+                self.action_bar_dismiss();
+            }
+            ("report_add_block", 1) => {
+                self.notify("User blocked");
+                if client != 0 && peer != 0 {
+                    let sender = enums::MessageSender::User(types::MessageSenderUser {
+                        user_id: peer,
+                    });
+                    spawn_local(async move {
+                        let _ = functions::set_message_sender_block_list(
+                            sender,
+                            Some(enums::BlockList::Main),
+                            client,
+                        )
+                        .await;
+                    })
+                    .detach();
+                }
+                self.action_bar_dismiss();
+            }
+            // add_contact: [Add contact, Hide].
+            ("add_contact", 0) => {
+                self.notify("Added to contacts");
+                if client != 0 && peer != 0 {
+                    let name = self
+                        .chats
+                        .snapshot()
+                        .iter()
+                        .find(|r| r.id == chat_id)
+                        .map(|r| r.title.to_string())
+                        .unwrap_or_default();
+                    spawn_local(async move {
+                        let _ = functions::add_contact(
+                            peer,
+                            types::ImportedContact {
+                                phone_number: String::new(),
+                                first_name: name,
+                                last_name: String::new(),
+                                note: types::FormattedText::default(),
+                            },
+                            false,
+                            client,
+                        )
+                        .await;
+                    })
+                    .detach();
+                }
+                self.action_bar_dismiss();
+            }
+            // share_phone: [Share my phone number, Hide].
+            ("share_phone", 0) => {
+                self.notify("Phone number shared");
+                if client != 0 && peer != 0 {
+                    spawn_local(async move {
+                        let _ = functions::share_phone_number(peer, client).await;
+                    })
+                    .detach();
+                }
+                self.action_bar_dismiss();
+            }
+            // invite_members: [Invite members, Hide] — opens the members
+            // panel where invites live.
+            ("invite_members", 0) => {
+                self.members_open.set(true);
+                self.action_bar_dismiss();
+            }
+            // join_request: [Apply to join, Hide].
+            ("join_request", 0) => {
+                self.notify("Join request sent");
+                if client != 0 {
+                    spawn_local(async move {
+                        let _ = functions::join_chat(chat_id, client).await;
+                    })
+                    .detach();
+                }
+                self.action_bar_dismiss();
+            }
+            // Any trailing button hides the bar (Desktop's ✕).
+            _ => self.action_bar_dismiss(),
+        }
+    }
+
+    /// Inline-keyboard button tap — dispatch by `inlineKeyboardButtonType`.
+    pub fn inline_tap(&self, message_id: i64, kind: &KbKind) {
+        match kind {
+            KbKind::Url(u) => self.open_link(u.clone()),
+            KbKind::Copy(t) => {
+                let text = t.to_string();
+                if !text.is_empty()
+                    && let Ok(mut cb) = arboard::Clipboard::new()
+                {
+                    let _ = cb.set_text(text);
+                }
+                self.notify("Copied");
+            }
+            KbKind::SwitchInline(q) => {
+                let mut q = q.to_string();
+                if !q.is_empty() && !q.ends_with(' ') {
+                    q.push(' ');
+                }
+                self.composer.set_from(q);
+            }
+            KbKind::User(uid) => {
+                let uid = *uid;
+                if uid != 0 {
+                    self.open_profile(uid);
+                }
+            }
+            KbKind::Callback(data) => {
+                let data = data.clone();
+                let Some(chat_id) = self.selected.snapshot() else {
+                    return;
+                };
+                if self.client_id.get() == 0 {
+                    // Demo: the bot would answer via getCallbackQueryAnswer;
+                    // show the toast shape a callback answer produces.
+                    self.notify("Callback sent to bot");
+                    return;
+                }
+                let store = self.clone();
+                let client = self.client_id.get();
+                spawn_local(async move {
+                    let payload = enums::CallbackQueryPayload::Data(
+                        types::CallbackQueryPayloadData { data: data.to_string() },
+                    );
+                    if let Ok(enums::CallbackQueryAnswer::CallbackQueryAnswer(ans)) =
+                        functions::get_callback_query_answer(
+                            chat_id, message_id, payload, client,
+                        )
+                        .await
+                    {
+                        if !ans.url.is_empty() {
+                            store.open_link(ans.url.clone().into());
+                        } else if !ans.text.is_empty() {
+                            // show_alert answers open a dialog in Desktop;
+                            // the snackbar carries the same text here.
+                            store.notify(ans.text.clone());
+                        }
+                    }
+                })
+                .detach();
+            }
+            KbKind::Unsupported => {
+                self.notify("This button type is not supported yet");
+            }
+        }
+    }
+
+    /// Context-menu "Info": build the message-info card. Real accounts
+    /// ask `getMessageReadDate`/`getMessageViewers`; demo synthesizes the
+    /// same fields from the row.
+    pub fn open_msg_info(&self, row: &MessageRow) {
+        let sent = if row.day_label.is_empty() {
+            format!("Sent {}", row.time)
+        } else {
+            format!("Sent {} {}", row.day_label, row.time)
+        };
+        let views = if row.view_count > 0 {
+            format!("{} views", fmt_count(row.view_count))
+        } else {
+            String::new()
+        };
+        let info = MsgInfo {
+            from: if row.outgoing {
+                "You".into()
+            } else {
+                row.sender.clone()
+            },
+            sent: sent.into(),
+            read: if row.outgoing {
+                if row.read_out { format!("Read {}", row.time).into() } else { "Unread".into() }
+            } else {
+                String::new().into()
+            },
+            views: views.into(),
+            seen: Vec::new(),
+        };
+        self.msg_info.set(Some(info.clone()));
+        let client = self.client_id.get();
+        if client == 0 || !row.outgoing {
+            // Demo: group posts list member names as seen-by.
+            if client == 0 && row.outgoing && row.view_count == 0 {
+                let mut demo = info;
+                demo.seen = self
+                    .members
+                    .snapshot()
+                    .iter()
+                    .take(3)
+                    .map(|m| m.name.clone())
+                    .collect();
+                self.msg_info.set(Some(demo));
+            }
+            return;
+        }
+        let chat_id = self.selected.snapshot().unwrap_or(0);
+        let store = self.clone();
+        let msg_id = row.id;
+        spawn_local(async move {
+            let read = match functions::get_message_read_date(chat_id, msg_id, client).await {
+                Ok(enums::MessageReadDate::Read(r)) => {
+                    format!("Read {}", fmt_time(r.read_date))
+                }
+                Ok(enums::MessageReadDate::Unread) => "Unread".to_string(),
+                Ok(enums::MessageReadDate::TooOld) => "Read date too old".to_string(),
+                Ok(enums::MessageReadDate::UserPrivacyRestricted)
+                | Ok(enums::MessageReadDate::MyPrivacyRestricted) => {
+                    "Read date hidden by privacy settings".to_string()
+                }
+                _ => String::new(),
+            };
+            let mut seen = Vec::new();
+            if let Ok(enums::MessageViewers::MessageViewers(v)) =
+                functions::get_message_viewers(chat_id, msg_id, client).await
+            {
+                seen = v
+                    .viewers
+                    .iter()
+                    .map(|vw| {
+                        let name = store.user_name(vw.user_id).to_string();
+                        Str::from(format!("{name} · {}", fmt_time(vw.view_date)))
+                    })
+                    .collect();
+            }
+            if let Some(mut cur) = store.msg_info.snapshot() {
+                cur.read = read.into();
+                cur.seen = seen;
+                store.msg_info.set(Some(cur));
+            }
+        })
+        .detach();
+    }
+
+    pub fn dismiss_msg_info(&self) {
+        self.msg_info.set(None);
+    }
+
+    /// Folder editor chat-picker checkbox.
+    pub fn toggle_folder_chat(&self, id: i64) {
+        self.folder_chats.with_mut(|ids| {
+            if let Some(i) = ids.iter().position(|c| *c == id) {
+                ids.remove(i);
+            } else {
+                ids.push(id);
+            }
+        });
     }
 
     /// Copy a message's text to the internal clipboard binding (and the OS
@@ -7090,15 +7647,31 @@ impl Store {
         self.editing_folder.set(id);
         if id == 0 {
             self.folder_name.set_from("");
+            self.folder_chats.set(Vec::new());
         } else {
-            let name = self
+            let f = self
                 .folders
                 .snapshot()
                 .iter()
                 .find(|f| f.id == id)
-                .map(|f| f.title.clone())
+                .map(|f| (f.title.clone(), f.include.clone()))
                 .unwrap_or_default();
-            self.folder_name.set(name);
+            self.folder_name.set(f.0);
+            self.folder_chats.set(f.1);
+            // ChatFolderInfo doesn't carry membership — refetch the full
+            // folder so the chat picker opens with the real includes.
+            let client = self.client_id.get();
+            if client != 0 {
+                let store = self.clone();
+                spawn_local(async move {
+                    if let Ok(enums::ChatFolder::ChatFolder(full)) =
+                        functions::get_chat_folder(id, client).await
+                    {
+                        store.folder_chats.set(full.included_chat_ids);
+                    }
+                })
+                .detach();
+            }
         }
         self.folder_open.set(true);
     }
@@ -7107,9 +7680,56 @@ impl Store {
     pub fn save_folder(&self) {
         let client = self.client_id.get();
         let name = self.folder_name.snapshot().to_string();
-        if client == 0 || name.trim().is_empty() {
+        if name.trim().is_empty() {
             return;
         }
+        if client == 0 {
+            // Demo: apply the picked memberships locally so the folder
+            // chips and the picker round-trip without TDLib.
+            let included = self.folder_chats.snapshot();
+            let fid = self.editing_folder.snapshot();
+            let fid = if fid == 0 {
+                let new_id = self
+                    .folders
+                    .snapshot()
+                    .iter()
+                    .map(|f| f.id)
+                    .max()
+                    .unwrap_or(1)
+                    + 1;
+                self.folders.append(FolderRow {
+                    id: new_id,
+                    title: name.clone().into(),
+                    active: false,
+                    unread: 0,
+                    include: included.clone(),
+                });
+                new_id
+            } else {
+                self.folders.with_mut(|fs| {
+                    if let Some(f) = fs.iter_mut().find(|f| f.id == fid) {
+                        f.title = name.clone().into();
+                        f.include = included.clone();
+                    }
+                });
+                fid
+            };
+            let apply = |r: &mut ChatRow| {
+                if r.folder_id == fid {
+                    r.folder_id = 0;
+                }
+                if included.contains(&r.id) {
+                    r.folder_id = fid;
+                }
+            };
+            self.chats.with_mut(|rows| rows.iter_mut().for_each(&apply));
+            self.demo_roster.borrow_mut().iter_mut().for_each(apply);
+            self.demo_recount_folders();
+            self.folder_open.set(false);
+            self.folder_chats.set(Vec::new());
+            return;
+        }
+        let included = self.folder_chats.snapshot();
         let folder = types::ChatFolder {
             name: types::ChatFolderName {
                 text: types::FormattedText {
@@ -7122,7 +7742,7 @@ impl Store {
             color_id: -1,
             is_shareable: false,
             pinned_chat_ids: Vec::new(),
-            included_chat_ids: Vec::new(),
+            included_chat_ids: included.clone(),
             excluded_chat_ids: Vec::new(),
             exclude_muted: false,
             exclude_read: false,
@@ -7146,6 +7766,7 @@ impl Store {
             store.folder_open.set(false);
             let _ = ok;
             // The folder list refreshes through Update::ChatFolders.
+            store.folder_chats.set(Vec::new());
         })
         .detach();
     }
@@ -7886,6 +8507,7 @@ impl Store {
             return;
         }
         let client = self.client_id.get();
+        let filter = self.search_filter.snapshot();
         if client == 0 {
             // Demo/tests: scan the seeded corpus; the real path fires
             // `searchMessages` for the same "Messages" section.
@@ -7900,15 +8522,25 @@ impl Store {
                     .map(|r| r.title.clone())
                     .unwrap_or_default()
             };
+            // Filter tabs: 1 = Chats (no message hits), 2 Media, 3 Files,
+            // 4 Links map onto the corpus kind column; 0 = All.
+            let want_kind = |k: i32| match filter {
+                1 => false,
+                2 => k == 1,
+                3 => k == 2,
+                4 => k == 3,
+                _ => true,
+            };
             self.msg_results.set(
                 self.demo_corpus
                     .borrow()
                     .iter()
-                    .filter(|(_, _, sender, text)| {
-                        text.to_lowercase().contains(&q)
-                            || sender.to_lowercase().contains(&q)
+                    .filter(|(_, _, sender, text, kind)| {
+                        want_kind(*kind)
+                            && (text.to_lowercase().contains(&q)
+                                || sender.to_lowercase().contains(&q))
                     })
-                    .map(|(chat_id, msg_id, sender, text)| MsgHit {
+                    .map(|(chat_id, msg_id, sender, text, kind)| MsgHit {
                         key: chat_id * 1_000_000 + msg_id,
                         chat_id: *chat_id,
                         message_id: *msg_id,
@@ -7916,6 +8548,7 @@ impl Store {
                         sender: sender.clone(),
                         snippet: text.clone(),
                         time: "".into(),
+                        kind: *kind,
                     })
                     .collect(),
             );
@@ -7943,14 +8576,32 @@ impl Store {
         })
         .detach();
         // "Messages" section — TDLib `searchMessages` over the Main list
-        // (the in-chat path uses `searchChatMessages` instead).
+        // (the in-chat path uses `searchChatMessages` instead). The
+        // Chats tab (1) skips the message request; Media/Files/Links map
+        // onto the matching `SearchMessagesFilter`.
+        let msg_filter = match filter {
+            2 => enums::SearchMessagesFilter::PhotoAndVideo,
+            3 => enums::SearchMessagesFilter::Document,
+            4 => enums::SearchMessagesFilter::Url,
+            _ => enums::SearchMessagesFilter::Empty,
+        };
+        if filter == 1 {
+            self.msg_results.set(Vec::new());
+        }
+        // Media/Files/Links are message kinds — no chat section there.
+        if filter >= 2 {
+            self.server_results.set(Vec::new());
+        }
         spawn_local(async move {
+            if filter == 1 {
+                return;
+            }
             if let Ok(enums::FoundMessages::FoundMessages(found)) = functions::search_messages(
                 Some(enums::ChatList::Main),
                 q_msgs,
                 String::new(),
                 20,
-                Some(enums::SearchMessagesFilter::Empty),
+                Some(msg_filter),
                 None,
                 0,
                 0,
@@ -7990,12 +8641,29 @@ impl Store {
                         sender,
                         snippet,
                         time: fmt_time(m.date),
+                        kind: Self::hit_kind(&m.content),
                     });
                 }
                 store_msgs.msg_results.set(hits);
             }
         })
         .detach();
+    }
+
+    /// Search-tab kind of a message's content: 1 media, 2 file, 3 link,
+    /// 0 plain text — mirrors the demo corpus's kind column.
+    fn hit_kind(c: &enums::MessageContent) -> i32 {
+        match c {
+            enums::MessageContent::MessagePhoto(_)
+            | enums::MessageContent::MessageVideo(_)
+            | enums::MessageContent::MessageAnimation(_)
+            | enums::MessageContent::MessageVideoNote(_) => 1,
+            enums::MessageContent::MessageDocument(_)
+            | enums::MessageContent::MessageAudio(_)
+            | enums::MessageContent::MessageVoiceNote(_) => 2,
+            enums::MessageContent::MessageText(t) if t.link_preview.is_some() => 3,
+            _ => 0,
+        }
     }
 
     /// Sidebar "Messages" hit: open the chat and land on the message with
@@ -8045,6 +8713,9 @@ impl Store {
             title_styled: StyledStr::empty(),
             preview_styled: StyledStr::empty(),
             kind_icon: "person".into(),
+            action_bar: "".into(),
+            action_title: "".into(),
+            peer_user: 0,
         };
         let mut list = self.server_results.snapshot();
         if !list.iter().any(|r| r.id == row.id) {

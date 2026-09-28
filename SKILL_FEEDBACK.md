@@ -365,3 +365,99 @@ positives observed. (Patterns from earlier rounds folded in.)
   `.padding_with((v, h))`. Both cost compile cycles.
 - **Lint candidates (new this round):** none — `cargo dylint --all`
   clean on all new code.
+
+## r41
+
+- **`Tabs`/`TabItemLayout` does NOT substitute for a chat-folder chip
+  strip — evaluated and rejected.** The folder chips need per-item
+  context menus (`Edit folder / Mark all as read / Delete folder`),
+  per-item icons + unread badges, and they drive a *filter* over one
+  shared list — not pane switching. `Tabs` owns the whole content area
+  (each item carries its own pane), has no per-item context-menu hook,
+  and no icon/badge slot on the item label. Correct form stayed
+  hand-rolled: `scroll_horizontal(HStack::for_each(chips, |chip|
+  chip_button))`. Cost: one API read of `waterui` `tabs.rs`.
+  - **Fix:** the Tabs reference should state the boundary explicitly:
+    "Tabs switches panes; it is not a selectable chip row. For
+    filter-style horizontal selectors (mutable labels, badges, context
+    menus) compose `scroll_horizontal(HStack::for_each(..))`."
+- **`when(cond, builder)` payloads are `Fn` — capturing `store` field
+  paths makes the closure `FnOnce` with a confusing E0507/E0525.** A
+  `move ||` payload that reads `store.something` *by value* (e.g.
+  `store.chats.clone()` inside the body) partially moves `store`; the
+  error surfaces at the `when` call far from the capture. Correct form:
+  hoist the signal clones into the *outer* enclosing body
+  (`let rows = store.chats.clone();`) so the `move` closure only
+  consumes locals — or clone inside the body.
+  - **Fix:** SKILL.md's `when` section should show the
+    hoist-clones-then-move pattern; the raw trait-bound error is the
+    worst possible teaching moment.
+- **`.foreground(impl Into<Color>)` is constant-only — no signals.**
+  Theme/environment modifiers accept signals, view color modifiers do
+  not; `store.some_computed.map(to_color)` does not satisfy
+  `Into<Color>`. For a conditional tint inside a `for_each` row I had
+  to `map` to `(Color, Color)` tuples of already-resolved
+  `Color::from(WithOpacity::new(token, a))` — workable, but a
+  `foreground_signal`/`foreground(impl IntoComputed<Color>)` variant
+  would be the obvious API.
+  - **Fix:** document "view color modifiers are static; if you need a
+    reactive tint, resolve to `Color` upstream and `map`" or add the
+    signal-taking overload.
+- **`WithOpacity::new` takes theme tokens directly** —
+  `WithOpacity::new(AccentForeground, 0.18)` works, while
+  `Srgb::from(Accent)` does not (`Srgb` only converts from
+  `(u8,u8,u8)`/`[f32;3]`/tuples). Cost me an E0277.
+- **`AccessibilityState::checked` takes `Option<bool>`**, not `bool` —
+  `checked(Some(b))`. And `Map` signals are not `IntoText`: rendering a
+  mapped string needs `text!("{s}")` interpolation, not
+  `text(map)`.
+  - **Fix (both):** one-line signature examples in the a11y + text
+    references would have saved three compile cycles.
+- **Lint candidates (new this round):**
+  - **`when` payload `Fn` captures** — same trap as the existing
+    candidate but the sharper form: a `move` payload that captures a
+    `store` *field path* (not the whole `store`) is `FnOnce`. Lint:
+    flag field-path captures in `when`/`otherwise` payloads, suggest
+    hoisting `let x = store.x.clone()` one level up.
+  - **`.visible(chats_visible)` vs `when`** — for section gating I
+    deliberately used `.visible` instead of nested `when` to avoid the
+    #251 nested-when dead-button family. A lint that flags `when`
+    nested inside a `when` payload (on hydrolysis) would catch the
+    whole defect class — but it's backend-shaped, so maybe a backend
+    audit rather than a lint.
+- **`.visible(false)` on a mounted `List` section panics** (DOGFOOD
+  r41-1) — the skill doesn't cover when to prefer `when` over
+  `.visible`. After the panic I switched the search-section gate to
+  `when` (unmount — semantically right anyway). A "hiding vs
+  unmounting" note in the conditional-view reference would have
+  prevented the crash course.
+- **Capture-tooling note (not the framework):** on bare Xvfb (no WM),
+  `xdotool key/type` events never reach the app window until
+  `xdotool windowfocus <winid>` is run once — `windowactivate` fails
+  ("no window manager"). Verified via
+  `RUST_LOG='waterui::hydrolysis::input_raw=trace'`: `keyboard_text`
+  events only flow after `windowfocus`. Pointer events do not need it.
+  If this is common, a line in the hydrolysis testing docs would save a
+  debugging session.
+- **Cloning a `distinct()`ed signal silently kills all but the first
+  watcher** (DOGFOOD r41-2, nami defect) — `Distinct`'s dedup cell is
+  shared across clones, so `let a = src.map(..).distinct(); let b =
+  a.clone();` leaves one of `a`/`b` permanently dead once the other has
+  seen a transition. Cost me most of a debugging session chasing
+  "nested `when` never re-fires" — the `when` was fine, its signal was
+  dead. Skill guidance needed: **never `.clone()` a signal you derived
+  with `distinct()`; derive a second instance from the source
+  (`src.map(..).distinct()` again) so each consumer dedups against its
+  own history.** Worth a "common signal-combinator traps" section in the
+  reactivity reference alongside the `zip`/`map` notes.
+  - **Candidate nami fix (for the maintainer):** move the dedup cell
+    out of the `Distinct` struct and into `watch` — seed
+    `RefCell::new(Some(current_value))` per watcher so dedup is
+    per-consumer, matching every other reactive library's `distinct`
+    semantics.
+- **Lint candidates (new this round):**
+  - **`.clone()` on a `distinct()` chain** — if nami keeps the shared
+    cell, a lint that flags `Clone` on the result of
+    `SignalExt::distinct` (suggest "derive a second instance from the
+    source") would catch this at write time. Pattern:
+    `let b = distinct_signal.clone()` → warn.

@@ -96,6 +96,11 @@
 | 拖拽文件进窗口发送 | ❌ | 框架双层缺口：waterui `DragData` 仅 Text|Url 无 File；hydrolysis 未桥接 winit DroppedFile/HoveredFile — DOGFOOD r34-1 | — |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
 | 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条并按对端 accent 色着色；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母色圆）；组末气泡底角尾巴为气泡背景层内 Path 楔形 + `.offset` 外推（同 fill 一体、接角方角、不占布局空间）；组间间距大于组内 | `set_messages_groups_runs` |
+| 机器人内联键盘 | ✅ | `replyMarkupInlineKeyboard` → 气泡内容下方按钮行（每行按原列数等宽 pill，圆角 Accent 10%）；点击 `inline_tap` 按类型分发：Url→`open_link`、Callback→`getCallbackQueryAnswer`（show_alert/url 回落 toast/打开）、CopyText→剪贴板+toast、SwitchInline→填入输入框、User→资料卡、LoginUrl/WebApp 等未覆盖型 toast 提示 | `inline_keyboard_parses_and_dispatches` + 实测截图（r41_kb*） |
+| 聊天操作条（report spam/add contact/share phone/…） | ✅ | `Update::ChatActionBar` → `action_bar_parts` 入行字段；操作条替换输入框区（`when(bar_present)`），按钮按 kind 分发 `action_bar_run`：reportSpam→`reportChat`+离开、reportAddBlock→report/`setMessageSenderBlockList`、addContact→`addContact`、sharePhone→`sharePhoneNumber`、inviteMembers→成员面板、joinRequest→`joinChat`；✕= `removeChatActionBar` | `action_bar_dispatches_and_dismisses` + 实测截图（r41_bar*） |
+| 消息信息卡（发送/已读/浏览/已读名单） | ✅ | 气泡菜单 "Info"（仅发出消息）→ `open_msg_info` → 浮层卡片：from、Sent 时间、Read/Unread、N views、Seen by；真实路径 `getMessageReadDate`+`getMessageViewers` | `message_info_card_fields` + 实测截图（r41_info*） |
+| 全局搜索过滤标签（All/Chats/Media/Files/Links） | ✅ | 搜索框下 chip 条（有查询时常驻），tab → `search_filter` → `run_search` 按 `InputChatPhoto`/`Document`/`Url` 映射过滤消息区；Chats tab 仅会话命中；命中行前缀类型图标 | `search_filter_tabs_scope_results` + 实测截图（r41_tabs*） |
+| 文件夹编辑器会话选择器 | ✅ | 编辑器 "Included chats" 区列出全部会话，`toggle_folder_chat` 勾选/取消（☑/☐ + a11y checked）；`ChatFolderInfo` 不携带成员 → `open_folder_editor` 用 `getChatFolder` 回填；`save_folder` 真实路径写 `included_chat_ids`，demo 本地应用并同步 `folder_id`/徽标重算 | `folder_editor_picker_round_trip` + 实测截图（r41_folder*） |
 
 ## 4. 媒体与附件
 
@@ -162,7 +167,8 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：116 项 ｜ 部分 🟡：1 项（全局快捷键 r40 起部分落地）｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
+- 已实现 ✅：121 项 ｜ 部分 🟡：1 项（全局快捷键 r40 起部分落地）｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
+- r41 补录：机器人内联键盘（replyMarkup 按钮行+分类型分发）、聊天操作条（chatActionBar* 全型，替换输入框区）、消息信息卡（getMessageReadDate+getMessageViewers）、全局搜索过滤标签（All/Chats/Media/Files/Links）、文件夹编辑器会话选择器（getChatFolder 回填 + included_chat_ids 写回）—— 均 1400/800/600 实机验证；m3 锁已解除（waterui ee85dc47 含 TabItemLayout），m3→b21c79f6；waterkit 锁亦解除（video-gpu#35 已并 01f3d3fc，pin waterkit dev 11300217 software-decode），waterkit*→11300217 + video-gpu→01f3d3fc
 - r39 新增：自动删除定时器（行菜单嵌套 `Menu`）、未读回应 ❤ 徽标+浮动跳转钮、消息翻译（内联互换+还原）、复制消息链接、复制图片 —— 五项均 1400/800/600 实机验证
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。r35 补录：消息内搜索 n/N+^/v+命中高亮、@提及跳转钮、悬停↩快捷回复、双击❤️快反应、侧边栏搜索命中高亮。r36 补录：置顶消息多选弹层实测（r36_pinned1400/800/600）、会话行悬停 ⋮ 菜单实测（r36_hovmenu*，悬停时时间戳隐藏）、composer Markdown→实体+demo 回显实测（r36_echo*）、多选条实测部分（r36-5 死按钮记 🟡）、全局快捷键记 ❌（r36-1）。搜索命中高亮配色修正为 M3 container+on-*（r36_marks*）。r38 补录：全局消息搜索 "Messages" 区、删除确认卡（私聊 revoke 勾选）、未读回到底部浮动钮、静音样式（bell_off+暗化标题+灰徽标）、文件夹未读徽标（`updateUnreadChatCount`）。

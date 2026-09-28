@@ -50,9 +50,11 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{auto_delete_label, highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, MsgHit, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store};
+use crate::state::{auto_delete_label, highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, SearchRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
+use mdi::image;
+use mdi::file_document_outline;
 use mdi::account_group;
 use mdi::alert_circle;
 use mdi::clock_outline;
@@ -338,8 +340,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         .is_some()
         .or(&store.forward_ids.map(|ids| !ids.is_empty()))
         .distinct();
-    let filtered: SignalCollection<_> = SignalCollection::new(
-        store
+    let filtered_rows = store
             .chats
             .zip(&store.search)
             .map(|(mut rows, q)| {
@@ -382,17 +383,65 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         })
                         .collect()
                 }
-            }),
-    );
-    let server_results = SignalCollection::new(store.server_results.clone());
-    let show_results = store
-        .server_results
+            });
+    let filtered: SignalCollection<_> = SignalCollection::new(filtered_rows.clone());
+    // Desktop's search-scope tabs under the field: All / Chats / Media /
+    // Files / Links — visible whenever a query is active, even when a tab
+    // yields no hits (the strip must stay so the user can switch back).
+    let searching = store.search.map(|q: Str| !q.is_empty()).distinct();
+    // nami defect (DOGFOOD r41-2): clones of one `Distinct` share the dedup
+    // cell, so only the first watcher sees each transition — a second
+    // `when(searching.clone())`/`watch` would stay dead forever. Give the
+    // pane its own `distinct` instance with its own cell.
+    let show_results = store.search.map(|q: Str| !q.is_empty()).distinct();
+    // The whole results pane is ONE `SignalCollection` of `SearchRow`s —
+    // sections/labels/empty-state are data, so a tab switch is a
+    // collection update (no nested `when`s inside the `when` payload).
+    let search_rows = filtered_rows
+        .zip(&store.server_results)
         .zip(&store.msg_results)
-        .map(|(a, b)| !a.is_empty() || !b.is_empty())
-        .distinct();
+        .zip(&store.search_filter)
+        .map(|(((locals, server), hits), f)| {
+            let mut out: Vec<SearchRow> = Vec::new();
+            if f <= 1 {
+                out.extend(locals.into_iter().map(SearchRow::Chat));
+                if !server.is_empty() {
+                    out.push(SearchRow::Header("Global search results".into()));
+                    out.extend(server.into_iter().map(SearchRow::Chat));
+                }
+            }
+            if f != 1 && !hits.is_empty() {
+                out.push(SearchRow::Header("Messages".into()));
+                out.extend(hits.into_iter().map(SearchRow::Hit));
+            }
+            if !out
+                .iter()
+                .any(|r| !matches!(r, SearchRow::Header(_)))
+            {
+                out.push(SearchRow::Empty);
+            }
+            out
+        });
     let search_now = store.search.debounce(Duration::from_millis(400));
+    let search_tabs = store.search_filter.map(|f| {
+        [
+            ("All", 0),
+            ("Chats", 1),
+            ("Media", 2),
+            ("Files", 3),
+            ("Links", 4),
+        ]
+        .iter()
+        .map(|(t, i)| FolderRow {
+            id: *i,
+            title: (*t).into(),
+            active: f == *i,
+            unread: 0,
+            include: Vec::new(),
+        })
+        .collect::<Vec<_>>()
+    });
     let rows_store = store.clone();
-    let res_store = store.clone();
     // Folder chips carry each list's unread-chat count (TDLib
     // `updateUnreadChatCount`) like Desktop's folder bar.
     let folder_tabs = store
@@ -406,18 +455,21 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 title: "All".into(),
                 active: active == 0,
                 unread: badge(0),
+                include: Vec::new(),
             }];
             tabs.extend(fs.iter().map(|f| FolderRow {
                 id: f.id,
                 title: f.title.clone(),
                 active: f.id == active,
                 unread: badge(f.id),
+                include: f.include.clone(),
             }));
             tabs.push(FolderRow {
                 id: -1,
                 title: "Archive".into(),
                 active: active == -1,
                 unread: badge(-1),
+                include: Vec::new(),
             });
             tabs
         });
@@ -501,6 +553,11 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         }),
         when(has_folders, move || {
             let folder_edit = store.folder_open.clone();
+            // Bound here (outer body) so the `when(folder_edit)` builder
+            // only consumes locals — field-path captures of `store` would
+            // partially move it and demote this closure to FnOnce.
+            let picked = store.folder_chats.clone();
+            let chat_rows = SignalCollection::new(store.chats.clone());
             // Chip metrics: caption line ~17dp + 2×3dp vertical chip padding.
             // ScrollView reports StretchAxis::Both unconditionally
             // (raw_view!, axis not consulted — see DOGFOOD), and View has no
@@ -593,6 +650,35 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                         toggle("Contacts", &fc),
                         toggle("Groups", &fg),
                         toggle("Channels", &fch),
+                        // Desktop's folder editor lists the chats the folder
+                        // includes, with a check each (`included_chat_ids`).
+                        text("Included chats")
+                            .caption()
+                            .muted(),
+                        scroll(VStack::for_each(chat_rows.clone(), {
+                            let picked = picked.clone();
+                            move |row: ChatRow| {
+                            let id = row.id;
+                            let on = picked.map(move |ids: Vec<i64>| {
+                                AccessibilityState::new().checked(Some(ids.contains(&id)))
+                            });
+                            let mark = picked.map(move |ids: Vec<i64>| {
+                                Str::from(if ids.contains(&id) { "☑ " } else { "☐ " })
+                            });
+                            hstack((
+                                text!("{mark}").body(),
+                                text(row.title.clone()).body().line_limit(ONE),
+                                spacer(),
+                            ))
+                            .spacing(4.0)
+                            .padding_with((3.0, 6.0))
+                            .on_tap(move |store: Store| store.toggle_folder_chat(id))
+                            .a11y_label(row.title.clone())
+                            .a11y_state_signal(on)
+                            .a11y_role(AccessibilityRole::Button)
+                        }
+                        }))
+                        .max_height(140.0),
                         hstack((
                             spacer(),
                             button("Save folder").action(|store: Store| {
@@ -608,74 +694,131 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         }),
         ))
         .spacing(0.0),
+        // Search-scope tabs (All / Chats / Media / Files / Links) under the
+        // field while a query is active — Desktop parity.
+        when(searching.clone(), move || {
+            let chip_pad_v: f32 = 3.0;
+            scroll_horizontal(HStack::for_each(
+                SignalCollection::new(search_tabs.clone()),
+                move |row: FolderRow| {
+                    let id = row.id;
+                    // Same chip styling as the folder chips above.
+                    let fg = if row.active {
+                        Color::from(Accent)
+                    } else {
+                        Color::from(MutedForeground)
+                    };
+                    let chip = if row.active {
+                        text(row.title.clone()).caption().bold().foreground(fg).anyview()
+                    } else {
+                        text(row.title.clone()).caption().foreground(fg).anyview()
+                    };
+                    chip.padding_with((chip_pad_v, 10.0_f32))
+                        .background(if row.active {
+                            RoundedRectangle::new(0.5)
+                                .fill(SurfaceVariant)
+                                .anyview()
+                        } else {
+                            AnyView::default()
+                        })
+                        .on_tap(move |store: Store| {
+                            store.search_filter.set(id);
+                            store.run_search(store.search.snapshot());
+                        })
+                        .a11y_label(row.title.clone())
+                        .a11y_role(AccessibilityRole::Button)
+                },
+            ))
+            .padding_with((4.0, 8.0))
+        }),
         // `List` reports StretchAxis::Both and fills the leftover region;
         // a `Lazy` stack inside `scroll(vstack)` reports None and is sized to
         // its realized rows, which clipped the list mid-pane (see DOGFOOD).
         zstack((
         {
             let filtered_else = filtered.clone();
-            let rows_else = rows_store.clone();
             let list_sel = store.list_selection.clone();
-            when(show_results, move || {
-                let local_store = rows_store.clone();
-                let remote_store = res_store.clone();
-                let msg_hits = SignalCollection::new(store.msg_results.clone());
-                vstack((
-                    List::for_each(filtered.clone(), move |row: ChatRow| {
-                        let id = row.id;
-                        ListItem::new(
-                            chat_row(local_store.clone(), row)
-                                .on_tap(move |store: Store| store.select_chat(id)),
-                        )
-                    }),
-                    Divider,
-                    text("Global search results")
-                        .caption()
-                        .muted()
-                        .padding_with((4.0, 12.0)),
-                    List::for_each(server_results.clone(), move |row: ChatRow| {
-                        let id = row.id;
-                        ListItem::new(
-                            chat_row(remote_store.clone(), row)
-                                .on_tap(move |store: Store| store.select_chat(id)),
-                        )
-                    }),
-                    Divider,
-                    text("Messages").caption().muted().padding_with((4.0, 12.0)),
-                    List::for_each(msg_hits, move |hit: MsgHit| {
-                        let hit2 = hit.clone();
-                        ListItem::new(
-                            hstack((
-                                vstack((
-                                    hstack((
-                                        text(hit.title.clone()).body().line_limit(ONE),
-                                        spacer(),
-                                        text(hit.time.clone()).caption().muted(),
+            let rows_else = rows_store.clone();
+            when(show_results, { let rows_else = rows_else.clone(); move || {
+                // One List over `SearchRow`s — the section composition is
+                // pure data (see the `search_rows` binding above).
+                let row_store = rows_else.clone();
+                List::for_each(
+                    SignalCollection::new(search_rows.clone()),
+                    move |row: SearchRow| match row {
+                        SearchRow::Header(t) => ListItem::new(
+                            text(t)
+                                .caption()
+                                .muted()
+                                .padding_with((4.0, 12.0)),
+                        ),
+                        SearchRow::Empty => ListItem::new(
+                            text("No results")
+                                .body()
+                                .muted()
+                                .padding_with((8.0, 12.0)),
+                        ),
+                        SearchRow::Chat(r) => {
+                            let id = r.id;
+                            ListItem::new(
+                                chat_row(row_store.clone(), r)
+                                    .on_tap(move |store: Store| store.select_chat(id)),
+                            )
+                        }
+                        SearchRow::Hit(hit) => {
+                            let hit2 = hit.clone();
+                            // Leading kind glyph — Desktop shows a
+                            // media/file thumbnail on media, file and
+                            // link hits.
+                            let kind_icon = match hit.kind {
+                                1 => image()
+                                    .tint(MutedForeground)
+                                    .size(16.0, 16.0)
+                                    .anyview(),
+                                2 => file_document_outline()
+                                    .tint(MutedForeground)
+                                    .size(16.0, 16.0)
+                                    .anyview(),
+                                3 => link_variant()
+                                    .tint(MutedForeground)
+                                    .size(16.0, 16.0)
+                                    .anyview(),
+                                _ => AnyView::default(),
+                            };
+                            ListItem::new(
+                                hstack((
+                                    kind_icon,
+                                    vstack((
+                                        hstack((
+                                            text(hit.title.clone()).body().line_limit(ONE),
+                                            spacer(),
+                                            text(hit.time.clone()).caption().muted(),
+                                        ))
+                                        .spacing(4.0),
+                                        text(if hit.sender.is_empty() {
+                                            hit.snippet.clone()
+                                        } else {
+                                            format!("{}: {}", hit.sender, hit.snippet).into()
+                                        })
+                                        .caption()
+                                        .line_limit(ONE)
+                                        .muted(),
                                     ))
-                                    .spacing(4.0),
-                                    text(if hit.sender.is_empty() {
-                                        hit.snippet.clone()
-                                    } else {
-                                        format!("{}: {}", hit.sender, hit.snippet).into()
-                                    })
-                                    .caption()
-                                    .line_limit(ONE)
-                                    .muted(),
+                                    .spacing(2.0)
+                                    .leading(),
                                 ))
-                                .spacing(2.0)
-                                .leading(),
-                            ))
-                            .padding_with((4.0, 10.0))
-                            .on_tap(move |store: Store| store.open_hit(&hit2))
-                            .a11y_label(format!(
-                                "Message in {}: {}",
-                                hit.title, hit.snippet
-                            )),
-                        )
-                    }),
-                ))
-                .leading()
-            })
+                                .spacing(6.0)
+                                .padding_with((4.0, 10.0))
+                                .on_tap(move |store: Store| store.open_hit(&hit2))
+                                .a11y_label(format!(
+                                    "Message in {}: {}",
+                                    hit.title, hit.snippet
+                                )),
+                            )
+                        }
+                    },
+                )
+            } })
             .otherwise(move || {
                 let rows_l = rows_else.clone();
                 // Framework-owned selection (waterui#1233): pointer taps and
@@ -1055,6 +1198,20 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         .distinct();
     let capture_error_text = store.capture_error.clone();
     let composer_empty = store.composer.str_is_empty().distinct();
+    let store_bar = store.clone();
+    // The open chat's `chatActionBar*` hides the composer row entirely.
+    let bar_present = store
+        .chats
+        .zip(&store.selected)
+        .map(|(rows, sel)| {
+            sel.and_then(|id| {
+                rows.iter()
+                    .find(|r| r.id == id)
+                    .map(|r| !r.action_bar.is_empty())
+            })
+            .unwrap_or(false)
+        })
+        .distinct();
     let video_note_open = store.video_note_open.clone();
     let voice_elapsed = store.voice_elapsed.clone();
     let store_for_sheet = store.clone();
@@ -1710,7 +1867,16 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         }),
     ))
     .spacing(0.0),
-    hstack((
+    // `chatActionBar*` — Telegram Desktop replaces the composer with the
+    // bar's buttons (Report spam / Add contact / Share phone / …) plus a
+    // trailing ✕ that hides it (`removeChatActionBar`).
+    when(bar_present.not(), {
+        // `when` builders are `Fn` — clone the signal handles inside
+        // instead of consuming the captures.
+        let composer_b = composer_b.clone();
+        let composer_empty = composer_empty.clone();
+        move || {
+        hstack((
         FilePicker::open(
             label("Attach file").icon(paperclip()).icon_only(),
             &store.attach,
@@ -1731,7 +1897,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         // (Telegram Desktop parity). A `Spacer` before the mic/send slot
         // keeps it trailing-aligned.
         spacer(),
-        when(composer_empty, || {
+        when(composer_empty.clone(), || {
             icon_button(microphone(), "Record voice note", |store: Store| {
                 store.toggle_voice_record()
             })
@@ -1770,8 +1936,111 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             }
             _ => KeyHandling::Ignored,
         }
-    }),
+    })
+        }
+    })
+    .otherwise(move || action_bar_view(store_bar.clone())),
     ))
+}
+
+/// Telegram Desktop's `chatActionBar` strip — full-width label buttons plus a
+/// trailing ✕ that hides the bar (`removeChatActionBar`). The labels come
+/// from the bar kind (`action_bar_parts`); taps dispatch per kind via
+/// `Store::action_bar_run`.
+fn action_bar_view(store: Store) -> impl View {
+    let (kind, title, _peer) = store.open_action_bar().unwrap_or_default();
+    let labels: Vec<Str> = match kind.as_str() {
+        "report_spam" => vec!["Report spam and leave".into()],
+        "report_add_block" => vec!["Report".into(), "Add to blocklist".into()],
+        "add_contact" => vec!["Add contact".into()],
+        "share_phone" => vec!["Share my phone number".into()],
+        "invite_members" => vec!["Invite members".into()],
+        "join_request" => vec![format!("Apply to join \"{title}\"").into()],
+        _ => vec!["Continue".into()],
+    };
+    let mut btns: Vec<AnyView> = labels
+        .iter()
+        .enumerate()
+        .map(|(n, label)| {
+            let n = n as i32;
+            let label = label.clone();
+            hstack((
+                spacer(),
+                text(label.clone()).body().bold().foreground(Accent),
+                spacer(),
+            ))
+            .padding_with((10.0, 4.0))
+            .on_tap(move |store: Store| store.action_bar_run(n))
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_label(label.clone())
+            .max_width(f32::INFINITY)
+            .anyview()
+        })
+        .collect();
+    btns.push(
+        icon_button(close(), "Hide", |store: Store| store.action_bar_dismiss()).anyview(),
+    );
+    vstack((Divider, hstack(btns).spacing(0.0))).spacing(0.0)
+}
+
+/// "Show message info" card — sent/read time, view count and the seen-by
+/// list (`getMessageReadDate` + `getMessageViewers` on the real path).
+fn msg_info_card(store: Store) -> impl View {
+    let info = store.msg_info.clone();
+    let sent = info.map(|i| i.as_ref().map(|i| i.sent.clone()).unwrap_or_default());
+    let read = info.map(|i| i.as_ref().map(|i| i.read.clone()).unwrap_or_default());
+    let views = info.map(|i| i.as_ref().map(|i| i.views.clone()).unwrap_or_default());
+    let from = info.map(|i| i.as_ref().map(|i| i.from.clone()).unwrap_or_default());
+    let seen = info.map(|i| {
+        i.as_ref()
+            .map(|i| {
+                if i.seen.is_empty() {
+                    Str::from("")
+                } else {
+                    let names: Vec<Str> = i.seen.clone();
+                    Str::from(format!(
+                        "Seen by {}",
+                        names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    ))
+                }
+            })
+            .unwrap_or_default()
+    });
+    let esc = modal_escape(store.clone(), |s| s.dismiss_msg_info());
+    zstack((
+        // Scrim — same treatment as the delete-confirm card.
+        Rectangle
+            .fill(WithOpacity::new(Srgb::from_hex("#000000"), 0.45))
+            .on_tap(|store: Store| store.dismiss_msg_info())
+            .a11y_label("Dismiss message info")
+            .a11y_role(AccessibilityRole::Button),
+        vstack((
+            text("Message info").body().bold(),
+            text!("{from}").caption().muted(),
+            Divider,
+            text!("{sent}").caption(),
+            text!("{read}").caption(),
+            text!("{views}").caption(),
+            text!("{seen}").caption().muted(),
+            hstack((
+                spacer(),
+                text("Close")
+                    .body()
+                    .bold()
+                    .foreground(Accent)
+                    .padding_with((6.0, 12.0))
+                    .on_tap(|store: Store| store.dismiss_msg_info())
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_label("Close message info"),
+            )),
+        ))
+        .spacing(8.0)
+        .padding_with(16.0)
+        .background(Surface)
+        .clip(RoundedRectangle::new(0.08))
+        .max_width(300.0),
+    ))
+    .with(esc)
 }
 
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
@@ -1793,6 +2062,8 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let viewer_open = store.viewer.is_some().distinct();
     let store_for_viewer = store.clone();
     let store_for_info = store.clone();
+    let store_info_card = store.clone();
+    let msg_info_open = store.msg_info.is_some().distinct();
     let info_docked = store
         .info_open
         .zip(&store.win_frame)
@@ -1945,6 +2216,8 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         // Delete-confirm card (Desktop's "Delete N messages?" dialog with
         // the "Also delete for <peer>" checkbox in private chats).
         when(del_open, move || delete_confirm_card(store_del.clone())),
+        // "Show message info" card (Desktop's message-info dialog).
+        when(msg_info_open, move || msg_info_card(store_info_card.clone())),
         when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
     ))
     .on_change(&search_live, |q: Str, store: Store| store.run_chat_search(q))
@@ -2446,6 +2719,51 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             );
         }
     }
+    // Bot inline keyboard (`replyMarkupInlineKeyboard`): one pill row per
+    // keyboard row under the content, inside the bubble like Desktop.
+    if !row.kb_rows.is_empty() {
+        let msg_id = row.id;
+        let (fg, pill): (Color, Color) = if row.outgoing {
+            (
+                Color::from(AccentForeground),
+                Color::from(WithOpacity::new(AccentForeground, 0.18)),
+            )
+        } else {
+            (
+                Color::from(Accent),
+                Color::from(WithOpacity::new(Accent, 0.10)),
+            )
+        };
+        let kb_stack: Vec<AnyView> = row
+            .kb_rows
+            .iter()
+            .map(|cells| {
+                let views: Vec<AnyView> = cells
+                    .iter()
+                    .map(|b| {
+                        let kind = b.kind.clone();
+                        hstack((
+                            spacer(),
+                            text(b.text.clone())
+                                .caption()
+                                .bold()
+                                .foreground(fg.clone()),
+                            spacer(),
+                        ))
+                        .padding_with((5.0, 6.0))
+                        .background(RoundedRectangle::new(0.45).fill(pill.clone()))
+                        .on_tap(move |store: Store| store.inline_tap(msg_id, &kind))
+                        .a11y_role(AccessibilityRole::Button)
+                        .a11y_label(Str::from(format!("Button {}", b.text)))
+                        .max_width(f32::INFINITY)
+                        .anyview()
+                    })
+                    .collect();
+                hstack(views).spacing(4.0).anyview()
+            })
+            .collect();
+        parts.push(vstack(kb_stack).spacing(4.0).anyview());
+    }
     // Reactions and the meta row overlay the bubble's bottom inset on two
     // separate lines: chips sit on the zone right under the content
     // (leading), the meta row on the band below (trailing) — the "time drops
@@ -2603,6 +2921,7 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
     let r_tr = row.clone();
     let r_link = row.clone();
     let r_img = row.clone();
+    let r_info = row.clone();
     let pin_label: &'static str = if pinned {
         "Unpin message"
     } else {
@@ -2634,6 +2953,10 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
         }),
         "Forward".action(move |store: Store| store.start_forward(&r2)),
         "Select".action(move |store: Store| store.toggle_select(r11)),
+        // Desktop's "Info" on outgoing messages: read time, views and the
+        // seen-by list (getMessageReadDate / getMessageViewers).
+        row.outgoing
+            .then(|| "Info".action(move |store: Store| store.open_msg_info(&r_info))),
         Divider,
         "Delete"
             .command()
