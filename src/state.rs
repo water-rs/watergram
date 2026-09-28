@@ -219,6 +219,21 @@ pub struct ReactionChip {
     pub emoji: Str,
     pub count: i32,
     pub chosen: bool,
+    /// Names of the most recent reactors — `recent_sender_ids` (≤3) from
+    /// `MessageReaction`, "You" first when `chosen`. Empty where TDLib
+    /// does not publish reactors (channels) — the chip's context menu then
+    /// carries only the total.
+    pub reactors: Vec<Str>,
+}
+
+/// One bot `/command` + its description (TDLib `BotCommand`). The composer
+/// `/` popup lists the selected bot chat's commands.
+#[derive(Clone, Identifiable)]
+pub struct BotCmd {
+    /// Command without the leading slash — the row key and inserted text.
+    #[id]
+    pub cmd: Str,
+    pub desc: Str,
 }
 
 #[derive(Clone, Identifiable)]
@@ -651,6 +666,13 @@ pub struct Store {
     /// Message ids are real `demo_conversation` ids so a hit's jump lands
     /// the highlight on the seeded row.
     pub demo_corpus: Rc<RefCell<Vec<DemoCorpusEntry>>>,
+    /// Per-chat bot `/command` tables (real path: `getCommands` when the
+    /// chat's peer is a bot). Plain map — a bot's commands are static for
+    /// the chat's lifetime.
+    pub bot_cmds: Rc<RefCell<HashMap<i64, Vec<BotCmd>>>>,
+    /// Emoji-picker search text (Emoji tab); filters the grid by shortcode
+    /// name, like the search field atop Desktop's emoji panel.
+    pub emoji_query: Binding<Str>,
     pub search: Binding<Str>,
     pub selected: Binding<Option<i64>>,
     /// Selection the `List` owns (waterui#1233): pointer taps and arrow-key
@@ -1466,6 +1488,8 @@ impl Store {
             folder_unreads: Binding::<HashMap<i32, i32>>::default(),
             demo_roster: Rc::new(RefCell::new(Vec::new())),
             demo_corpus: Rc::new(RefCell::new(Vec::new())),
+            bot_cmds: Rc::new(RefCell::new(HashMap::new())),
+            emoji_query: Binding::container(Str::from("")),
             search: Binding::container(Str::from("")),
             selected: Binding::default(),
             list_selection: Binding::default(),
@@ -1689,7 +1713,20 @@ impl Store {
             mk(8, "Mom", "call me when free", 30, 1, false, false, false, false, "person"),
             mk(9, "nokhwa nokhwa", "camera frames stream borrows &Camera", 20, 0, false, false, false, false, "channel"),
             mk(10, "TDLib", "updateAuthorizationState received", 10, 0, false, false, false, false, "person"),
+            // A bot DM so the `/` command autocomplete has a real surface
+            // (chat 1's inline-keyboard bot is group-only).
+            mk(11, "CI Bot", "pipeline green · try /status", 5, 0, false, false, false, true, "person"),
         ];
+        self.bot_cmds.borrow_mut().insert(
+            11,
+            vec![
+                BotCmd { cmd: "status".into(), desc: "Show pipeline status".into() },
+                BotCmd { cmd: "build".into(), desc: "Trigger a build".into() },
+                BotCmd { cmd: "deploy".into(), desc: "Deploy to production".into() },
+                BotCmd { cmd: "logs".into(), desc: "Tail build logs".into() },
+                BotCmd { cmd: "cancel".into(), desc: "Cancel the running build".into() },
+            ],
+        );
         // Folder membership (Work = 2 groups/channels, Personal = 3
         // contacts) and one archived row so every chip has content.
         for r in &mut roster {
@@ -2361,17 +2398,24 @@ impl Store {
     }
 
     /// Demo seed helper: parse "👍2 ❤️1" into structured chips
-    /// (each token is `<emoji><count>`).
-    fn demo_chips(display: &str) -> Vec<ReactionChip> {
+    /// (each token is `<emoji><count>`). Reactor names come from the
+    /// seeded member list so the chip's context menu has the same shape
+    /// the real path fills from `recent_sender_ids`.
+    pub(crate) fn demo_chips(display: &str) -> Vec<ReactionChip> {
+        const REACTORS: &[&str] = &["Alice", "Bob", "Carol"];
         display
             .split(' ')
             .filter(|t| !t.is_empty())
             .map(|t| {
                 let split = t.find(char::is_numeric).unwrap_or(t.len());
+                let count: usize = t[split..].trim().parse().unwrap_or(0);
                 ReactionChip {
                     emoji: Str::from(t[..split].to_string()),
-                    count: t[split..].trim().parse().unwrap_or(0),
+                    count: count as i32,
                     chosen: false,
+                    reactors: (0..count.min(REACTORS.len()))
+                        .map(|i| Str::from(REACTORS[i]))
+                        .collect(),
                 }
             })
             .collect()
@@ -2380,6 +2424,7 @@ impl Store {
     /// Build reaction chips + the chosen-emoji string from TDLib's
     /// `messageInteractionInfo.reactions`.
     fn chips_from_td(
+        &self,
         reactions: &types::MessageReactions,
     ) -> (Vec<ReactionChip>, Str) {
         let mut mine = String::new();
@@ -2394,23 +2439,32 @@ impl Store {
                 if mr.is_chosen {
                     mine = emoji.clone();
                 }
+                let mut reactors: Vec<Str> = mr
+                    .recent_sender_ids
+                    .iter()
+                    .map(|s| self.sender_name(s))
+                    .collect();
+                if mr.is_chosen && !reactors.iter().any(|n| n.as_str() == "You") {
+                    reactors.insert(0, Str::from("You"));
+                }
                 ReactionChip {
                     emoji: Str::from(emoji),
                     count: mr.total_count,
                     chosen: mr.is_chosen,
+                    reactors,
                 }
             })
             .collect();
         (chips, mine.into())
     }
 
-    fn reactions_info(m: &types::Message) -> (Vec<ReactionChip>, Str) {
+    fn reactions_info(&self, m: &types::Message) -> (Vec<ReactionChip>, Str) {
         match m
             .interaction_info
             .as_ref()
             .and_then(|i| i.reactions.as_ref())
         {
-            Some(reactions) => Self::chips_from_td(reactions),
+            Some(reactions) => self.chips_from_td(reactions),
             None => (Vec::new(), Str::from("")),
         }
     }
@@ -2518,7 +2572,7 @@ impl Store {
                 .get(&m.chat_id)
                 .map(|c| m.id <= c.last_read_outbox_message_id)
                 .unwrap_or(false);
-        let (reactions, my_reaction) = Self::reactions_info(m);
+        let (reactions, my_reaction) = self.reactions_info(m);
         let (styled, styled_open, has_spoiler, link_site, link_title, link_desc, link_url) =
             if let enums::MessageContent::MessageText(t) = &m.content {
                 let mask = if m.is_outgoing {
@@ -3086,7 +3140,7 @@ impl Store {
                         .interaction_info
                         .as_ref()
                         .and_then(|i| i.reactions.as_ref())
-                        .map(Self::chips_from_td)
+                        .map(|r| self.chips_from_td(r))
                         .unwrap_or_default();
                     let views = u
                         .interaction_info
@@ -4372,6 +4426,7 @@ impl Store {
                         emoji: Str::from(emoji_s.clone()),
                         count: 1,
                         chosen: true,
+                        reactors: vec![Str::from("You")],
                     });
                     r.my_reaction = Str::from(emoji_s.clone());
                 }
@@ -5282,6 +5337,121 @@ impl Store {
         }
     }
 
+    /// Leading `/token` in the composer — only at message start and with
+    /// no whitespace, matching Desktop's bot-command popup trigger. A bare
+    /// "/" lists every command (token = "").
+    pub fn botcmd_token(s: &str) -> Option<String> {
+        if !s.starts_with('/') || s[1..].contains(|c: char| c.is_ascii_whitespace()) {
+            return None;
+        }
+        Some(s[1..].to_string())
+    }
+
+    /// `/token` → the selected chat's matching bot commands (prefix on the
+    /// command name, like Desktop).
+    pub fn botcmd_suggest(&self, chat_id: i64, s: &str) -> Vec<BotCmd> {
+        let Some(tok) = Self::botcmd_token(s) else {
+            return Vec::new();
+        };
+        let tok = tok.to_lowercase();
+        self.bot_cmds
+            .borrow()
+            .get(&chat_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c.cmd.to_lowercase().starts_with(&tok))
+            .take(6)
+            .collect()
+    }
+
+    /// Pick a `/command` → the composer gets "/cmd " (Desktop leaves the
+    /// cursor editable — commands may take arguments).
+    pub fn apply_botcmd(&self, cmd: &str) {
+        self.composer.set_from(format!("/{cmd} "));
+    }
+
+    /// Emoji-picker search: substring match over the shortcode table —
+    /// Desktop's panel search matches by name and shows glyph + name.
+    pub fn emoji_search(q: &str) -> Vec<EmojiSug> {
+        let q = q.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        EMOJI_SHORTCODES
+            .iter()
+            .filter(|(name, _)| name.contains(q.as_str()))
+            .take(30)
+            .map(|(name, emoji)| EmojiSug {
+                name: Str::from(*name),
+                emoji: Str::from(*emoji),
+            })
+            .collect()
+    }
+
+    /// Window title with the aggregate unread badge like Telegram
+    /// Desktop's title bar — "Watergram" → "Watergram (3)". Muted chats
+    /// are excluded, matching Desktop's badge policy.
+    #[expect(
+        manual_string_signal,
+        reason = "the lint suggests s!, which does not exist in waterui yet — map is the only channel producing a formatted Str signal"
+    )]
+    pub fn window_title(&self) -> Computed<Str> {
+        self.chats
+            .map(|rows| {
+                let n: i32 = rows
+                    .iter()
+                    .filter(|r| !r.muted && !r.in_archive)
+                    .map(|r| r.unread + r.unread_mentions + r.unread_reactions)
+                    .sum();
+                Str::from(if n > 0 {
+                    format!("Watergram ({n})")
+                } else {
+                    "Watergram".to_string()
+                })
+            })
+            // Single consumer (the window title) — the shared-cell hazard
+            // of DOGFOOD r41-2 only bites when a distinct()ed signal is
+            // cloned for a second watcher.
+            .distinct()
+            .computed()
+    }
+
+    /// Alt+ArrowUp/Down: open the chat adjacent to the current one in the
+    /// sidebar's visible order (Desktop's chat-switch chords). Clamps at
+    /// both ends; returns whether the open chat changed.
+    pub fn chat_switch(&self, down: bool) -> bool {
+        let q = self.search.snapshot().to_string().to_lowercase();
+        let rows: Vec<i64> = self
+            .chats
+            .snapshot()
+            .iter()
+            .filter(|r| {
+                q.is_empty()
+                    || r.title.to_lowercase().contains(&q)
+                    || r.preview.to_lowercase().contains(&q)
+            })
+            .map(|r| r.id)
+            .collect();
+        if rows.len() < 2 {
+            return false;
+        }
+        let cur = self.open_chat.get();
+        let Some(i) = rows.iter().position(|&r| r == cur) else {
+            return false;
+        };
+        let j = if down {
+            (i + 1).min(rows.len() - 1)
+        } else {
+            i.saturating_sub(1)
+        };
+        if rows[j] == cur {
+            return false;
+        }
+        self.select_chat(rows[j]);
+        true
+    }
+
     pub fn send(&self) {
         self.send_opt(None);
     }
@@ -5329,6 +5499,23 @@ impl Store {
             self.apply_emoji(&sug.emoji);
             return true;
         }
+        if Self::botcmd_token(&q).is_some()
+            && let Some(cmd) = self
+                .bot_cmds
+                .borrow()
+                .get(&self.open_chat.get())
+                .and_then(|cmds| {
+                    let tok = Self::botcmd_token(&q).unwrap_or_default();
+                    cmds.iter()
+                        .find(|c| {
+                            c.cmd.to_lowercase().starts_with(&tok.to_lowercase())
+                        })
+                        .map(|c| c.cmd.clone())
+                })
+        {
+            self.apply_botcmd(&cmd);
+            return true;
+        }
         if let Some(tok) = Self::mention_token(&q) {
             let t = tok.to_lowercase();
             if let Some(m) = self.members.snapshot().iter().find(|m| {
@@ -5350,7 +5537,10 @@ impl Store {
     pub fn composer_escape(&self) -> bool {
         if !self.completion_off.snapshot()
             && (!Self::emoji_suggest(&self.composer.snapshot()).is_empty()
-                || Self::mention_token(&self.composer.snapshot()).is_some())
+                || Self::mention_token(&self.composer.snapshot()).is_some()
+                || !self
+                    .botcmd_suggest(self.open_chat.get(), &self.composer.snapshot())
+                    .is_empty())
         {
             self.completion_off.set(true);
             return true;

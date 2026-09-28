@@ -24,6 +24,7 @@
 |---|---|---|---|
 | 列表排序（位置/时间） | ✅ | `loadChats` + `updateChatPosition`/`updateChatLastMessage` | `chat_list_rows` |
 | 未读数 / 提及徽标 | ✅ | `Chat.unread_count`/`unread_mention_count` → unread pill + `@` mention pill | `chat_list_rows`, `chat_row_mention_badge` |
+| 窗口标题未读数 | ✅ | `Window::new(impl IntoComputed<Str>)` → 标题 "Watergram (N)"：非静音非归档行 `unread+unread_mentions+unread_reactions` 求和，静音/全读时回退无括号标题；X11 WM_NAME/_NET_WM_NAME 实测 | `window_title_counts_unread` + 三宽窗口标题 xwininfo 实测 |
 | 置顶聊天 | ✅ | `toggleChatIsPinned` | — |
 | 静音 / 通知设置 | ✅ | `setChatNotificationSettings` | — |
 | 头像 + 在线状态点 | ✅ | `chat.photo`/`user.status` + `downloadFile`；首字母圆按 TDLib `accent_color_id` %7 上七色用户色板（无 accent 时按显示名哈希取色，跨聊天列表/消息头像/成员行一致） | `chat_list_rows` |
@@ -43,7 +44,8 @@
 | 打开会话 + 历史分页 | ✅ | `getChatHistory` 向前翻页 | `messages_render` |
 | 发送文本 | ✅ | `sendMessage(inputMessageText)` | `composer_sends_and_clears` |
 | 输入框 Markdown（*粗* _斜_ `码` ~~删~~ \|\|剧透\|\|） | ✅ | `parse_markdown` 发送时转 `FormattedText` 实体（UTF-16 offset），demo 走本地回显行；编辑路径同样解析 | `parse_markdown_strips_delimiters_and_offsets_utf16` `send_demo_echo_appends_outgoing_row` |
-| 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | 🟡 | r40 起部分可用：Ctrl+F（⋮ 菜单 "Search in chat" 经 MenuShortcutRegistry）、Ctrl+R 标记已读、Enter 发送（`TextField::on_submit`）、↑ 编辑上一条、Esc 关闭弹层、←/→ 查看器翻页（`on_key_press` 冒泡，waterui#1265 / hydrolysis#261 落地）；Ctrl+W/Alt+↑↓ 等窗口级 chord 仍缺 | — |
+| 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | 🟡 | r40 起部分可用：Ctrl+F（⋮ 菜单 "Search in chat" 经 MenuShortcutRegistry）、Ctrl+R 标记已读、Enter 发送（`TextField::on_submit`）、↑ 编辑上一条、Esc 关闭弹层、←/→ 查看器翻页（`on_key_press` 冒泡，waterui#1265 / hydrolysis#261 落地）；r42 起 Alt+↑↓ 切会话经根 `.on_key_press` 冒泡落地；Ctrl+W 关窗仍缺 | — |
+| Alt+↑/↓ 切换会话 | ✅ | 根 `.on_key_press`（冒泡自任意焦点）→ `chat_switch(down)` 沿当前文件夹名册 ±1 步进；handler 须在 `.state(&store)` 作用域内（env 只含祖先链的 `.state`） | `chat_switch_walks_roster` + 三宽实机验证（r42_altup*/r42_altdown1400） |
 | 编辑消息 | ✅ | `editMessageText`；`message.edit_date` → 气泡内 "edited" 标记 | — |
 | 删除消息 | ✅ | `deleteMessages` + 删除确认卡（"Delete N messages?"，私聊含 "Also delete for <peer>" 勾选框驱动 `revoke` 标志，Cancel/红色 Delete，Esc/点遮罩关闭） | `delete_confirm_card_flow` |
 | 转发 | ✅ | `forwardMessages` | — |
@@ -83,6 +85,7 @@
 | 未读回应徽标 + 跳转 | ✅ | `updateChatUnreadReactionCount`/`updateMessageUnreadReactions` → 行内 ❤ 徽标 + 会话内浮动 ❤ 圆钮（@ 之下）→ `reaction_jump` 跳转首条未读回应消息并清计数（行徽标重绘受 hydrolysis#227 挂载行不重测所限） | `reaction_jump_jumps_and_clears` + 实测截图（r39_base*/r39_reactjump*） |
 | 悬停快捷回复钮 | ✅ | 指针悬停气泡 → 旁侧 ↩ 圆钮 → 一键回复（Telegram Desktop hover affordance） | 实测截图（r35_hover1400/800/600） |
 | 双击快捷回应 | ✅ | 双击气泡 → `quick_react` 切换 ❤️（Desktop 默认快反应） | `quick_react_applies_heart` |
+| 回应 chip 反应者菜单 | ✅ | chip `.context_menu`：每名反应者一行 "<name> reacted with <emoji>"（disabled 展示行）+ 超员 "+N more" + 已选时 "Remove your reaction"（destructive → `toggle_reaction`）；`demo_chips` 用行内 reactors 名播种 | `reaction_chip_carries_reactors` + 三宽实机验证（r42_reactmenu*） |
 | 侧边栏搜索命中高亮 | ✅ | `title_styled`/`preview_styled` = 命中子串 AccentContainer span 标记；行级重绘受 DOGFOOD r35-3 保留路径缺陷所限 | `sidebar_search_highlight_splits` |
 | 全局消息搜索（"Messages" 区） | ✅ | `searchMessages(ChatList::Main)` → 侧栏结果区 "Messages" 分区（标题+发送者:摘要+时间）；点击 `open_hit` = `select_chat`+`jump_to_message` 高亮跳消息；demo 走语料扫描 | `global_message_search_demo` |
 | 未读回到底部浮动钮 | ✅ | 打开的会话 unread>0 → 右下 "↓ N" 圆钮 → `catch_up` = `scroll_bottom`+`mark_read`+文件夹徽标重算；scroll 读回缺失（waterui#1259）故暂按 unread>0 常驻显示 | `catch_up_chip_marks_read` |
@@ -97,6 +100,7 @@
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
 | 消息分组（同发送者连发折叠 + 头像列 + 组末气泡尾巴） | ✅ | 连续同向同发送者合并为一组：发送者名仅显示于组内首条并按对端 accent 色着色；群组/频道内组末条底部显示发送者头像（`sender_photo` 或首字母色圆）；组末气泡底角尾巴为气泡背景层内 Path 楔形 + `.offset` 外推（同 fill 一体、接角方角、不占布局空间）；组间间距大于组内 | `set_messages_groups_runs` |
 | 机器人内联键盘 | ✅ | `replyMarkupInlineKeyboard` → 气泡内容下方按钮行（每行按原列数等宽 pill，圆角 Accent 10%）；点击 `inline_tap` 按类型分发：Url→`open_link`、Callback→`getCallbackQueryAnswer`（show_alert/url 回落 toast/打开）、CopyText→剪贴板+toast、SwitchInline→填入输入框、User→资料卡、LoginUrl/WebApp 等未覆盖型 toast 提示 | `inline_keyboard_parses_and_dispatches` + 实测截图（r41_kb*） |
+| 机器人 `/` 命令补全 | ✅ | 输入框开头 `/token`（会话为 bot 且挂 `bot_cmds`）→ 命中行弹层（`/cmd` + 描述，无弹层遮挡时 RecolorSurface 背景）；点选/Enter 回填 `/cmd ` | `botcmd_completion` `botcmd_accept_and_escape` + 三宽实机验证（r42_botcmd*） |
 | 聊天操作条（report spam/add contact/share phone/…） | ✅ | `Update::ChatActionBar` → `action_bar_parts` 入行字段；操作条替换输入框区（`when(bar_present)`），按钮按 kind 分发 `action_bar_run`：reportSpam→`reportChat`+离开、reportAddBlock→report/`setMessageSenderBlockList`、addContact→`addContact`、sharePhone→`sharePhoneNumber`、inviteMembers→成员面板、joinRequest→`joinChat`；✕= `removeChatActionBar` | `action_bar_dispatches_and_dismisses` + 实测截图（r41_bar*） |
 | 消息信息卡（发送/已读/浏览/已读名单） | ✅ | 气泡菜单 "Info"（仅发出消息）→ `open_msg_info` → 浮层卡片：from、Sent 时间、Read/Unread、N views、Seen by；真实路径 `getMessageReadDate`+`getMessageViewers` | `message_info_card_fields` + 实测截图（r41_info*） |
 | 全局搜索过滤标签（All/Chats/Media/Files/Links） | ✅ | 搜索框下 chip 条（有查询时常驻），tab → `search_filter` → `run_search` 按 `InputChatPhoto`/`Document`/`Url` 映射过滤消息区；Chats tab 仅会话命中；命中行前缀类型图标 | `search_filter_tabs_scope_results` + 实测截图（r41_tabs*） |
@@ -121,6 +125,7 @@
 | 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭 + ‹ › 边钮与 ←/→ 键沿会话媒体翻页（`viewer_step` + `on_key_press`，r40）；‹ › 已知缺陷 DOGFOOD r40-1（`when` 层无遮挡注册，点按可同时命中底层媒体行） | `media_viewer_overlay`、`viewer_step_cycles_media` |
 | 复制图片到剪贴板 | ✅ | 右键菜单「Copy image」（仅图片行）→ `file_signal` 快照路径 → `image::open`→`to_rgba8` → arboard `set_image` + "Image copied" toast | `copy_image_decodes_demo_photo` + 实测截图（r39_copyimg*） |
 | Emoji 选择面板 | ✅ | 本地 Emoji 网格（~300 项，VS16 整段）→ 插入输入框；与贴纸/GIF 同一面板三 tab | `emoji_tab_shows_grid` |
+| Emoji 面板搜索 | ✅ | Emoji tab 顶部 `emoji_query` 字段 → `emoji_search` 名/短码前缀命中 ≤30 行（emoji+`:shortcode:`），点选插入输入框，清空还原网格；`watch` 驱动换区（`when` payload 晚挂载缺陷 hydrolysis#251 故取 watch+anyview） | `emoji_search_matches_names` + 三宽实机验证（r42_emojisearch*/r42_emojiinsert1400） |
 | 发送前预览+说明编辑 | ✅ | 附件条：图片缩略图+文件名+caption 输入框（发送时并入消息 caption） | `attach_preview_shows_caption_field` |
 
 ## 5. 频道与群组
@@ -167,10 +172,11 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：121 项 ｜ 部分 🟡：1 项（全局快捷键 r40 起部分落地）｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
+- 已实现 ✅：126 项 ｜ 部分 🟡：1 项（全局快捷键 r42 起 Alt+↑↓ 落地，余 Ctrl+W 等缺）｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
 - r41 补录：机器人内联键盘（replyMarkup 按钮行+分类型分发）、聊天操作条（chatActionBar* 全型，替换输入框区）、消息信息卡（getMessageReadDate+getMessageViewers）、全局搜索过滤标签（All/Chats/Media/Files/Links）、文件夹编辑器会话选择器（getChatFolder 回填 + included_chat_ids 写回）—— 均 1400/800/600 实机验证；m3 锁已解除（waterui ee85dc47 含 TabItemLayout），m3→b21c79f6；waterkit 锁亦解除（video-gpu#35 已并 01f3d3fc，pin waterkit dev 11300217 software-decode），waterkit*→11300217 + video-gpu→01f3d3fc
 - r39 新增：自动删除定时器（行菜单嵌套 `Menu`）、未读回应 ❤ 徽标+浮动跳转钮、消息翻译（内联互换+还原）、复制消息链接、复制图片 —— 五项均 1400/800/600 实机验证
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。r35 补录：消息内搜索 n/N+^/v+命中高亮、@提及跳转钮、悬停↩快捷回复、双击❤️快反应、侧边栏搜索命中高亮。r36 补录：置顶消息多选弹层实测（r36_pinned1400/800/600）、会话行悬停 ⋮ 菜单实测（r36_hovmenu*，悬停时时间戳隐藏）、composer Markdown→实体+demo 回显实测（r36_echo*）、多选条实测部分（r36-5 死按钮记 🟡）、全局快捷键记 ❌（r36-1）。搜索命中高亮配色修正为 M3 container+on-*（r36_marks*）。r38 补录：全局消息搜索 "Messages" 区、删除确认卡（私聊 revoke 勾选）、未读回到底部浮动钮、静音样式（bell_off+暗化标题+灰徽标）、文件夹未读徽标（`updateUnreadChatCount`）。
 - r37 补录：toast 提示（Snackbar）、频道贴 footer（👁 浏览数+签名）、跳转到日期弹层、相册合并气泡、信息面板共享 Media/Files/Links 标签页；多选批处理升 ✅（hydrolysis#239 修复实测）。
 - r40 补录：文件夹右键菜单（Mark all as read）、会话列 FAB ✎ 新建聊天、视频 m:ss 时长角标、查看器 ‹ › 边钮+←/→ 键翻页、菜单 Command::shortcut 提示（Ctrl+C/Ctrl+R/Ctrl+F）+ 键事件面落地（on_key_press/on_submit，全局快捷键 ❌→🟡）——均 1400/800/600 实机验证；新缺陷 DOGFOOD r40-1（`when` 弹层无遮挡注册）。
+- r42 补录：窗口标题未读数（`Watergram (N)`，WM_NAME 实测）、机器人 `/` 命令补全（`/st`→`/status` 弹层+点选回填）、Alt+↑↓ 切换会话（根 `.on_key_press` 冒泡）、Emoji 面板搜索（`fire`→`🔥 :fire:` 命中+插入）、回应 chip 反应者菜单（"Alice reacted with 👍" 行 + Remove your reaction）——均 1400/800/600 实机验证（r42_* 截图）；nami ebe55e7（nami#31）落地后撤销 per-consumer distinct workaround，侧栏搜索 `when(searching)` 第二订阅者复通实测（r42_searchpane1400）；DOGFOOD r40-1 经 hydrolysis#269 验证关闭。

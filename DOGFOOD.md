@@ -3051,6 +3051,18 @@ buttons were first placed as a nested `when` *inside* the content column
 and never received input — the sibling-layer form is what lets them work
 at all, per the r36-2/#251 nested-`when` defect.)
 
+**CLOSED in r42 — fixed by water-rs/hydrolysis#269** (verified on
+hydrolysis `02d0ca4c` at 1400pt, captures `r42_viewstep1400.png` /
+`r42_scrollscrim1400.png` / `r42_scrimclick1400.png`). With the media
+viewer (`when`-mounted `zstack` layer, unchanged app code) open over the
+chat list: (1) five scroll-wheel clicks at (870,600) produced a zero
+pixel diff beneath the scrim — scroll events no longer reach the list;
+(2) a click at (420,500) — directly over the album photo row that was
+painted there — left the viewer on "first of the set" with no
+`open_viewer` re-dispatch. On `a97f58f` the same gesture pattern
+dispatched both `viewer_step` and the row's `on_tap`; nothing beneath
+responds now.
+
 ### Adopted this round (fixes verified live)
 
 - **waterui#1265 `View::on_key_press` / `TextField::on_submit`** — verified
@@ -3162,16 +3174,21 @@ should dedup against the values IT has seen. A shared cell makes the
 type's behavior order-dependent: which watcher fires depends on poll
 order inside the runtime, not on what the consumer asked for.
 
-App-side disposition: each consumer now derives its own `distinct`
-instance — `let show_results =
+**CLOSED in r42 — fixed on nami dev `ebe55e7` (water-rs/nami#31).** The
+per-consumer `distinct` workaround is reverted: the sidebar again derives
+ONE `searching` signal and both `when(searching.clone())` consumers share
+it. The regression guard is now `distinct_clones_each_watch` in lib.rs —
+two watchers of one cloned `distinct` each must see every transition;
+against the buggy nami `78d8fd4f` the second watcher stayed at 0. Verified
+live at 1400 on the rebuilt app (`~/captures-r42/r42_searchpane_1400.png`):
+typing "rust" in the sidebar field mounts the results pane — the
+clone-side watcher — showing matched chat rows with highlight spans plus
+the "Messages" section; clearing the field returns the plain list.
+
+App-side disposition (superseded): each consumer derived its own
+`distinct` instance — `let show_results =
 store.search.map(|q: Str| !q.is_empty()).distinct();` — so the two
-watches hold independent dedup cells. Guarded by
-`distinct_clones_share_dedup_cell` in lib.rs, which builds two
-independent chains the way app code must (the test documents the
-pattern; a two-watchers-on-one-clone test belongs in nami once fixed).
-Possible nami fix, forwarded to the maintainer via SKILL_FEEDBACK:
-allocate the dedup cell inside `watch` (seeded with the current value)
-instead of sharing it across clones.
+watches held independent dedup cells.
 
 ### Adopted this round
 

@@ -112,7 +112,7 @@ pub fn app(mut env: Environment) -> App {
     );
     let win_state = binding(WindowState::Normal);
     let store_for_content = store.clone();
-    let mut win = Window::new("", win_state, move || {
+    let mut win = Window::new(store.window_title(), win_state, move || {
             let s = store_for_content.clone();
             let rx2 = rx.clone();
             views::root(store_for_content.clone()).task(async move {
@@ -638,6 +638,7 @@ mod tests {
             emoji: "👍".into(),
             count: 3,
             chosen: false,
+            reactors: Vec::new(),
         }];
         store.messages.set(vec![m]);
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
@@ -683,6 +684,7 @@ mod tests {
             emoji: "👍".into(),
             count: 2,
             chosen: false,
+            reactors: Vec::new(),
         }];
         store.messages.set(vec![m]);
         let mut app = ui.clone().mount({ let store = store.clone(); move || views::chat_detail(store.clone(), 7).state(&store) });
@@ -977,6 +979,7 @@ mod tests {
                     emoji: Str::from(t[..split].to_string()),
                     count: t[split..].trim().parse().unwrap_or(0),
                     chosen: false,
+                    reactors: Vec::new(),
                 }
             })
             .collect()
@@ -3446,8 +3449,8 @@ mod tests {
         app.press_named_key("End");
         app.settle();
         // Chat 10 (TDLib) is archived in the demo roster — the All list's
-        // last row is 9 ("nokhwa nokhwa").
-        assert_eq!(store.open_chat.get(), 9, "End did not open the last chat");
+        // last row is 11 ("CI Bot", order 5).
+        assert_eq!(store.open_chat.get(), 11, "End did not open the last chat");
         // Enter on a focused row activates its press target.
         let rows = app.query().role(Role::LIST_ITEM).all();
         rows[5].focus(&mut app);
@@ -4250,7 +4253,7 @@ mod tests {
             vec![10]
         );
         store.set_list(0);
-        assert_eq!(store.chats.snapshot().len(), 9);
+        assert_eq!(store.chats.snapshot().len(), 10);
     }
 
     /// r38 pick: muting flips the row's muted flag — the row dims its
@@ -4507,25 +4510,30 @@ mod tests {
         store.search_filter.set(0);
     }
 
-    /// DOGFOOD r41-2 (nami): clones of one `Distinct` share the dedup cell —
-    /// after the first watcher consumes a transition, a second watcher on a
-    /// clone sees `changed == false` and never fires. The sidebar therefore
-    // derives `searching` (tab strip) and `show_results` (results pane) as
-    /// two independent `map().distinct()` chains; this guards that pattern.
+    /// r41-2 regression guard: two watchers of ONE `distinct()`ed signal
+    /// (clones) must both see each transition. Was DOGFOOD r41-2 — the
+    /// shared dedup cell starved every watcher after the first; fixed on
+    /// nami dev `ebe55e7` (water-rs/nami#31).
     #[test]
-    fn distinct_clones_share_dedup_cell() {
+    fn distinct_clones_each_watch() {
         use std::cell::Cell;
         use std::rc::Rc;
         let src = Binding::container(Str::from(""));
-        let first = src.map(|q: Str| !q.is_empty()).distinct();
-        let second = src.map(|q: Str| !q.is_empty()).distinct();
+        let shared = src.map(|q: Str| !q.is_empty()).distinct();
+        let first = shared.clone();
+        let second = shared.clone();
         let (na, nb) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
         let (ha, hb) = (na.clone(), nb.clone());
         let _ga = first.watch(move |_| ha.set(ha.get() + 1));
         let _gb = second.watch(move |_| hb.set(hb.get() + 1));
         src.set(Str::from("x"));
-        assert_eq!(na.get(), 1);
-        assert_eq!(nb.get(), 1);
+        assert_eq!(na.get(), 1, "first watcher missed the transition");
+        assert_eq!(nb.get(), 1, "second watcher missed the transition");
+        // Two further real transitions must also reach both watchers.
+        src.set(Str::from(""));
+        src.set(Str::from("y"));
+        assert_eq!(na.get(), 3);
+        assert_eq!(nb.get(), 3);
     }
 
     /// r41: the folder editor's chat picker toggles membership and
@@ -4582,6 +4590,104 @@ mod tests {
             .snapshot()
             .iter()
             .any(|f| f.title.as_str() == "Trips" && f.include == vec![5]));
+    }
+
+    /// r42: the window title counts unread messages across chats,
+    /// skipping muted and archived ones like Telegram Desktop.
+    #[test]
+    fn window_title_counts_unread() {
+        let store = store();
+        store.seed_demo();
+        let title = store.window_title();
+        let initial = title.snapshot().to_string();
+        assert!(initial.starts_with("Watergram ("), "got {initial}");
+        // Mark a chat's unread read → the count drops.
+        store.mark_read(1);
+        let after = title.snapshot().to_string();
+        assert_ne!(after, initial);
+    }
+
+    /// r42: `/token` completion filters the chat's bot command table;
+    /// picking inserts `/{cmd} ` into the composer.
+    #[test]
+    fn botcmd_completion() {
+        let store = store();
+        store.seed_demo();
+        assert_eq!(Store::botcmd_token("/"), Some("".to_string()));
+        assert_eq!(Store::botcmd_token("/sta"), Some("sta".to_string()));
+        assert_eq!(Store::botcmd_token("hello"), None);
+        assert_eq!(Store::botcmd_token("/cmd x"), None);
+        let all = store.botcmd_suggest(11, "/");
+        assert_eq!(all.len(), 5, "CI Bot seeds five commands");
+        let hits = store.botcmd_suggest(11, "/st");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].cmd.as_str(), "status");
+        store.apply_botcmd("status");
+        assert_eq!(store.composer.snapshot().as_str(), "/status ");
+        // A non-bot chat has no command table.
+        assert!(store.botcmd_suggest(1, "/").is_empty());
+    }
+
+    /// r42: `accept_top_completion` accepts the top `/` suggestion and
+    /// `composer_escape` dismisses the popup.
+    #[test]
+    fn botcmd_accept_and_escape() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(11);
+        store.composer.set_from("/bu");
+        store.completion_off.set(false);
+        assert!(store.accept_top_completion());
+        assert_eq!(store.composer.snapshot().as_str(), "/build ");
+        store.composer.set_from("/de");
+        store.completion_off.set(false);
+        assert!(store.composer_escape());
+        // Popup suppressed until the text changes.
+        assert!(store.completion_off.snapshot());
+    }
+
+    /// r42: Alt+↑/↓ walk the chat list in display order, skipping
+    /// folder-hidden rows, and clamp at both ends.
+    #[test]
+    fn chat_switch_walks_roster() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(2);
+        assert!(store.chat_switch(true));
+        assert_eq!(store.open_chat.get(), 3, "down one row");
+        assert!(store.chat_switch(false));
+        assert_eq!(store.open_chat.get(), 2, "up one row");
+        // First chat → up clamps.
+        store.select_chat(1);
+        assert!(!store.chat_switch(false));
+        assert_eq!(store.open_chat.get(), 1);
+        // Walk to the bottom; down clamps at the last visible row.
+        while store.chat_switch(true) {}
+        assert!(!store.chat_switch(true));
+    }
+
+    /// r42: emoji panel search substring-matches shortcode names.
+    #[test]
+    fn emoji_search_matches_names() {
+        let hits = Store::emoji_search("smi");
+        assert!(hits.iter().any(|s| s.name.as_str() == "smile"));
+        assert!(hits.len() <= 30);
+        assert!(Store::emoji_search("").is_empty());
+        assert!(Store::emoji_search("zzzznope").is_empty());
+    }
+
+    /// r42: reaction chips carry reactor names (recent_sender_ids) so the
+    /// context menu can list them; "You" first when ours.
+    #[test]
+    fn reaction_chip_carries_reactors() {
+        let chips = Store::demo_chips("👍2 ❤️1");
+        assert_eq!(chips.len(), 2);
+        assert_eq!(chips[0].reactors.len(), 2);
+        assert_eq!(chips[1].reactors.len(), 1);
+        assert!(chips[0]
+            .reactors
+            .iter()
+            .any(|r| r.as_str() == "Alice"));
     }
 
 }
