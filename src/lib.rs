@@ -20,7 +20,7 @@ use waterui::media::Url;
 use waterui::preview;
 use waterui::task::{sleep, spawn_local};
 use waterui::theme::Theme;
-use waterui::window::{Window, WindowState};
+use waterui::window::Window;
 
 /// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
 /// connection — for rendering checks on device-less VMs.
@@ -110,7 +110,7 @@ pub fn app(mut env: Environment) -> App {
                 .select(ColorScheme::Dark, ColorScheme::Light),
         ),
     );
-    let win_state = binding(WindowState::Normal);
+    let win_state = store.win_state.clone();
     let store_for_content = store.clone();
     let mut win = Window::new(store.window_title(), win_state, move || {
             let s = store_for_content.clone();
@@ -180,7 +180,7 @@ pub fn app(mut env: Environment) -> App {
 #[cfg(test)]
 mod tests {
     use chrono::Datelike;
-    use crate::state::{ChatRow, FolderRow, MessageRow, PinnedRow, ReactionChip, Screen, SharedMediaRow, Store, parse_markdown};
+    use crate::state::{ChatRow, FolderRow, MessageRow, PinnedRow, PollRow, ReactionChip, Screen, SharedMediaRow, Store, parse_markdown};
     use crate::views;
     use waterui::accessibility::AccessibilityRole;
     use waterui::layout::frame::Frame;
@@ -273,6 +273,7 @@ mod tests {
             is_service: false,
             view_count: 0,
             author_sig: Str::from(""),
+            comments: 0,
             album_id: 0,
             album_files: Vec::new(),
             kb_rows: Vec::new(),
@@ -785,7 +786,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(commands.len(), 9); // Reply Edit Copy Link Pin Forward Select Info Delete
+        assert_eq!(commands.len(), 10); // Reply Edit Copy Link Pin Forward Save Select Info Delete
         assert_eq!(items.iter().filter(|i| matches!(i, MenuItem::Divider)).count(), 1);
         let delete = commands.last().unwrap();
         assert_eq!(delete.role, CommandRole::Destructive);
@@ -794,10 +795,10 @@ mod tests {
         let items = views::bubble_menu_items(&incoming, false, false)
             .into_menu_items()
             .snapshot();
-        // Incoming: no Edit; Translate added; no Copy link (linkable=false).
+        // Incoming: no Edit; Translate added; Save added; no Copy link (linkable=false).
         assert_eq!(
             items.iter().filter(|i| matches!(i, MenuItem::Command(_))).count(),
-            7
+            8
         );
     }
 
@@ -4688,6 +4689,91 @@ mod tests {
             .reactors
             .iter()
             .any(|r| r.as_str() == "Alice"));
+    }
+
+    /// r43: emoji inserts land in the recents strip deduped, newest first.
+    #[test]
+    fn insert_emoji_updates_recents() {
+        let store = store();
+        let seed = store.recent_emojis.snapshot();
+        assert_eq!(seed.first().map(|e| e.emoji.as_str()), Some("😂"));
+        store.insert_emoji("🚀");
+        store.insert_emoji("😂");
+        let rec = store.recent_emojis.snapshot();
+        assert_eq!(rec[0].emoji.as_str(), "😂", "most-recent first");
+        assert_eq!(rec[1].emoji.as_str(), "🚀");
+        assert_eq!(
+            rec.iter().filter(|e| e.emoji.as_str() == "😂").count(),
+            1,
+            "deduped"
+        );
+        assert!(rec.len() <= 16);
+        assert!(store.composer.snapshot().contains("🚀😂"));
+    }
+
+    /// r43: "Stop poll" marks the bubble's poll closed (demo path).
+    #[test]
+    fn stop_poll_closes_demo_poll() {
+        let store = store();
+        store.seed_demo();
+        // Seed an open outgoing poll onto the conversation.
+        let mut rows = store.messages.snapshot();
+        rows[0].poll = Some(PollRow {
+            question: "Ship it?".into(),
+            options: vec![],
+            voters: 3,
+            closed: false,
+        });
+        rows[0].outgoing = true;
+        store.messages.set(rows);
+        store.stop_poll(store.messages.snapshot()[0].id);
+        assert!(
+            store.messages.snapshot()[0]
+                .poll
+                .as_ref()
+                .map(|p| p.closed)
+                .unwrap_or(false),
+            "poll closed after Stop poll"
+        );
+    }
+
+    /// r43: "Save to Saved Messages" appends into the demo Saved corpus
+    /// and the Saved chat shows it when opened.
+    #[test]
+    fn save_to_saved_appends_demo() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store.messages.snapshot()[0].clone();
+        let id = row.id;
+        store.save_to_saved(&row);
+        assert!(
+            store.saved_demo_msgs.borrow().iter().any(|r| r.id == id),
+            "saved corpus holds the row"
+        );
+        store.select_chat(3); // Saved Messages (kind "saved")
+        assert!(
+            store.messages.snapshot().iter().any(|r| r.id == id),
+            "Saved chat shows the saved row"
+        );
+    }
+
+    /// r43: profile field tap → copy_field stores into clipboard binding.
+    #[test]
+    fn copy_field_copies_value() {
+        let store = store();
+        store.copy_field("@lexo");
+        assert_eq!(store.clipboard.snapshot().as_str(), "@lexo");
+        assert!(!store.notice.snapshot().1.is_empty(), "toast fired");
+    }
+
+    /// r43: channel comments open seeds the thread rows.
+    #[test]
+    fn open_comments_seeds_thread() {
+        let store = store();
+        store.open_comments(42);
+        assert_eq!(store.comments_open.snapshot(), Some(42));
+        assert!(store.comments_list.snapshot().len() >= 3);
     }
 
 }

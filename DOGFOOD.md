@@ -3203,3 +3203,50 @@ watches held independent dedup cells.
   r41-2 the pane's dead updates were nami-side, not `when`-semantics;
   the `when(cond).otherwise(...)` gate on an independent `distinct`
   instance now drives it correctly (all five filter tabs verified live).
+
+## r43 — repin waterui bfb742d9 / hydrolysis 4f532e83 / m3 f4fbd90c (#1311 scroll-offset API; Ctrl+W root-caused to app code)
+
+### Ctrl+W resolution (the last 🟡 in shortcuts)
+
+App code, not a framework gap. A mounted `Menu` registers every Command's
+`shortcut` chord on the shared `MenuShortcutRegistry` while mounted —
+independent of popup visibility — and dispatch runs before text input and
+the plain-modifier early-return (`src/renderer/input/menu_shortcuts.rs`,
+`src/renderer/input/hit_test.rs:2352-2359`). The hamburger `Menu` is always
+mounted, so adding `"Quit Telegram"` with `Shortcut::new("w").control()` →
+`store.win_state.set(WindowState::Closed)` was all that was missing;
+`remove_closed_windows` then exits the winit loop
+(`src/runner/winit_runner.rs:609-624`). Verified live at 1400/800/600:
+Ctrl+W closes the window and the process exits.
+
+### r43-1: `App::menu_bar` is silently dropped on the winit (and web) runners
+
+Observed while root-causing Ctrl+W: `App::menu_bar` never reaches the
+platform. All three runners destructure it and discard the value:
+
+```rust
+let (windows, _menu_bar, env) = app.into_parts();
+// hydrolysis src/runner/winit_runner.rs:225
+// hydrolysis src/runner/web_runner.rs:302
+// hydrolysis src/runner/mod.rs:179
+```
+
+So a `Menu` given at the app level — the documented place for
+application-scoped commands — renders nothing and arms no shortcuts on
+hydrolysis; only `Menu`s mounted inside window content work. No panic, no
+warning: the menu bar just silently does not exist. Minimal repro:
+
+```rust
+App::new()
+    .window(Window::new("Demo", text("body")))
+    .menu_bar(Menu::new("App", [Command::builder("Quit")
+        .shortcut(Shortcut::new("w").control())
+        .action(|| std::process::exit(0))]));
+```
+
+Expected (per the API surface): the menu bar is realized (native menu bar
+or an in-window bar) and `Ctrl+W` dispatches. Observed: no menu UI, chord
+never fires — `menu_shortcuts.rs` only ever sees `Menu`s mounted inside a
+window's view tree. App-side posture: keep app commands in the always-
+mounted hamburger `Menu` (which is how Ctrl+W shipped); no workaround
+needed for a *visual* bar since we already keep one in-window.

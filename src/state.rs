@@ -22,6 +22,7 @@ use waterui::theme::color::{
 use waterui::form::secure::Secure;
 use waterui::text::styled::{Style, StyledStr};
 use waterui::layout::{Rect, ScrollController, Size};
+use waterui::window::WindowState;
 use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::task::spawn_local;
@@ -340,6 +341,9 @@ pub struct MessageRow {
     pub view_count: i32,
     /// Post author signature (`author_signature`) on channel posts.
     pub author_sig: Str,
+    /// Linked comment count (`interaction_info.reply_info.reply_count`)
+    /// on channel posts — renders the "💬 N comments" footer button.
+    pub comments: i32,
     /// Album this message belongs to (`media_album_id`, 0 = none).
     /// Consecutive rows with the same id merge into one album bubble at
     /// `set_messages`; the merged row keeps the first member's id and
@@ -416,6 +420,26 @@ pub enum KbKind {
 pub struct KbBtn {
     pub text: Str,
     pub kind: KbKind,
+}
+
+/// One row of a channel post's comments thread (`getMessageThreadHistory`).
+#[derive(Clone, Identifiable)]
+pub struct CommentRow {
+    /// Comment message id.
+    #[id]
+    pub id: i64,
+    /// Sender display name.
+    pub sender: Str,
+    /// Comment text (content preview for non-text kinds).
+    pub text: Str,
+}
+
+/// One cell of the emoji panel's "Frequently used" recents strip.
+#[derive(Clone, Identifiable)]
+pub struct RecentEmoji {
+    /// The emoji itself is the row key (recents stay deduped).
+    #[id]
+    pub emoji: Str,
 }
 
 /// The "Show message info" card contents (TDLib `getMessageReadDate` /
@@ -601,6 +625,7 @@ impl PartialEq for MessageRow {
             && self.is_service == o.is_service
             && self.view_count == o.view_count
             && self.author_sig == o.author_sig
+            && self.comments == o.comments
             && self.album_id == o.album_id
             && self.album_files == o.album_files
             && self.kb_rows == o.kb_rows
@@ -629,6 +654,9 @@ pub enum Route {
 #[derive(Clone)]
 pub struct Store {
     pub client_id: Cell<i32>,
+    /// The main window's state binding — the same one handed to
+    /// `Window::new` — so commands (Ctrl+W Quit) can close the app window.
+    pub win_state: Binding<WindowState>,
     pub screen: Binding<Screen>,
     pub dark: Binding<bool>,
     // auth form
@@ -802,6 +830,17 @@ pub struct Store {
     pub sticker_query: Binding<Str>,
     /// Media opened in the in-pane viewer overlay (`None` = closed).
     pub viewer: Binding<Option<ViewerRow>>,
+    /// Emoji-panel recents strip (Desktop's "Frequently used") — most
+    /// recently inserted first, deduped, capped; seed mirrors a fresh
+    /// install's default set.
+    pub recent_emojis: Binding<Vec<RecentEmoji>>,
+    /// Demo Saved-Messages corpus — `save_to_saved` appends here so the
+    /// Saved Messages chat shows the saved rows (no TDLib in demo).
+    pub saved_demo_msgs: Rc<RefCell<Vec<MessageRow>>>,
+    /// Channel comments thread popup: `Some(post id)` opens it; the rows
+    /// are fetched into `comments_list` (TDLib `getMessageThreadHistory`).
+    pub comments_open: Binding<Option<i64>>,
+    pub comments_list: Binding<Vec<CommentRow>>,
     /// Picker panel tab: 0 Emoji, 1 Stickers, 2 GIFs.
     pub panel_tab: Binding<i32>,
     /// Privacy → blocked message senders.
@@ -1462,6 +1501,7 @@ impl Store {
     pub fn new(client_id: i32) -> Self {
         Self {
             client_id: Cell::new(client_id),
+            win_state: Binding::container(WindowState::Normal),
             screen: Binding::container(Screen::Loading),
             dark: Binding::bool(false),
             api_id: Binding::container(Str::from("")),
@@ -1569,6 +1609,16 @@ impl Store {
             sticker_query: Binding::<Str>::default(),
             // Media viewer overlay (photo/video opened from a bubble).
             viewer: Binding::<Option<ViewerRow>>::default(),
+            // Emoji-panel "Frequently used" strip (seeded like a fresh install).
+            recent_emojis: Binding::container(
+                ["😂", "👍", "🔥", "❤️", "🎉", "👏", "😮", "🤔"]
+                    .iter()
+                    .map(|e| RecentEmoji { emoji: Str::from(*e) })
+                    .collect::<Vec<_>>(),
+            ),
+            saved_demo_msgs: Rc::new(RefCell::new(Vec::new())),
+            comments_open: Binding::<Option<i64>>::default(),
+            comments_list: Binding::<Vec<CommentRow>>::default(),
             // Sticker/emoji/GIF panel active tab: 0 Emoji, 1 Stickers, 2 GIFs.
             panel_tab: Binding::i32(0),
             // Privacy → blocked users.
@@ -1906,6 +1956,7 @@ impl Store {
             is_service: false,
             view_count: 0,
             author_sig: Str::from(""),
+            comments: 0,
             album_id: 0,
             album_files: Vec::new(),
             kb_rows: Vec::new(),
@@ -2062,6 +2113,21 @@ impl Store {
                 ],
             ];
             msgs.push(kb);
+        }
+        // An open poll authored by the demo user — the message-menu "Stop
+        // poll" item (outgoing-only) is exercisable on it.
+        {
+            let mut my_poll = m(45, "", "", "10:00", true, true, "", "", "", "");
+            my_poll.poll = Some(PollRow {
+                question: "Merge the r43 bundle today?".into(),
+                options: vec![
+                    PollOptRow { ix: 0, text: "Yes".into(), pct: 80, chosen: true },
+                    PollOptRow { ix: 1, text: "Later".into(), pct: 20, chosen: false },
+                ],
+                voters: 5,
+                closed: false,
+            });
+            msgs.push(my_poll);
         }
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
@@ -2776,6 +2842,12 @@ impl Store {
                 .map(|i| i.view_count)
                 .unwrap_or(0),
             author_sig: Str::from(m.author_signature.clone()),
+            comments: m
+                .interaction_info
+                .as_ref()
+                .and_then(|i| i.reply_info.as_ref())
+                .map(|r| r.reply_count)
+                .unwrap_or(0),
             album_id: m.media_album_id,
             album_files: Vec::new(),
             kb_rows,
@@ -3761,17 +3833,23 @@ impl Store {
                     r.unread_divider = false;
                 }
             }
-            // Channel posts carry the 👁 view count, and some carry an
-            // author signature (TDLib author_signature).
-            if chat.map(|r| r.kind_icon.as_str() == "channel").unwrap_or(false) {
+            // Channel posts carry the 👁 view count + comment count, and
+            // some carry an author signature (TDLib author_signature).
+            let kind = chat.map(|r| r.kind_icon.to_string()).unwrap_or_default();
+            if kind == "channel" {
                 for r in msgs.iter_mut() {
                     if !r.is_service {
                         r.view_count = 1200 + (r.id as i32) * 137;
+                        r.comments = 3 + (r.id as i32) % 3;
                         if r.id % 2 == 0 {
                             r.author_sig = Str::from("T. G. Team");
                         }
                     }
                 }
+            }
+            // Saved Messages shows the demo rows appended by save_to_saved.
+            if kind == "saved" {
+                msgs.extend(self.saved_demo_msgs.borrow().iter().cloned());
             }
             self.set_messages(msgs);
             self.demo_seed_pinned(chat_id);
@@ -4342,6 +4420,7 @@ impl Store {
                 is_service: true,
                 view_count: 0,
                 author_sig: Str::from(""),
+                comments: 0,
                 album_id: 0,
                 album_files: Vec::new(),
                 kb_rows: Vec::new(),
@@ -4752,6 +4831,145 @@ impl Store {
         let mut s = self.composer.snapshot().to_string();
         s.push_str(emoji);
         self.composer.set_from(s);
+        // Recents strip (Desktop's "Frequently used"): most-recent first,
+        // deduped, capped at 16.
+        let mut rec = self.recent_emojis.snapshot();
+        rec.retain(|e| e.emoji.as_str() != emoji);
+        rec.insert(0, RecentEmoji {
+            emoji: Str::from(emoji.to_string()),
+        });
+        rec.truncate(16);
+        self.recent_emojis.set(rec);
+    }
+
+    /// Any copyable profile field (username/phone/bio) — tap-to-copy
+    /// pattern of `copy_message`.
+    pub fn copy_field(&self, value: &str) {
+        self.clipboard.set_from(value.to_string());
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            let _ = cb.set_text(value.to_string());
+        }
+        self.notify(self.tr("Copied", 0, "Copied"));
+    }
+
+    /// Creator's "Stop poll" — `stopPoll` closes it; the bubble footer
+    /// then renders "votes · closed" (poll_block already does).
+    pub fn stop_poll(&self, message_id: i64) {
+        let chat_id = self.open_chat.get();
+        let client = self.client_id.get();
+        if client == 0 {
+            let mut rows = self.messages.snapshot();
+            if let Some(r) = rows.iter_mut().find(|r| r.id == message_id)
+                && let Some(p) = r.poll.as_mut()
+            {
+                p.closed = true;
+            }
+            self.messages.set(rows);
+            self.regroup_messages();
+            self.notify(self.tr("Poll stopped", 0, "Poll stopped"));
+            return;
+        }
+        let store = self.clone();
+        spawn_local(async move {
+            if functions::stop_poll(chat_id, message_id, client)
+                .await
+                .is_ok()
+            {
+                store.notify(store.tr("Poll stopped", 0, "Poll stopped"));
+            }
+        })
+        .detach();
+    }
+
+    /// "Save to Saved Messages" — forwards the row into the user's own
+    /// Saved Messages chat (`createPrivateChat(my_id)` → `forwardMessages`),
+    /// the message-menu quick action in Telegram Desktop.
+    pub fn save_to_saved(&self, row: &MessageRow) {
+        let client = self.client_id.get();
+        if client == 0 {
+            self.saved_demo_msgs.borrow_mut().push(row.clone());
+            self.notify(self.tr("Saved", 0, "Saved to Saved Messages"));
+            return;
+        }
+        let chat_id = self.open_chat.get();
+        let msg_id = row.id;
+        let my = self.my_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Chat::Chat(saved)) =
+                functions::create_private_chat(my, false, client).await
+            {
+                let _ = functions::forward_messages(
+                    saved.id,
+                    None,
+                    chat_id,
+                    vec![msg_id],
+                    None,
+                    false,
+                    false,
+                    client,
+                )
+                .await;
+                store.notify(store.tr("Saved", 0, "Saved to Saved Messages"));
+            }
+        })
+        .detach();
+    }
+
+    /// Channel comments: opens the thread popup for a post and fetches
+    /// its comment rows (`getMessageThreadHistory`; demo corpus seeded).
+    pub fn open_comments(&self, post_id: i64) {
+        self.comments_open.set(Some(post_id));
+        let client = self.client_id.get();
+        if client == 0 {
+            let list = Self::demo_comments(post_id);
+            self.comments_list.set(list);
+            return;
+        }
+        let chat_id = self.open_chat.get();
+        let msg_id = post_id;
+        let store = self.clone();
+        spawn_local(async move {
+            if let Ok(enums::Messages::Messages(m)) =
+                functions::get_message_thread_history(
+                    chat_id, msg_id, 0, 0, 50, client,
+                )
+                .await
+            {
+                let list = m
+                    .messages
+                    .iter()
+                    .filter_map(|mm| mm.as_ref())
+                    .map(|mm| {
+                        let (t, _, label, _, _) = Store::content_preview(&mm.content);
+                        let body = if t.is_empty() { label } else { t };
+                        CommentRow {
+                            id: mm.id,
+                            sender: store.sender_name(&mm.sender_id),
+                            text: body,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                store.comments_list.set(list);
+            }
+        })
+        .detach();
+    }
+
+    /// Demo comment thread rows — deterministic per post id.
+    fn demo_comments(seed: i64) -> Vec<CommentRow> {
+        let bodies = [
+            "first!", "great post 👏", "link worked for me",
+            "same question here", "works on my machine", "ship it",
+        ];
+        let n = 3 + (seed as usize) % 3;
+        (0..n)
+            .map(|i| CommentRow {
+                id: i as i64,
+                sender: if i % 2 == 0 { "Alice".into() } else { "Bob".into() },
+                text: bodies[(i + seed as usize) % bodies.len()].into(),
+            })
+            .collect()
     }
 
     /// Open the media viewer overlay for a bubble's photo/playable file.
@@ -5241,12 +5459,22 @@ impl Store {
             if user_id == 0 && chat_id == 0 {
                 return;
             }
+            // Demo card: stable fake fields so the tap-to-copy rows are
+            // exercised in WATERGRAM_DEMO builds.
+            let slug: String = name
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect();
             self.profile.set(Some(ProfileCard {
                 user_id,
-                name,
-                ..Default::default()
+                name: name.clone(),
+                username: format!("@{slug}").into(),
+                phone: format!("+1 555 01{:02}", (user_id % 89) + 10).into(),
+                bio: format!("{name} — demo account").into(),
+                online: user_id % 2 == 0,
             }));
-            self.nav.push(Route::Profile);
+            self.show_profile();
             return;
         }
         if user_id != 0 {
@@ -5267,7 +5495,7 @@ impl Store {
                 card.name = c.title.into();
             }
             store.profile.set(Some(card));
-            store.nav.push(Route::Profile);
+            store.show_profile();
         })
         .detach();
     }
@@ -5818,6 +6046,7 @@ impl Store {
             is_service: false,
             view_count: 0,
             author_sig: Str::from(""),
+            comments: 0,
             album_id: 0,
             album_files: Vec::new(),
             kb_rows: Vec::new(),
@@ -8097,6 +8326,19 @@ impl Store {
         .detach();
     }
 
+    /// Push the Profile route. In the compact (single-column) split the
+    /// detail column covers the sidebar stack, so deselect the chat to make
+    /// the pushed page the visible pane — otherwise the push looks like a
+    /// no-op at narrow widths. 700 = hydrolysis's compact threshold
+    /// (`split_compact_threshold`: sidebar ideal 340 + 360).
+    pub fn show_profile(&self) {
+        self.nav.push(Route::Profile);
+        let f = self.win_frame.snapshot();
+        if f.width() > 0.0 && f.width() < 700.0 && self.selected.snapshot().is_some() {
+            self.selected.set(None);
+        }
+    }
+
     /// Load a user's profile into the Profile route card and push it.
     pub fn open_profile(&self, user_id: i64) {
         let client = self.client_id.get();
@@ -8131,7 +8373,7 @@ impl Store {
                 card.bio = bio.text.into();
             }
             store.profile.set(Some(card));
-            store.nav.push(Route::Profile);
+            store.show_profile();
         })
         .detach();
     }
