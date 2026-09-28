@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use waterui_backend_core::widget::ModalInteraction;
 use waterui::component::list::{List, ListItem};
-use waterui::component::menu::MenuView;
+use waterui::component::menu::{MenuView, Shortcut};
+use waterui::key::{Key, KeyHandling, KeyPress, NamedKey};
 use waterui::layout::frame::Frame;
 use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
@@ -49,7 +50,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{auto_delete_label, highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, MsgHit, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{auto_delete_label, highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, MsgHit, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -63,6 +64,8 @@ use mdi::at;
 use mdi::bell_off;
 use mdi::calendar;
 use mdi::chevron_down;
+use mdi::chevron_left;
+use mdi::chevron_right;
 use mdi::chevron_up;
 use mdi::close;
 use mdi::content_copy;
@@ -79,6 +82,7 @@ use mdi::lock;
 use mdi::magnify;
 use mdi::menu;
 use mdi::paperclip;
+use mdi::pencil;
 use mdi::pin;
 use mdi::poll;
 use mdi::reply;
@@ -553,6 +557,10 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                     "Edit folder".action(move |store: Store| {
                                         store.open_folder_editor(id)
                                     }),
+                                    // Desktop folder menu: "Mark all as read".
+                                    "Mark all as read".action(move |store: Store| {
+                                        store.mark_folder_read(id)
+                                    }),
                                     "Delete folder".action(
                                         move |store: Store| store.delete_folder(id),
                                     ),
@@ -603,6 +611,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         // `List` reports StretchAxis::Both and fills the leftover region;
         // a `Lazy` stack inside `scroll(vstack)` reports None and is sized to
         // its realized rows, which clipped the list mid-pane (see DOGFOOD).
+        zstack((
         {
             let filtered_else = filtered.clone();
             let rows_else = rows_store.clone();
@@ -678,7 +687,41 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 .selection(&list_sel)
             })
         },
+            // Desktop's bottom-right FAB: the pencil opens the New chat
+            // picker from anywhere in the chat list.
+            icon_button(
+                pencil().tint(AccentForeground),
+                "New chat",
+                |store: Store| store.nav.push(Route::NewChat),
+            )
+            .padding_with((12.0, 12.0))
+            .background(Circle.fill(Accent))
+            .padding_with((16.0, 16.0)),
+        ))
+        .alignment(BottomTrailing),
     ))
+    // ArrowUp/Down and Enter bubble up from whatever is focused in the
+    // sidebar (search field, a row's inner press slot — hydrolysis#220)
+    // to drive the list selection like Desktop.
+    .on_key_press(|Use(press): Use<KeyPress>, store: Store| {
+        match press.key {
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                if store.list_nav(press.key == Key::Named(NamedKey::ArrowDown)) {
+                    KeyHandling::Handled
+                } else {
+                    KeyHandling::Ignored
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                if store.open_top_hit() {
+                    KeyHandling::Handled
+                } else {
+                    KeyHandling::Ignored
+                }
+            }
+            _ => KeyHandling::Ignored,
+        }
+    })
     .on_change(&search_now, |q: Str, store: Store| store.run_search(q))
     .on_change(&store.list_selection, |v: Option<i64>, store: Store| {
         if let Some(id) = v {
@@ -957,7 +1000,12 @@ fn chat_row_menu(
 ) -> impl MenuView {
     let id = row.id;
     (
-        "Mark read".action(move |store: Store| store.mark_read(id)),
+        // Ctrl+R — Desktop's mark-read accelerator; the hint registers
+        // while the row's ⋮ menu is mounted (hover) and the command
+        // itself runs from the context menu too.
+        "Mark read"
+            .action(move |store: Store| store.mark_read(id))
+            .shortcut(Shortcut::new("r").control()),
         if row.marked_unread {
             "Mark as read (clear flag)"
         } else {
@@ -1082,8 +1130,11 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             }
         });
     let mention_rows = SignalCollection::new(mention_sig.clone());
+    // `completion_off` is the Escape-dismissed latch — the popup stays
+    // hidden until the composer text changes again.
     let mention_show = mention_sig
-        .map(|v: Vec<MemberRow>| !v.is_empty())
+        .zip(&store.completion_off)
+        .map(|(v, off)| !v.is_empty() && !off)
         .distinct();
     // `:shortcode` emoji completion: same trailing-token surface as
     // @mention, sourced from the static shortcode table.
@@ -1091,7 +1142,10 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         .composer
         .map(|q: Str| Store::emoji_suggest(&q));
     let emoji_rows = SignalCollection::new(emoji_sig.clone());
-    let emoji_show = emoji_sig.map(|v: Vec<EmojiSug>| !v.is_empty()).distinct();
+    let emoji_show = emoji_sig
+        .zip(&store.completion_off)
+        .map(|(v, off)| !v.is_empty() && !off)
+        .distinct();
     let poll_open = store.poll_open.clone();
     let store_for_poll = store.clone();
     // Modal Escape scopes, cloned before `store` moves into the `when`
@@ -1370,7 +1424,9 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             hstack((
                 field("Search in chat", &search_b)
                     .prompt("Search in this chat")
-                    .hide_label(),
+                    .hide_label()
+                    // Enter jumps to the next match (Telegram Desktop).
+                    .on_submit(|store: Store| store.chat_search_next()),
                 text!("{m}", m = match_label.clone()).caption().muted(),
                 icon_button(chevron_up(), "Previous match", |store: Store| {
                     store.chat_search_prev()
@@ -1667,7 +1723,10 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         }),
         field("Message", &composer_b)
             .prompt("Message")
-            .hide_label(),
+            .hide_label()
+            // waterui#1265: Return submits (send) via the field's own
+            // on_submit instead of an ancestor key handler.
+            .on_submit(|store: Store| store.submit_composer()),
         // Search/members/scheduled live in the navigation toolbar
         // (Telegram Desktop parity). A `Spacer` before the mic/send slot
         // keeps it trailing-aligned.
@@ -1689,7 +1748,29 @@ pub(crate) fn chat_column(store: Store) -> impl View {
     ))
     .spacing(4.0)
     .padding_with((4.0, 6.0))
-    .background(Surface),
+    .background(Surface)
+    // Keys bubble up from the focused field (waterui#1265): Escape
+    // dismisses completion / cancels edit or reply, ArrowUp in an empty
+    // composer edits the last outgoing message (Telegram Desktop).
+    .on_key_press(|Use(press): Use<KeyPress>, store: Store| {
+        match press.key {
+            Key::Named(NamedKey::Escape) => {
+                if store.composer_escape() {
+                    KeyHandling::Handled
+                } else {
+                    KeyHandling::Ignored
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if store.edit_last_own() {
+                    KeyHandling::Handled
+                } else {
+                    KeyHandling::Ignored
+                }
+            }
+            _ => KeyHandling::Ignored,
+        }
+    }),
     ))
 }
 
@@ -1868,6 +1949,8 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     ))
     .on_change(&search_live, |q: Str, store: Store| store.run_chat_search(q))
     .on_change(&composer_b, |_: Str, store: Store| {
+        // A new keystroke re-arms the completion popup after Escape.
+        store.completion_off.set(false);
         store.typing_ping();
         store.maybe_load_members();
     })
@@ -1911,6 +1994,34 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                 icon_button(information(), "Chat info", |store: Store| {
                     store.toggle_info()
                 }),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarTrailing,
+                // The overflow ⋮ menu stays mounted while the chat is
+                // open, so its `shortcut` chords dispatch window-wide
+                // (hydrolysis#261): Ctrl+F search, Ctrl+R mark as read —
+                // Telegram Desktop's chat-level accelerators.
+                Menu::new(
+                    label("Chat actions").icon(dots_vertical()).icon_only(),
+                    (
+                        "Search in chat"
+                            .action(move |store: Store| {
+                                store.chat_search_open.set(true)
+                            })
+                            .shortcut(Shortcut::new("f").control()),
+                        "Mark as read"
+                            .action(move |store: Store| store.mark_read(chat_id))
+                            .shortcut(Shortcut::new("r").control()),
+                        "Clear history".action(move |store: Store| {
+                            store.clear_history(chat_id)
+                        }),
+                        Divider,
+                        "Leave chat"
+                            .command()
+                            .action(move |store: Store| store.leave(chat_id))
+                            .destructive(),
+                    ),
+                ),
             )),
     )
 }
@@ -2506,7 +2617,10 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
         "Reply".action(move |store: Store| store.start_reply(&r1)),
         row.outgoing
             .then(|| "Edit".action(move |store: Store| store.start_edit(&r4))),
-        "Copy text".action(move |store: Store| store.copy_message(&r3)),
+        "Copy text"
+            .action(move |store: Store| store.copy_message(&r3))
+            // Ctrl+C — Desktop's copy accelerator.
+            .shortcut(Shortcut::new("c").control()),
         (!row.outgoing && !row.text.is_empty())
             .then(|| "Translate".action(move |store: Store| store.translate_message(&r_tr))),
         linkable.then(|| "Copy link".action(move |store: Store| store.copy_link(&r_link))),
@@ -2716,7 +2830,8 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
         let label_text = row.media_label.clone();
         let pct = store.file_progress_signal(pfid);
         let thumb = store.file_signal(tfid);
-        vstack((
+        let secs = row.media_secs;
+        let media_col = vstack((
             when(has, move || {
                 if audio_only {
                     video_player(url.snapshot())
@@ -2762,8 +2877,29 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
                 ))
                 .padding_with((4.0, 8.0))
             }),
-        ))
-        .anyview()
+        ));
+        // m:ss duration badge on the media corner (Telegram Desktop shows
+        // it over the video thumbnail, bottom-right).
+        if secs > 0 {
+            let badge = format!("{}:{:02}", secs / 60, secs % 60);
+            zstack((
+                media_col,
+                text(badge)
+                    .caption()
+                    .bold()
+                    .foreground(Srgb::from_hex("#FFFFFF"))
+                    .padding_with((2.0, 6.0))
+                    .background(RoundedRectangle::new(0.5).fill(
+                        WithOpacity::new(Srgb::from_hex("#000000"), 0.5),
+                    ))
+                    .padding_with((6.0, 6.0))
+                    .a11y_hidden(true),
+            ))
+            .alignment(BottomTrailing)
+            .anyview()
+        } else {
+            media_col.anyview()
+        }
     } else if row.album_files.len() > 1 {
         // Incoming media album: the merged row renders every member's
         // media as a two-column grid (Desktop's album bubble).
@@ -3820,71 +3956,133 @@ fn delete_confirm_card(store: Store) -> impl View {
 
 /// In-pane media viewer (Desktop's viewer is fullscreen; ours covers the
 /// detail pane): photo or playable payload with sender, caption, close.
-#[allow(signal_get_in_view)] // the `when` gate rebuilds this view when the
-// viewer opens; `url.snapshot()` then reads the resolved path at rebuild time.
+#[allow(signal_get_in_view)] // `video_player` takes a constant MediaItem, so
+// the video branch snapshots the resolved path each time the `watch` rebuilds.
 fn viewer_layer(store: Store) -> impl View {
-    // The `when(viewer_open)` gate on the caller side hides this layer until
-    // a viewer row exists; file 0 simply resolves to the Downloading branch.
-    let row = store.viewer.snapshot().unwrap_or(ViewerRow {
-        file: 0,
-        video: false,
-        caption: "".into(),
-        from: "".into(),
-    });
-    let file = row.file;
-    let video = row.video;
-    let has = store
-        .file_signal(file)
-        .map(|p: Str| !p.is_empty())
-        .distinct();
-    let url = store.file_signal(file).map(Url::from_file_path_str);
-    let url_photo = url.clone();
-    let media = when(has, move || {
-        let url_v = url.clone();
-        let url_p = url_photo.clone();
-        when(video, move || video_player(url_v.snapshot()).max_height(420.0)).otherwise(
-            move || {
-                Photo::new(url_p.snapshot())
-                    .max_width(430.0)
-                    .max_height(430.0)
-                    .clip(RoundedRectangle::new(0.05))
-            },
-        )
-    })
-    .otherwise(|| {
-        text("Downloading…")
-            .caption()
-            .foreground(Srgb::from_hex("#B0B0B0"))
-    });
     // Desktop's media viewer: an opaque dark overlay carrying light text —
     // light header row (sender + white controls) and a light caption under
     // the media, nothing of the chat bleeds through.
     let viewer_fg = Color::srgb_hex("#FFFFFF");
     let viewer_scrim = Color::srgb_hex("#101010");
-    vstack((
-        hstack((
-            text(row.from.clone())
-                .body()
-                .bold()
-                .foreground(viewer_fg.clone()),
-            spacer(),
-            icon_button(close().tint(viewer_fg.clone()), "Close viewer", |store: Store| {
-                store.close_viewer()
-            }),
-        ))
-        .spacing(8.0)
-        .padding_with((8.0, 12.0))
-        .background(viewer_scrim.clone()),
+    // Row-driven text stays fine-grained: stepping between media only
+    // re-evaluates these signals, not the overlay.
+    let from_text = store
+        .viewer
+        .map(|v| v.map(|r| r.from).unwrap_or_default())
+        .computed();
+    let caption_text = store
+        .viewer
+        .map(|v| v.map(|r| r.caption).unwrap_or_default())
+        .computed();
+    // The media node itself is a different identity per message (a different
+    // photo source / MediaItem), so the subtree is rebuilt per msg_id — the
+    // scoped `watch` case, not a per-value one.
+    let store_m = store.clone();
+    let media = watch(
+        store
+            .viewer
+            .map(|v| v.map(|r| (r.msg_id, r.file, r.video)).unwrap_or((0, 0, false))),
+        move |(msg_id, file, video)| {
+            let _ = msg_id;
+            let has = store_m
+                .file_signal(file)
+                .map(|p: Str| !p.is_empty())
+                .distinct();
+            let url = store_m.file_signal(file).map(Url::from_file_path_str);
+            let url_v = url.clone();
+            when(has, move || {
+                let url_p = url.clone();
+                let url_v2 = url_v.clone();
+                when(video, move || video_player(url_v2.snapshot()).max_height(420.0))
+                    .otherwise(move || {
+                        Photo::new(url_p.clone())
+                            .max_width(430.0)
+                            .max_height(430.0)
+                            .clip(RoundedRectangle::new(0.05))
+                    })
+            })
+            .otherwise(|| {
+                text("Downloading…")
+                    .caption()
+                    .foreground(Srgb::from_hex("#B0B0B0"))
+            })
+        },
+    );
+    // ‹ › step through the chat's media messages (Desktop's edge buttons;
+    // ←/→ keys are handled by the `on_key_press` below). They sit as a
+    // sibling zstack layer over the content column — inside the column as a
+    // nested `when` they never armed (r36-2/#251 family). This `when`-
+    // mounted layer registers no hit occluder, so a click here can still
+    // reach an armed row tap beneath it (DOGFOOD r40-1).
+    let nav_buttons = hstack((
+        icon_button(
+            chevron_left().tint(viewer_fg.clone()),
+            "Previous media",
+            |store: Store| {
+                store.viewer_step(-1);
+            },
+        )
+        .background(Circle.fill(WithOpacity::new(Srgb::from_hex("#000000"), 0.45))),
         spacer(),
-        media,
-        spacer(),
-        text(row.caption.clone())
-            .caption()
-            .line_limit(THREE)
-            .foreground(viewer_fg.clone())
-            .padding_with((8.0, 12.0)),
+        icon_button(
+            chevron_right().tint(viewer_fg.clone()),
+            "Next media",
+            |store: Store| {
+                store.viewer_step(1);
+            },
+        )
+        .background(Circle.fill(WithOpacity::new(Srgb::from_hex("#000000"), 0.45))),
     ))
-    .background(viewer_scrim)
+    .padding_with((12.0, 12.0));
+    zstack((
+        vstack((
+            hstack((
+                text(from_text)
+                    .body()
+                    .bold()
+                    .foreground(viewer_fg.clone()),
+                spacer(),
+                icon_button(close().tint(viewer_fg.clone()), "Close viewer", |store: Store| {
+                    store.close_viewer()
+                }),
+            ))
+            .spacing(8.0)
+            .padding_with((8.0, 12.0))
+            .background(viewer_scrim.clone()),
+            spacer(),
+            media,
+            spacer(),
+            text(caption_text)
+                .caption()
+                .line_limit(THREE)
+                .foreground(viewer_fg.clone())
+                .padding_with((8.0, 12.0)),
+        ))
+        .background(viewer_scrim),
+        nav_buttons,
+    ))
+    .alignment(Center)
+    // ←/→ step media like the ‹ › buttons. This sits on the overlay root so
+    // keys bubble to it whether the focused node is in the content column or
+    // the sibling nav-buttons layer.
+    .on_key_press(|Use(press): Use<KeyPress>, store: Store| {
+            match press.key {
+                Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowRight) => {
+                    if store.viewer_step(
+                        if press.key == Key::Named(NamedKey::ArrowLeft) {
+                            -1
+                        } else {
+                            1
+                        },
+                    ) {
+                        KeyHandling::Handled
+                    } else {
+                        KeyHandling::Ignored
+                    }
+                }
+                _ => KeyHandling::Ignored,
+            }
+    })
     .with(modal_escape(store.clone(), |s| s.close_viewer()))
 }
 

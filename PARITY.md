@@ -43,7 +43,7 @@
 | 打开会话 + 历史分页 | ✅ | `getChatHistory` 向前翻页 | `messages_render` |
 | 发送文本 | ✅ | `sendMessage(inputMessageText)` | `composer_sends_and_clears` |
 | 输入框 Markdown（*粗* _斜_ `码` ~~删~~ \|\|剧透\|\|） | ✅ | `parse_markdown` 发送时转 `FormattedText` 实体（UTF-16 offset），demo 走本地回显行；编辑路径同样解析 | `parse_markdown_strips_delimiters_and_offsets_utf16` `send_demo_echo_appends_outgoing_row` |
-| 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | ❌ | 框架双层缺口：`Command::shortcut` 元数据存在（waterui menu.rs:261）但 hydrolysis 无任何消费点；修饰键 chord 在 hit_test.rs:2148 直接 return false，且 Event 枚举只有 Hover* —— 无键事件派发面。DOGFOOD r36-1 | — |
+| 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | 🟡 | r40 起部分可用：Ctrl+F（⋮ 菜单 "Search in chat" 经 MenuShortcutRegistry）、Ctrl+R 标记已读、Enter 发送（`TextField::on_submit`）、↑ 编辑上一条、Esc 关闭弹层、←/→ 查看器翻页（`on_key_press` 冒泡，waterui#1265 / hydrolysis#261 落地）；Ctrl+W/Alt+↑↓ 等窗口级 chord 仍缺 | — |
 | 编辑消息 | ✅ | `editMessageText`；`message.edit_date` → 气泡内 "edited" 标记 | — |
 | 删除消息 | ✅ | `deleteMessages` + 删除确认卡（"Delete N messages?"，私聊含 "Also delete for <peer>" 勾选框驱动 `revoke` 标志，Cancel/红色 Delete，Esc/点遮罩关闭） | `delete_confirm_card_flow` |
 | 转发 | ✅ | `forwardMessages` | — |
@@ -88,6 +88,8 @@
 | 未读回到底部浮动钮 | ✅ | 打开的会话 unread>0 → 右下 "↓ N" 圆钮 → `catch_up` = `scroll_bottom`+`mark_read`+文件夹徽标重算；scroll 读回缺失（waterui#1259）故暂按 unread>0 常驻显示 | `catch_up_chip_marks_read` |
 | 静音会话样式 | ✅ | `row.muted` → 标题 MutedForeground + `bell_off` 图标，未读徽标灰底（SurfaceVariant/MutedForeground 而非 Accent） | `mute_toggles_row_style` |
 | 文件夹未读徽标 | ✅ | `updateUnreadChatCount` → `folder_unreads` 按 Main/Archive/Folder 键记入，chip 标题后加未读会话数；demo 由 `demo_recount_folders` 从名册统计 | `folder_unread_badges` |
+| 文件夹右键菜单（Mark all as read） | ✅ | 文件夹 chip 右键 → 「Edit folder / Mark all as read / Delete folder」；`mark_folder_read` 清该 folder 内未读并重算徽标（r40 实测 All 3→2 + 行徽标清除） | `folder_unread_badges` + 实测截图（r40d_foldermenu/r40d_marked） |
+| 会话列表 FAB 新建聊天钮 | ✅ | 会话列右下 ✎ 圆形 Accent 钮 → `nav.push(Route::NewChat)`（r40 实测点开 New chat 面板） | 实测截图（r40d_fab、r40_600_fab） |
 | 操作反馈 toast | ✅ | `SnackbarManager` + `.snackbar(...)` 浮层：复制/置顶/转发完成/删除等提示（"2 messages forwarded" 实测出现）；按 Desktop 底部居中条 | `toast_notice_fires_on_copy` + 实测截图（r37_snack*/r37d_fwded.png） |
 | 频道贴 footer（浏览数/签名） | ✅ | `kind_icon="channel"` 贴子行尾：👁 `view_count` + `author_signature` | `channel_post_footer_shows_views` + 实测截图（r37_channel*） |
 | 跳转到日期弹层 | ✅ | 工具栏日历钮 → 日期弹层 → `date_jump_target` 定位并高亮目标消息 | `date_jump_popup_opens` + 实测截图（r37_jump*） |
@@ -107,10 +109,11 @@
 | 贴纸 | ✅ | `getRecentStickers`/`searchStickers`/`getInstalledStickerSets`/`getStickerSet`（emoji 搜索+贴纸包浏览）→ `inputMessageSticker` | `sticker_picker_toggles` |
 | GIF | ✅ | `getSavedAnimations` + @gif inline bot `getInlineQueryResults` trending 搜索 → `inputMessageAnimation` | `sticker_picker_toggles` |
 | 图片/视频气泡内预览 | ✅ | `downloadFile` → `file_signal`；图片 `Photo`（圆角裁剪、max_width 320）、视频/动画 `video_player`、音频紧凑播放器；demo 种子含程序化 640×360 PNG 实图渲染验证 | `media_slot`、`media_play_fallback_row`、`demo_seeds_photo_file` |
+| 视频时长角标（m:ss） | ✅ | `row.media_secs` → 气泡缩略图右下角半透明底 `m:ss` 徽标（r40 实测 "1:05" 在 1400/800/600 均渲染） | 实测截图（r40_600_base、r40_800_base） |
 | 下载进度指示 | ✅ | `updateFile` → `file_progress`（`label — N%`） | — |
 | 相册多选发送 | ✅ | `sendMessageAlbum`（≥2 媒体文件合并为一条相册；混合类型逐个发，标题落在首条） | `attachment_planning` |
 | 接收端相册合并气泡 | ✅ | `media_album_id` 同组消息合并为一条气泡，双列网格渲染所有成员媒体（`album_files`→`file_signal`，空路径按位占位符——`Url::from_file_path_str` 空串 panic 已按 `has`-gate 规避） | `album_rows_merge_into_one_bubble` + 实测截图（r37_album800/600） |
-| 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭（占满会话面板；非全屏） | `media_viewer_overlay` |
+| 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭 + ‹ › 边钮与 ←/→ 键沿会话媒体翻页（`viewer_step` + `on_key_press`，r40）；‹ › 已知缺陷 DOGFOOD r40-1（`when` 层无遮挡注册，点按可同时命中底层媒体行） | `media_viewer_overlay`、`viewer_step_cycles_media` |
 | 复制图片到剪贴板 | ✅ | 右键菜单「Copy image」（仅图片行）→ `file_signal` 快照路径 → `image::open`→`to_rgba8` → arboard `set_image` + "Image copied" toast | `copy_image_decodes_demo_photo` + 实测截图（r39_copyimg*） |
 | Emoji 选择面板 | ✅ | 本地 Emoji 网格（~300 项，VS16 整段）→ 插入输入框；与贴纸/GIF 同一面板三 tab | `emoji_tab_shows_grid` |
 | 发送前预览+说明编辑 | ✅ | 附件条：图片缩略图+文件名+caption 输入框（发送时并入消息 caption） | `attach_preview_shows_caption_field` |
@@ -159,8 +162,9 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：113 项 ｜ 部分 🟡：0 项 ｜ 未实现 ❌：2 项（拖放文件发送 DOGFOOD r34-1，全局快捷键 DOGFOOD r36-1）
+- 已实现 ✅：116 项 ｜ 部分 🟡：1 项（全局快捷键 r40 起部分落地）｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
 - r39 新增：自动删除定时器（行菜单嵌套 `Menu`）、未读回应 ❤ 徽标+浮动跳转钮、消息翻译（内联互换+还原）、复制消息链接、复制图片 —— 五项均 1400/800/600 实机验证
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
 - r8 重审补行：会话右键菜单、多选批处理、投票、定时消息面板、媒体查看器、Emoji 面板、草稿同步、转发无署名、屏蔽用户、加密聊天、Saved Messages、清空历史；r10 补录：右侧信息面板（共享媒体网格）、未读分隔线、发送前缩略图+caption。r12 补录：创建投票；r13 补录：语言包（官方键未覆盖的串回落英文）。剩余 ❌：无。r11 补录：@提及补全、转发附言、右侧信息面板窄窗阈值（<1120 覆盖式 / ≥1120 内嵌）。r12 补录：创建投票（创建面板 + Regular/Quiz 两型），并回退三处 r11 缓解恢复框架复现（nami#23 / waterui#1214 / hydrolysis#129 即 DOGFOOD 对应条目）。r34 补录：列表键盘导航、打开未读锚定、头像/名字/转发徽标点资料、`:emoji` 补全、链接卡片可点；拖放文件发送记为 ❌（DOGFOOD r34-1 框架双层缺口）。r35 补录：消息内搜索 n/N+^/v+命中高亮、@提及跳转钮、悬停↩快捷回复、双击❤️快反应、侧边栏搜索命中高亮。r36 补录：置顶消息多选弹层实测（r36_pinned1400/800/600）、会话行悬停 ⋮ 菜单实测（r36_hovmenu*，悬停时时间戳隐藏）、composer Markdown→实体+demo 回显实测（r36_echo*）、多选条实测部分（r36-5 死按钮记 🟡）、全局快捷键记 ❌（r36-1）。搜索命中高亮配色修正为 M3 container+on-*（r36_marks*）。r38 补录：全局消息搜索 "Messages" 区、删除确认卡（私聊 revoke 勾选）、未读回到底部浮动钮、静音样式（bell_off+暗化标题+灰徽标）、文件夹未读徽标（`updateUnreadChatCount`）。
 - r37 补录：toast 提示（Snackbar）、频道贴 footer（👁 浏览数+签名）、跳转到日期弹层、相册合并气泡、信息面板共享 Media/Files/Links 标签页；多选批处理升 ✅（hydrolysis#239 修复实测）。
+- r40 补录：文件夹右键菜单（Mark all as read）、会话列 FAB ✎ 新建聊天、视频 m:ss 时长角标、查看器 ‹ › 边钮+←/→ 键翻页、菜单 Command::shortcut 提示（Ctrl+C/Ctrl+R/Ctrl+F）+ 键事件面落地（on_key_press/on_submit，全局快捷键 ❌→🟡）——均 1400/800/600 实机验证；新缺陷 DOGFOOD r40-1（`when` 弹层无遮挡注册）。

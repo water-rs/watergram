@@ -233,6 +233,7 @@ mod tests {
             media_file: 0,
             play_file: 0,
             media_label: "".into(),
+            media_secs: 0,
             reaction_chips: Vec::new(),
             failed: false,
             pending: false,
@@ -2759,6 +2760,7 @@ mod tests {
         store.viewer.set(Some(crate::state::ViewerRow {
             file: 0,
             video: false,
+            msg_id: 0,
             caption: "sunset".into(),
             from: "Alice".into(),
         }));
@@ -2767,6 +2769,25 @@ mod tests {
         app.query().label("sunset").assert_exists();
     }
 
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn viewer_step_cycles_media(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        let inner = store.clone();
+        let _app = ui.mount(move || views::chat_detail(inner.clone(), 1).state(&inner));
+        let rows = store.messages.snapshot();
+        let first = rows.iter().find(|r| r.media_file != 0).unwrap().clone();
+        store.open_viewer(&first);
+        assert_eq!(store.viewer.snapshot().unwrap().msg_id, first.id);
+        assert!(store.viewer_step(1));
+        let next = store.viewer.snapshot().unwrap();
+        assert_ne!(next.msg_id, first.id);
+        assert!(store.viewer_step(-1));
+        assert_eq!(store.viewer.snapshot().unwrap().msg_id, first.id);
+        // Stepping past both ends returns false.
+        while store.viewer_step(1) {}
+        assert!(!store.viewer_step(1));
+    }
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn scheduled_panel_lists_rows(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();

@@ -2986,9 +2986,12 @@ in the app.
 
 ### r38-1: a context-menu item over a straddling photo row loses the click to the photo's gesture region — media viewer opens instead of the command
 
-**Filed as water-rs/hydrolysis#260; fix in progress upstream. Same
-unclipped-bounds family as hydrolysis#252 — if #252's fix clips the row
-region to the viewport this symptom clears with it.**
+**RESOLVED — water-rs/hydrolysis#262 (overlay occluders) merged; verified
+live on hydrolysis `a97f58f` at 1400/800/600: context-menu items rendered
+over photo rows now dispatch the command (Copy text → "Copied" snackbar,
+Pin → banner, Delete → confirm card) and nothing beneath fires. The
+occluder model it introduces is incomplete for non-menu overlays —
+see r40-1.**
 
 Observed on hydrolysis `ad9165d` / waterui `927f5d3` at 600pt width
 (captures: `shots/r38_ctx600b.png` showing the menu, `shots/r38_del600.png`
@@ -3015,3 +3018,52 @@ with a `.context_menu` on an earlier row — right-click so the popup's
 items land over the straddling row's unpainted extent, then click the
 item. Expected: the item dispatches; observed: the straddling row's
 gesture fires.
+
+## r40 — repin hydrolysis a97f58f / waterui 697f5a29 (#262 verified, #261/#1265 adopted, one new occlusion gap)
+
+### r40-1: `#262` occluders only cover `anchored_overlay`/`context_menu` — a `when`-mounted overlay layer lets a click reach targets beneath it
+
+**Framework defect — adjacent to water-rs/hydrolysis#260/#262, not fixed by
+it.** `register_hit_test_occluder` is invoked from exactly two call sites —
+`anchored_overlay.rs:198` and `context_menu.rs:601`. A layer mounted with
+`when(open, || overlay_view)` inside a `zstack` (the only way to build an
+app-level modal like the media viewer) registers no occluder at all, so the
+gesture engine still arms targets painted under the overlay.
+
+Observed on hydrolysis `a97f58f` / waterui `697f5a29` at 1400pt. The media
+viewer is a `zstack((content_column, nav_buttons)).alignment(Center)`
+layer; clicking the › chevron at (1345,480) delivered BOTH the button
+action (`viewer_step(1)`, logged once) AND the `on_tap` of a media row
+beneath the overlay (`open_viewer` — the viewer jumped to a different
+message). One physical click reached two targets across the overlay
+boundary. The straddling-row bounds gap (r38-1/#260 shape) made the
+underlying target reachable at a point far past the bubble's painted rect;
+the overlay should have occluded it regardless of bounds correctness.
+
+Minimal repro: `zstack((scroll(List(...rows with .on_tap...)),
+when(open, || zstack((scrim_column, hstack((button, spacer, button))))))`
+— open the overlay, click a button that overlaps a row's tap region;
+expected: only the button dispatches; observed: the row's tap fires too.
+
+Workaround: none app-side — occlusion is renderer-owned. (The viewer
+buttons were first placed as a nested `when` *inside* the content column
+and never received input — the sibling-layer form is what lets them work
+at all, per the r36-2/#251 nested-`when` defect.)
+
+### Adopted this round (fixes verified live)
+
+- **waterui#1265 `View::on_key_press` / `TextField::on_submit`** — verified
+  on winit: composer `.on_submit` sends on Return (message appended live),
+  the composer hstack's `.on_key_press` handles Escape (dismiss edit bar)
+  and ArrowUp (start edit-last); the in-chat search field's `.on_submit`
+  steps to the next match; the chat-list `.on_key_press` drives
+  ArrowUp/Down/End + Enter-to-open (verified: click RC → Down highlights
+  Bob → Return opens Bob). Replaced: nothing was removed — these replace
+  hand-rolled key handling that could not exist before (r36-1/r36-4 noted
+  key events had no surface at all). `modal_escape`/`ModalInteraction`
+  stays for modal Escape (its designated API).
+- **hydrolysis#261 `Command::shortcut`** — verified: "Copy text" (Ctrl+C)
+  on message menus and "Mark as read" (Ctrl+R) / "Search in chat" (Ctrl+F)
+  render their hints in menus, and Ctrl+R marks the open chat read via the
+  window-scoped MenuShortcutRegistry.
+- **hydrolysis#262** — see the r38-1 resolution above.

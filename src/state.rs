@@ -231,6 +231,10 @@ pub struct MessageRow {
     /// opposed to `media_file` which may hold a thumbnail).
     pub play_file: i32,
     pub media_label: Str,
+    /// Media duration in seconds for playable payloads (video/animation);
+    /// renders as the m:ss corner badge on the thumbnail, as in Telegram
+    /// Desktop.
+    pub media_secs: i32,
     pub reaction_chips: Vec<ReactionChip>,
     /// Emoji the current user has chosen on this message, if any.
     pub my_reaction: Str,
@@ -462,6 +466,9 @@ pub struct ViewerRow {
     pub file: i32,
     /// True for playable payloads (video/animation); false for photos.
     pub video: bool,
+    /// Source message id — the ‹ › controls step through the chat's other
+    /// media messages from here.
+    pub msg_id: i64,
     pub caption: Str,
     pub from: Str,
 }
@@ -483,6 +490,7 @@ impl PartialEq for MessageRow {
             && self.media_file == o.media_file
             && self.play_file == o.play_file
             && self.media_label == o.media_label
+            && self.media_secs == o.media_secs
             && self.reaction_chips == o.reaction_chips
             && self.my_reaction == o.my_reaction
             && styled_row_eq(&self.styled, &o.styled)
@@ -597,6 +605,9 @@ pub struct Store {
     pub composer: Binding<Str>,
     pub reply_to: Binding<Option<i64>>,
     pub editing: Binding<Option<i64>>,
+    /// Composer Escape dismissed the completion popup; re-arms on the next
+    /// edit (Telegram Desktop's dismiss-until-next-trigger behaviour).
+    pub completion_off: Binding<bool>,
     /// (from_chat_id, message_id) of the message being forwarded.
     pub forward_message: Binding<Option<(i64, i64)>>,
     /// Message ids whose spoiler spans have been revealed by tap.
@@ -1354,6 +1365,7 @@ impl Store {
             composer: Binding::container(Str::from("")),
             reply_to: Binding::default(),
             editing: Binding::default(),
+            completion_off: Binding::bool(false),
             forward_message: Binding::default(),
             revealed_spoilers: Binding::<Vec<i64>>::default(),
             translated: Binding::<std::collections::BTreeMap<i64, Str>>::default(),
@@ -1688,6 +1700,7 @@ impl Store {
             media_file: 0,
             play_file: 0,
             media_label: Str::from(media.to_string()),
+            media_secs: 0,
             reaction_chips: Self::demo_chips(reactions),
             failed: false,
             pending: false,
@@ -1852,6 +1865,16 @@ impl Store {
             a.media_file = 1;
             a.album_id = 777;
             msgs.push(a);
+        }
+        // A video bubble: thumbnail already local (file 1, the seeded PNG),
+        // payload still downloading — Desktop draws the m:ss duration badge
+        // on the thumbnail corner in this state.
+        {
+            let mut v = m(43, "Alice", "clip.mp4", "09:58", false, false, "", "", "", "video");
+            v.media_file = 1;
+            v.play_file = 2;
+            v.media_secs = 65;
+            msgs.push(v);
         }
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
@@ -2045,11 +2068,11 @@ impl Store {
     }
 
 #[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
-    fn content_preview(content: &enums::MessageContent) -> (Str, i32, Str, i32) {
-        // (text/caption, thumbnail/preview file id, media label, playable file id)
+    fn content_preview(content: &enums::MessageContent) -> (Str, i32, Str, i32, i32) {
+        // (text/caption, thumbnail file id, media label, playable file id, secs)
         match content {
             enums::MessageContent::MessageText(t) => {
-                (t.text.text.clone().into(), 0, Str::from(""), 0)
+                (t.text.text.clone().into(), 0, Str::from(""), 0, 0)
             }
             enums::MessageContent::MessagePhoto(p) => {
                 let file = p
@@ -2067,6 +2090,7 @@ impl Store {
                     },
                     file,
                     "Photo".into(),
+                    0,
                     0,
                 )
             }
@@ -2087,6 +2111,7 @@ impl Store {
                     .unwrap_or_default(),
                 "Video".into(),
                 v.video.video.id,
+                v.video.duration,
             ),
             enums::MessageContent::MessageDocument(d) => (
                 format!("Document: {}", d.document.file_name).into(),
@@ -2097,12 +2122,14 @@ impl Store {
                     .unwrap_or_default(),
                 "Document".into(),
                 0,
+                0,
             ),
             enums::MessageContent::MessageAudio(a) => (
                 format!("Audio: {}", a.audio.title).into(),
                 0,
                 "Audio".into(),
                 a.audio.audio.id,
+                a.audio.duration,
             ),
             enums::MessageContent::MessageVoiceNote(v) => {
                 (
@@ -2110,6 +2137,7 @@ impl Store {
                     0,
                     "Voice".into(),
                     v.voice_note.voice.id,
+                    v.voice_note.duration,
                 )
             }
             enums::MessageContent::MessageVideoNote(v) => {
@@ -2122,12 +2150,14 @@ impl Store {
                         .unwrap_or_default(),
                     "Video note".into(),
                     v.video_note.video.id,
+                    v.video_note.duration,
                 )
             }
             enums::MessageContent::MessageSticker(s) => (
                 format!("{} Sticker", s.sticker.emoji).into(),
                 0,
                 "Sticker".into(),
+                0,
                 0,
             ),
             enums::MessageContent::MessageAnimation(a) => (
@@ -2139,9 +2169,10 @@ impl Store {
                     .unwrap_or_default(),
                 "GIF".into(),
                 a.animation.animation.id,
+                a.animation.duration,
             ),
             enums::MessageContent::MessageLocation(_) => {
-                ("Location".into(), 0, "Location".into(), 0)
+                ("Location".into(), 0, "Location".into(), 0, 0)
             }
             enums::MessageContent::MessageContact(c) => (
                 format!("Contact: {} {}", c.contact.first_name, c.contact.last_name)
@@ -2149,9 +2180,10 @@ impl Store {
                 0,
                 "Contact".into(),
                 0,
+                0,
             ),
             enums::MessageContent::MessagePoll(p) => {
-                (format!("Poll: {}", p.poll.question.text).into(), 0, "Poll".into(), 0)
+                (format!("Poll: {}", p.poll.question.text).into(), 0, "Poll".into(), 0, 0)
             }
             enums::MessageContent::MessageCall(c) => (
                 format!(
@@ -2162,18 +2194,19 @@ impl Store {
                 0,
                 "Call".into(),
                 0,
+                0,
             ),
             enums::MessageContent::MessageChatAddMembers(_) => {
-                ("New members joined".into(), 0, Str::from(""), 0)
+                ("New members joined".into(), 0, Str::from(""), 0, 0)
             }
             enums::MessageContent::MessageChatJoinByLink
             | enums::MessageContent::MessageChatJoinByRequest => {
-                ("Joined the chat".into(), 0, Str::from(""), 0)
+                ("Joined the chat".into(), 0, Str::from(""), 0, 0)
             }
             enums::MessageContent::MessagePinMessage(_) => {
-                ("Pinned a message".into(), 0, Str::from(""), 0)
+                ("Pinned a message".into(), 0, Str::from(""), 0, 0)
             }
-            _ => ("Unsupported message".into(), 0, Str::from(""), 0),
+            _ => ("Unsupported message".into(), 0, Str::from(""), 0, 0),
         }
     }
 
@@ -2256,7 +2289,7 @@ impl Store {
     /// may borrow the caches and kick off file downloads.
     #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
     pub fn message_row(&self, m: &types::Message) -> MessageRow {
-        let (mut text, media_file, media_label, play_file) = Self::content_preview(&m.content);
+        let (mut text, media_file, media_label, play_file, media_secs) = Self::content_preview(&m.content);
         if let enums::MessageContent::MessageText(t) = &m.content {
             text = t.text.text.clone().into();
         }
@@ -2310,7 +2343,7 @@ impl Store {
                 r.content
                     .as_ref()
                     .map(|c| {
-                        let (t, _, l, _) = Self::content_preview(c);
+                        let (t, _, l, _, _) = Self::content_preview(c);
                         if t.is_empty() {
                             l
                         } else {
@@ -2477,6 +2510,7 @@ impl Store {
             media_file,
             play_file,
             media_label,
+            media_secs,
             reaction_chips: reactions,
             my_reaction,
             failed,
@@ -2510,7 +2544,7 @@ impl Store {
 
 #[allow(if_else_view)] // when() requires a signal; conditions here are plain bools
     fn preview_text(&self, m: &types::Message) -> Str {
-        let (t, _, label, _) = Self::content_preview(&m.content);
+        let (t, _, label, _, _) = Self::content_preview(&m.content);
         if matches!(m.content, enums::MessageContent::MessageText(_)) {
             t
         } else if t.is_empty() {
@@ -2966,7 +3000,7 @@ impl Store {
             }
             enums::Update::MessageContent(u) => {
                 if u.chat_id == self.open_chat.get() {
-                    let (text, media, label, play) = Self::content_preview(&u.new_content);
+                    let (text, media, label, play, _) = Self::content_preview(&u.new_content);
                     self.update_message_row(u.message_id, |r| {
                         r.text = text.clone();
                         r.media_file = media;
@@ -3715,7 +3749,7 @@ impl Store {
     async fn refresh_pinned(&self, chat_id: i64) {
         match functions::get_chat_pinned_message(chat_id, self.client_id.get()).await {
             Ok(enums::Message::Message(m)) => {
-                let (t, _, label, _) = Self::content_preview(&m.content);
+                let (t, _, label, _, _) = Self::content_preview(&m.content);
                 self.pinned_id.set(m.id);
                 self.pinned_label
                     .set(if t.is_empty() { label } else { t });
@@ -3745,7 +3779,7 @@ impl Store {
                 .messages
                 .iter()
                 .map(|m| {
-                    let (t, _, label, _) = Self::content_preview(&m.content);
+                    let (t, _, label, _, _) = Self::content_preview(&m.content);
                     PinnedRow {
                         id: m.id,
                         label: if t.is_empty() { label } else { t },
@@ -3947,7 +3981,7 @@ impl Store {
                     .messages
                     .iter()
                     .map(|m| {
-                        let (t, _, label, _) = Store::content_preview(&m.content);
+                        let (t, _, label, _, _) = Store::content_preview(&m.content);
                         SharedLinkRow {
                             id: m.id,
                             title: if t.is_empty() { label } else { t },
@@ -4010,6 +4044,7 @@ impl Store {
                 media_file: 0,
                 play_file: 0,
                 media_label: Str::from(""),
+                media_secs: 0,
                 reaction_chips: Vec::new(),
                 my_reaction: Str::from(""),
                 styled: StyledStr::empty(),
@@ -4471,9 +4506,37 @@ impl Store {
         self.viewer.set(Some(ViewerRow {
             file,
             video,
+            msg_id: row.id,
             caption: row.text.clone(),
             from: row.sender.clone(),
         }));
+    }
+
+    /// Step the open viewer to the chat's previous/next media message
+    /// (Desktop's ‹ › chevrons and ←/→ keys). `delta` -1 = earlier, +1 =
+    /// later. Returns false at either end.
+    pub fn viewer_step(&self, delta: i64) -> bool {
+        let Some(cur) = self.viewer.snapshot() else {
+            return false;
+        };
+        let msgs = self.messages.snapshot();
+        let ids: Vec<i64> = msgs
+            .iter()
+            .filter(|r| r.media_file != 0 || r.play_file != 0)
+            .map(|r| r.id)
+            .collect();
+        let Some(i) = ids.iter().position(|&id| id == cur.msg_id) else {
+            return false;
+        };
+        let j = i as i64 + delta;
+        if j < 0 || j >= ids.len() as i64 {
+            return false;
+        }
+        let Some(row) = msgs.iter().find(|r| r.id == ids[j as usize]).cloned() else {
+            return false;
+        };
+        self.open_viewer(&row);
+        true
     }
 
     pub fn close_viewer(&self) {
@@ -5036,6 +5099,180 @@ impl Store {
         }));
     }
 
+    /// Composer Return (`TextField::on_submit`, waterui#1265): accept the
+    /// top completion when the @/: popup is open — Enter picks the
+    /// suggestion rather than sending, like Desktop — otherwise send.
+    pub fn submit_composer(&self) {
+        if self.accept_top_completion() {
+            return;
+        }
+        self.send();
+    }
+
+    /// Apply the first visible completion row (emoji or @mention). Returns
+    /// true when a popup was open and consumed the Enter.
+    pub fn accept_top_completion(&self) -> bool {
+        if self.completion_off.snapshot() {
+            return false;
+        }
+        let q = self.composer.snapshot();
+        if let Some(sug) = Self::emoji_suggest(&q).into_iter().next() {
+            self.apply_emoji(&sug.emoji);
+            return true;
+        }
+        if let Some(tok) = Self::mention_token(&q) {
+            let t = tok.to_lowercase();
+            if let Some(m) = self.members.snapshot().iter().find(|m| {
+                !m.username.is_empty()
+                    && (m.username.to_lowercase().starts_with(&t)
+                        || m.name.to_lowercase().starts_with(&t)
+                        || t.is_empty())
+            }) {
+                let u = m.username.clone();
+                self.apply_mention(&u);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Composer Escape (Desktop order): dismiss the completion popup, then
+    /// cancel edit, then cancel reply. Returns true when it consumed one.
+    pub fn composer_escape(&self) -> bool {
+        if !self.completion_off.snapshot()
+            && (!Self::emoji_suggest(&self.composer.snapshot()).is_empty()
+                || Self::mention_token(&self.composer.snapshot()).is_some())
+        {
+            self.completion_off.set(true);
+            return true;
+        }
+        if self.editing.snapshot().is_some() {
+            self.editing.set(None);
+            self.composer.set_from("");
+            return true;
+        }
+        if self.reply_to.snapshot().is_some() {
+            self.reply_to.set(None);
+            return true;
+        }
+        false
+    }
+
+    /// ArrowUp in an empty composer edits the last editable outgoing
+    /// message (Telegram Desktop). Returns false when nothing qualifies.
+    pub fn edit_last_own(&self) -> bool {
+        if !self.composer.snapshot().is_empty() || self.editing.snapshot().is_some() {
+            return false;
+        }
+        let Some(row) = self
+            .messages
+            .snapshot()
+            .iter()
+            .rev()
+            .find(|r| r.outgoing && r.can_edit && !r.is_service)
+            .cloned()
+        else {
+            return false;
+        };
+        self.start_edit(&row);
+        true
+    }
+
+    /// Sidebar ArrowUp/Down: move `list_selection` to the adjacent row in
+    /// the current filtered order (search filter applied). Pointer clicks
+    /// focus a row's inner press slot rather than the ListRow, so the
+    /// framework's own arrow handling never sees them (hydrolysis#220) —
+    /// this bubbling `on_key_press` covers that path. Returns whether the
+    /// selection moved.
+    pub fn list_nav(&self, down: bool) -> bool {
+        let q = self.search.snapshot().to_string().to_lowercase();
+        let rows: Vec<i64> = self
+            .chats
+            .snapshot()
+            .iter()
+            .filter(|r| {
+                q.is_empty()
+                    || r.title.to_lowercase().contains(&q)
+                    || r.preview.to_lowercase().contains(&q)
+            })
+            .map(|r| r.id)
+            .collect();
+        if rows.is_empty() {
+            return false;
+        }
+        let cur = self
+            .list_selection
+            .snapshot()
+            .or_else(|| self.selected.snapshot());
+        let next = match cur.and_then(|id| rows.iter().position(|&r| r == id)) {
+            Some(i) => {
+                let j = if down {
+                    (i + 1).min(rows.len() - 1)
+                } else {
+                    i.saturating_sub(1)
+                };
+                rows[j]
+            }
+            None => {
+                if down {
+                    rows[0]
+                } else {
+                    rows[rows.len() - 1]
+                }
+            }
+        };
+        if Some(next) == cur {
+            return false;
+        }
+        self.list_selection.set(Some(next));
+        true
+    }
+
+    /// Enter in the sidebar search opens the top result — first matching
+    /// local chat, else the first global message hit (Desktop behaviour).
+    pub fn open_top_hit(&self) -> bool {
+        let q = self.search.snapshot().to_string().to_lowercase();
+        if q.is_empty() {
+            return false;
+        }
+        if let Some(r) = self.chats.snapshot().iter().find(|r| {
+            r.title.to_lowercase().contains(&q) || r.preview.to_lowercase().contains(&q)
+        }) {
+            self.select_chat(r.id);
+            return true;
+        }
+        if let Some(h) = self.msg_results.snapshot().first().cloned() {
+            self.open_hit(&h);
+            return true;
+        }
+        false
+    }
+
+    /// Folder chip "Mark all as read" (Desktop's folder context menu):
+    /// clears unread on every chat in the folder (-1 = archive).
+    pub fn mark_folder_read(&self, folder: i32) {
+        let ids: Vec<i64> = self
+            .chats
+            .snapshot()
+            .iter()
+            .filter(|r| {
+                if folder == -1 {
+                    r.in_archive
+                } else {
+                    r.folder_id == folder
+                }
+            })
+            .map(|r| r.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.mark_read(id);
+        }
+        self.notify("Marked all as read");
+    }
+
     /// Shared composer send path. `options` applies to text sends only —
     /// attachments always go immediately for now.
     fn send_opt(&self, options: Option<types::MessageSendOptions>) {
@@ -5143,6 +5380,7 @@ impl Store {
             media_file: 0,
             play_file: 0,
             media_label: Str::from(""),
+            media_secs: 0,
             reaction_chips: Vec::new(),
             failed: false,
             pending: true,

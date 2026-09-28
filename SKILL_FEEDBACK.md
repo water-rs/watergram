@@ -331,3 +331,37 @@ positives observed. (Patterns from earlier rounds folded in.)
   - `manual_binding_mutation` correctly flagged `binding.set(x.into())`
     twice → `set_from(x)`; `needless_anyview` flagged two tail `.anyview()`
     calls inside a `vstack` tuple. Zero false positives this round.
+
+## r40
+
+- **`when(cond)` rebuilds only on the bool edge — a viewer-style overlay
+  driven by a `Binding<Option<Row>>` is static after mount.** I placed
+  `when(viewer_open, || viewer_layer(...))` and read `store.viewer
+  .snapshot()` inside the layer: opening once worked, but stepping to
+  another row (`Some(a) → Some(b)` keeps the condition `true`) never
+  rebuilt the layer — the caption/media stayed on the first row and the
+  ‹ › buttons looked "dead" (their action ran fine; the view just
+  didn't change). Took a full instrumented round to see it. Correct
+  form: pull row-driven bits into `Computed`s (`text(store.viewer
+  .map(..))`) and rebuild only identity-changing nodes via
+  `watch(viewer.map(|v| v.msg_id), ..)` — `Photo::new` takes
+  `Computed<Url>` directly (reactive), while `video_player` takes a
+  constant `MediaItem` so it needs the rebuild.
+  - **Fix:** `when` reference should state explicitly: "rebuilds the
+    branch when the condition's boolean value changes; an `Option`'s
+    payload changing does NOT rebuild" + one line pointing to `watch`
+    for identity-keyed subtrees.
+- **`on_key_press` bubbles from the focused node up its ancestor chain
+  — a handler on a *sibling* layer never sees keys focused elsewhere.**
+  I first attached it to the content column inside a viewer `zstack`;
+  after clicking a nav button in the sibling layer, ←/→ went dead
+  because the focused button's ancestors don't include the content
+  column. Attach to the overlay root.
+  - **Fix:** a one-liner in the key-handling docs: "bubbling follows
+    the focus chain — put the handler on a common ancestor."
+- **`icon_button`/`Frame` trap (from the FAB):** `.size()` returns a
+  `Frame` that is not `Clone` — you cannot feed one to another modifier
+  chain; and `.padding()` takes no argument — uniform padding is
+  `.padding_with((v, h))`. Both cost compile cycles.
+- **Lint candidates (new this round):** none — `cargo dylint --all`
+  clean on all new code.
