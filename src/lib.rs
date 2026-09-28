@@ -201,6 +201,8 @@ mod tests {
             order,
             unread: 0,
             unread_mentions: 0,
+            unread_reactions: 0,
+            auto_delete: 0,
             pinned: false,
             muted: false,
             photo_file: 0,
@@ -236,6 +238,7 @@ mod tests {
             pending: false,
             highlighted: false,
             unread_divider: false,
+            unread_reaction: false,
             day: 0,
             day_header: false,
             day_label: "".into(),
@@ -764,7 +767,7 @@ mod tests {
         // The menu carries the bubble as preview and the strip as accessory.
         let _ = ui;
         let outgoing = msg(1, "mine", true);
-        let menu = ContextMenu::new(views::bubble_menu_items(&outgoing, false))
+        let menu = ContextMenu::new(views::bubble_menu_items(&outgoing, false, true))
             .accessory(views::reaction_strip_for_test(&outgoing));
         assert!(menu.accessory.is_some());
         let items = menu.items.snapshot();
@@ -775,18 +778,19 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(commands.len(), 7); // Reply Edit Copy Pin Forward Select Delete
+        assert_eq!(commands.len(), 8); // Reply Edit Copy Link Pin Forward Select Delete
         assert_eq!(items.iter().filter(|i| matches!(i, MenuItem::Divider)).count(), 1);
         let delete = commands.last().unwrap();
         assert_eq!(delete.role, CommandRole::Destructive);
         // Incoming rows omit Edit (own messages only).
         let incoming = msg(2, "theirs", false);
-        let items = views::bubble_menu_items(&incoming, false)
+        let items = views::bubble_menu_items(&incoming, false, false)
             .into_menu_items()
             .snapshot();
+        // Incoming: no Edit; Translate added; no Copy link (linkable=false).
         assert_eq!(
             items.iter().filter(|i| matches!(i, MenuItem::Command(_))).count(),
-            6
+            7
         );
     }
 
@@ -1823,6 +1827,8 @@ mod tests {
                     order: 0,
                     unread: 12,
                     unread_mentions: 0,
+                    unread_reactions: 0,
+                    auto_delete: 0,
                     pinned: false,
                     muted: false,
                     marked_unread: false,
@@ -1906,6 +1912,8 @@ mod tests {
                     order: 0,
                     unread: 12,
                     unread_mentions: 2,
+                    unread_reactions: 0,
+                    auto_delete: 0,
                     pinned: false,
                     muted: false,
                     marked_unread: false,
@@ -4227,6 +4235,120 @@ mod tests {
         assert!(store.chats.snapshot().iter().find(|r| r.id == 4).unwrap().muted);
         store.toggle_mute(4);
         assert!(!store.chats.snapshot().iter().find(|r| r.id == 4).unwrap().muted);
+    }
+
+    /// r39 pick: Translate swaps the bubble body for the translation and
+    /// "Show original" restores it (demo canned translation; the real path
+    /// calls `translateMessageText`).
+    #[test]
+    fn translate_swaps_and_restores() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 10)
+            .expect("demo msg 10");
+        store.translate_message(&row);
+        let m = store.translated.snapshot();
+        assert!(m.get(&10).unwrap().starts_with("[EN]"));
+        store.untranslate(10);
+        assert!(!store.translated.snapshot().contains_key(&10));
+    }
+
+    /// r39 pick: Copy link writes the message's t.me link to the clipboard
+    /// binding and raises the toast (demo synthesises the link; the real
+    /// path calls `getMessageLink`).
+    #[test]
+    fn copy_link_writes_clipboard() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 12)
+            .expect("demo msg 12");
+        store.copy_link(&row);
+        assert_eq!(
+            store.clipboard.snapshot().as_str(),
+            "https://t.me/watergram/12"
+        );
+        assert_eq!(store.notice.snapshot().1.as_str(), "Link copied");
+    }
+
+    /// r39 pick: the floating ❤ button jumps to the first unread-reaction
+    /// message and clears the chat's unread-reaction count — parallel to
+    /// `mention_jump`.
+    #[test]
+    fn reaction_jump_jumps_and_clears() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        assert_eq!(
+            store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().unread_reactions,
+            2
+        );
+        store.reaction_jump();
+        let msgs = store.messages.snapshot();
+        let hit = msgs.iter().find(|r| r.id == 12).expect("demo msg 12");
+        assert!(hit.highlighted, "jump target flash-highlighted");
+        assert!(!hit.unread_reaction, "flag consumed on jump");
+        assert_eq!(
+            store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().unread_reactions,
+            0
+        );
+    }
+
+    /// r39 pick: the Auto-delete submenu writes `message_auto_delete_time`
+    /// on the chat row (demo path; real path calls
+    /// `setChatMessageAutoDeleteTime`), and Off clears it.
+    #[test]
+    fn auto_delete_sets_and_clears() {
+        let store = store();
+        store.seed_demo();
+        // Alice is seeded with a 24 h timer.
+        assert_eq!(
+            store.chats.snapshot().iter().find(|r| r.id == 2).unwrap().auto_delete,
+            86_400
+        );
+        store.set_auto_delete(2, 0);
+        assert_eq!(
+            store.chats.snapshot().iter().find(|r| r.id == 2).unwrap().auto_delete,
+            0
+        );
+        store.set_auto_delete(1, 604_800);
+        assert_eq!(
+            store.chats.snapshot().iter().find(|r| r.id == 1).unwrap().auto_delete,
+            604_800
+        );
+        assert_eq!(store.notice.snapshot().1.as_str(), "Auto-delete: 1 week");
+    }
+
+    /// r39 pick: Copy image resolves the photo's local file and decodes it
+    /// (the arboard write itself is X11-dependent, so the test asserts the
+    /// decode path plus the toast dispatch, not the OS clipboard).
+    #[test]
+    fn copy_image_decodes_demo_photo() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let row = store
+            .messages
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 17)
+            .expect("demo photo msg 17");
+        // file_signal(1) resolves to the seeded PNG (state.rs writes it).
+        let path = store.file_signal(row.media_file).snapshot().to_string();
+        assert!(!path.is_empty());
+        let img = image::open(&path).expect("demo PNG decodes");
+        assert_eq!((img.width(), img.height()), (640, 360));
+        store.copy_image(&row);
+        assert!(!store.notice.snapshot().1.is_empty());
     }
 
 }

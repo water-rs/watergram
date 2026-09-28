@@ -313,3 +313,21 @@ positives observed. (Patterns from earlier rounds folded in.)
     mutation")]` because MsgHit is rebuilt per hit, not mutated in place.
     Kept as an `#[expect]` per the false-positive rule; arguably the
     lint could special-case "fields consumed only at row build time".
+
+## r39
+
+- **Popup menus are separate winit windows** — `.context_menu(...)` and
+  `Menu` button popups on hydrolysis mount via `PopupWindowManager` as
+  their own OS window (hydrolysis `winit_runner.rs` `PendingWindow::popup`),
+  NOT an in-window overlay. Under Xvfb with no compositor,
+  `import -window <main>` returns black where the popup obscures the main
+  window — I mistook a correctly-rendering popup for a "solid black box"
+  regression and lost a cycle bisecting it. Capture `-window root` (root
+  composites all windows) or `import -window <popup-id>` directly
+  (`xwininfo -root -tree` lists popup windows by size).
+  - **Fix:** if the skill ever documents live-testing popups, note that
+    popups are sibling windows; screenshot tooling must composite.
+- **Lint candidates (new this round):**
+  - `manual_binding_mutation` correctly flagged `binding.set(x.into())`
+    twice → `set_from(x)`; `needless_anyview` flagged two tail `.anyview()`
+    calls inside a `vstack` tuple. Zero false positives this round.

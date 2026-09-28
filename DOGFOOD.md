@@ -2986,6 +2986,10 @@ in the app.
 
 ### r38-1: a context-menu item over a straddling photo row loses the click to the photo's gesture region — media viewer opens instead of the command
 
+**Filed as water-rs/hydrolysis#260; fix in progress upstream. Same
+unclipped-bounds family as hydrolysis#252 — if #252's fix clips the row
+region to the viewport this symptom clears with it.**
+
 Observed on hydrolysis `ad9165d` / waterui `927f5d3` at 600pt width
 (captures: `shots/r38_ctx600b.png` showing the menu, `shots/r38_del600.png`
 showing the photo viewer that opened instead). A message bubble's

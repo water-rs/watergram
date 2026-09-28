@@ -49,7 +49,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, MsgHit, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store, ViewerRow};
+use crate::state::{auto_delete_label, highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, MsgHit, PackRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store, ViewerRow};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::account_group;
@@ -70,6 +70,7 @@ use mdi::delete_sweep;
 use mdi::dots_vertical;
 use mdi::account_plus;
 use mdi::emoticon;
+use mdi::heart;
 use mdi::link_variant;
 use mdi::file;
 use mdi::image_outline;
@@ -796,6 +797,19 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
             }
         }
     };
+    // Unread-reaction "❤" badge: same M3 badge pill, left of the "@"
+    // badge (Telegram Desktop shows both for unread mentions/reactions).
+    let reaction_badge: AnyView = if row.unread_reactions > 0 {
+        heart()
+            .tint(AccentForeground)
+            .size(10.0, 10.0)
+            .padding_with((4.0, 4.0))
+            .background(RoundedRectangle::new(0.5).fill(Accent))
+            .a11y_label(format!("{} unread reactions", row.unread_reactions))
+            .anyview()
+    } else {
+        spacer().width(0.0).anyview()
+    };
     // Unread-mention "@" badge: same M3 badge pill as the unread count,
     // sitting to its left (Telegram Desktop's row layout).
     let mention_badge: AnyView = if row.unread_mentions > 0 {
@@ -884,6 +898,18 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                     } else {
                         spacer().width(0.0).anyview()
                     },
+                    if row.auto_delete > 0 {
+                        clock_outline()
+                            .tint(MutedForeground)
+                            .size(13.0, 13.0)
+                            .a11y_label(format!(
+                                "Auto-delete: {}",
+                                auto_delete_label(row.auto_delete)
+                            ))
+                            .anyview()
+                    } else {
+                        spacer().width(0.0).anyview()
+                    },
                     spacer(),
                     when(row.online, || text("●").caption().foreground(Accent)),
                     // Desktop hides the timestamp while the hover ⋮ covers it.
@@ -899,6 +925,7 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                 hstack((
                     preview_line,
                     spacer(),
+                    reaction_badge,
                     mention_badge,
                     badge,
                 ))
@@ -945,6 +972,16 @@ fn chat_row_menu(
         }
         .action(move |store: Store| store.toggle_archive(id)),
         if row.muted { "Unmute" } else { "Mute" }.action(move |store: Store| store.toggle_mute(id)),
+        // Auto-delete timer submenu (Desktop's "Auto-delete messages").
+        Menu::new(
+            "Auto-delete",
+            (
+                "Off".action(move |store: Store| store.set_auto_delete(id, 0)),
+                "1 day".action(move |store: Store| store.set_auto_delete(id, 86_400)),
+                "1 week".action(move |store: Store| store.set_auto_delete(id, 604_800)),
+                "1 month".action(move |store: Store| store.set_auto_delete(id, 2_592_000)),
+            ),
+        ),
         "Join chat".action(move |store: Store| store.join(id)),
         "Clear history".action(move |store: Store| store.clear_history(id)),
         "Leave chat".action(move |store: Store| store.leave(id)),
@@ -1698,6 +1735,18 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         })
         .distinct();
     let has_mentions = open_mentions.is_positive().distinct();
+    // Open chat's unread-reaction count drives the floating ❤ button.
+    let open_reactions = store
+        .chats
+        .zip(&store.selected)
+        .map(|(rows, open)| {
+            open.and_then(|id| {
+                rows.iter().find(|r| r.id == id).map(|r| r.unread_reactions)
+            })
+            .unwrap_or(0)
+        })
+        .distinct();
+    let has_reactions = open_reactions.is_positive().distinct();
     // Open chat's unread count drives the floating catch-up chip.
     let open_unread = store
         .chats
@@ -1756,7 +1805,29 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                         .a11y_role(AccessibilityRole::Button),
                 )),
             ))
-            // Stacks above the catch-up chip (Desktop: @ over ↓).
+            // Stacks above the ❤ button (Desktop: @ over ❤ over ↓).
+            .padding_with([0.0, 188.0, 0.0, 16.0])
+        }),
+        // Floating ❤ button — jumps to the first message with unread
+        // reactions (Desktop parity, same slot family as the @ button).
+        when(has_reactions, move || {
+            vstack((
+                spacer(),
+                hstack((
+                    spacer(),
+                    heart()
+                        .tint(AccentForeground)
+                        .size(20.0, 20.0)
+                        .padding_with(10.0)
+                        .background(Circle.fill(Accent))
+                        // hydrolysis#221 workaround: hide the leaf so the
+                        // gesture emits the single named Button node.
+                        .a11y_hidden(true)
+                        .on_tap(|store: Store| store.reaction_jump())
+                        .a11y_label("Jump to the unread reaction")
+                        .a11y_role(AccessibilityRole::Button),
+                )),
+            ))
             .padding_with([0.0, 136.0, 0.0, 16.0])
         }),
         // Floating "N unread ↓" catch-up chip — Desktop's bottom-right
@@ -2137,7 +2208,7 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
         parts.push(poll_block(row.id, poll).anyview());
     }
     if has_text {
-        if emoji_n > 0 {
+        let text_part: AnyView = if emoji_n > 0 {
             let size = if emoji_n <= 3 {
                 44.0
             } else if emoji_n <= 8 {
@@ -2145,11 +2216,11 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             } else {
                 26.0
             };
-            parts.push(text(body_text.clone()).size(size).anyview());
+            text(body_text.clone()).size(size).anyview()
         } else if row.search_hit && !row.search_styled.is_empty() {
             // In-chat search match: the body renders with every occurrence
             // highlighted via span `background` (Desktop parity; r35).
-            parts.push(text(row.search_styled.clone()).body().anyview());
+            text(row.search_styled.clone()).body().anyview()
         } else if has_styled {
             if row.has_spoiler {
                 // Desktop masks spoiler spans until tapped. The mask is a
@@ -2165,27 +2236,54 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
                 // reveal, taking its gesture region with it (r32-3: regions
                 // also sit ~15px below paint on virtualized rows).
                 let open = masked.not();
-                parts.push(
-                    zstack((
-                        text(masked_styled.clone())
-                            .body()
-                            .visible(masked.clone()),
-                        text(open_styled.clone()).body().visible(open.clone()),
-                    ))
-                    .on_tap(move |store: Store| store.reveal_spoiler(rid))
-                    .a11y_role(AccessibilityRole::Button)
-                    .a11y_label("Hidden text — tap to reveal")
-                    .a11y_state_signal(
-                        open.map(|shown| AccessibilityState::new().hidden(shown)),
-                    )
-                    .anyview(),
-                );
+                zstack((
+                    text(masked_styled.clone())
+                        .body()
+                        .visible(masked.clone()),
+                    text(open_styled.clone()).body().visible(open.clone()),
+                ))
+                .on_tap(move |store: Store| store.reveal_spoiler(rid))
+                .a11y_role(AccessibilityRole::Button)
+                .a11y_label("Hidden text — tap to reveal")
+                .a11y_state_signal(
+                    open.map(|shown| AccessibilityState::new().hidden(shown)),
+                )
+                .anyview()
             } else {
-                parts.push(text(body_styled.clone()).body().anyview());
+                text(body_styled.clone()).body().anyview()
             }
         } else {
-            parts.push(text(body_text.clone()).body().anyview());
-        }
+            text(body_text.clone()).body().anyview()
+        };
+        // r39 translate: while `translated` holds an entry the body swaps
+        // to it (both mounted, `.visible` flip — same pattern as the
+        // spoiler mask above); the caption restores the original.
+        let rid = row.id;
+        let tr_map = store.translated.clone();
+        let has_tr = tr_map
+            .map(move |m: std::collections::BTreeMap<i64, Str>| m.contains_key(&rid))
+            .distinct();
+        let tr_text = tr_map
+            .map(move |m| m.get(&rid).cloned().unwrap_or_default())
+            .computed();
+        parts.push(
+            zstack((
+                text_part.visible(has_tr.not()),
+                vstack((
+                    text(tr_text).body(),
+                    text("Translated to English — show original")
+                        .caption()
+                        .foreground(Accent)
+                        .on_tap(move |store: Store| store.untranslate(rid))
+                        .a11y_role(AccessibilityRole::Button)
+                        .a11y_label("Show original message"),
+                ))
+                .spacing(3.0)
+                .leading()
+                .visible(has_tr.clone()),
+            ))
+            .anyview(),
+        );
     }
     if has_link {
         // Desktop's link-preview card: accent bar + site name, title and
@@ -2383,7 +2481,7 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
 /// Select / Delete — the last with `CommandRole::Destructive`. The
 /// quick-reaction strip rides as the menu's `accessory` instead
 /// (waterui#1245).
-pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool) -> impl MenuView {
+pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) -> impl MenuView {
     let r1 = row.clone();
     let r2 = row.clone();
     let r3 = row.clone();
@@ -2391,16 +2489,28 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool) -> impl MenuView
     let r5 = row.id;
     let rid = row.id;
     let r11 = row.id;
+    let r_tr = row.clone();
+    let r_link = row.clone();
+    let r_img = row.clone();
     let pin_label: &'static str = if pinned {
         "Unpin message"
     } else {
         "Pin message"
     };
+    // Photo bubbles get Desktop's "Copy Image"; groups/channels get
+    // "Copy Link"; incoming text gets "Translate".
+    let is_photo = row.media_file != 0
+        && row.play_file == 0
+        && row.media_label.to_lowercase().starts_with("photo");
     (
         "Reply".action(move |store: Store| store.start_reply(&r1)),
         row.outgoing
             .then(|| "Edit".action(move |store: Store| store.start_edit(&r4))),
         "Copy text".action(move |store: Store| store.copy_message(&r3)),
+        (!row.outgoing && !row.text.is_empty())
+            .then(|| "Translate".action(move |store: Store| store.translate_message(&r_tr))),
+        linkable.then(|| "Copy link".action(move |store: Store| store.copy_link(&r_link))),
+        is_photo.then(|| "Copy image".action(move |store: Store| store.copy_image(&r_img))),
         pin_label.action(move |store: Store| {
             if pinned {
                 store.unpin_message(rid)
@@ -2486,9 +2596,17 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
             .anyview()
     });
 
+    // "Copy Link" is group/channel-only (private chats have no t.me link).
+    let linkable = store
+        .chats
+        .snapshot()
+        .iter()
+        .find(|c| c.id == store.open_chat.get())
+        .map(|c| matches!(c.kind_icon.as_str(), "group" | "channel"))
+        .unwrap_or(false);
     let bubble = bubble_view(&store, &row)
         .context_menu(
-            ContextMenu::new(bubble_menu_items(&row, pinned))
+            ContextMenu::new(bubble_menu_items(&row, pinned, linkable))
                 .preview(bubble_view(&store, &row))
                 .accessory(reaction_strip(&row)),
         )

@@ -127,6 +127,12 @@ pub struct ChatRow {
     pub unread: i32,
     /// TDLib `unread_mention_count` — renders the `@` badge on the row.
     pub unread_mentions: i32,
+    /// TDLib `unread_reaction_count` — renders the `❤` badge on the row
+    /// and drives the floating ❤ jump button in the open chat.
+    pub unread_reactions: i32,
+    /// `message_auto_delete_time` in seconds (0 = off) — a clock icon on
+    /// the row like Telegram Desktop's auto-delete indicator.
+    pub auto_delete: i32,
     pub pinned: bool,
     pub muted: bool,
     pub marked_unread: bool,
@@ -165,6 +171,8 @@ impl PartialEq for ChatRow {
             && self.order == o.order
             && self.unread == o.unread
             && self.unread_mentions == o.unread_mentions
+            && self.unread_reactions == o.unread_reactions
+            && self.auto_delete == o.auto_delete
             && self.pinned == o.pinned
             && self.muted == o.muted
             && self.marked_unread == o.marked_unread
@@ -266,6 +274,9 @@ pub struct MessageRow {
     /// Render the "Unread messages" divider above this row (first incoming
     /// message after `last_read_inbox_message_id`).
     pub unread_divider: bool,
+    /// First message carrying unread reactions — the floating ❤ button
+    /// jumps here (set from `updateMessageUnreadReactions` / demo seed).
+    pub unread_reaction: bool,
     /// Local-calendar day (`NaiveDate::num_days_from_ce`) the message was
     /// sent; 0 when unknown.
     pub day: i64,
@@ -493,6 +504,7 @@ impl PartialEq for MessageRow {
             && styled_row_eq(&self.search_styled, &o.search_styled)
             && self.mentions_me == o.mentions_me
             && self.unread_divider == o.unread_divider
+            && self.unread_reaction == o.unread_reaction
             && self.day == o.day
             && self.day_header == o.day_header
             && self.day_label == o.day_label
@@ -689,6 +701,9 @@ pub struct Store {
     pub avatar_pick: Binding<Vec<Url>>,
     /// Chat avatar picker (group admin section).
     pub chat_avatar_pick: Binding<Vec<Url>>,
+    /// Per-message translation results (message id → translated text);
+    /// the bubble swaps the body for the translation while present.
+    pub translated: Binding<std::collections::BTreeMap<i64, Str>>,
     /// Sticker picker emoji-query field.
     pub sticker_query: Binding<Str>,
     /// Media opened in the in-pane viewer overlay (`None` = closed).
@@ -1098,6 +1113,17 @@ fn demo_user_id(sender: &str) -> i64 {
     }
 }
 
+/// Label for an auto-delete timeout in seconds (Desktop's "1 day" /
+/// "1 week" / "1 month" ladder).
+pub(crate) fn auto_delete_label(secs: i32) -> &'static str {
+    match secs {
+        86_400 => "1 day",
+        604_800 => "1 week",
+        2_592_000 => "1 month",
+        _ => "custom",
+    }
+}
+
 /// First link target a `FormattedText` points at: a `TextUrl`'s url, or a
 /// `Url` entity sliced out of the text (entity offsets are UTF-16 units).
 fn first_url_entity(ft: &types::FormattedText) -> Option<Str> {
@@ -1330,6 +1356,7 @@ impl Store {
             editing: Binding::default(),
             forward_message: Binding::default(),
             revealed_spoilers: Binding::<Vec<i64>>::default(),
+            translated: Binding::<std::collections::BTreeMap<i64, Str>>::default(),
             attach: Binding::<Vec<Url>>::default(),
             clipboard: Binding::container(Str::from("")),
             new_chat_input: Binding::container(Str::from("")),
@@ -1506,6 +1533,8 @@ impl Store {
                 order,
                 unread,
                 unread_mentions: 0,
+                unread_reactions: 0,
+                auto_delete: 0,
                 pinned,
                 muted,
                 marked_unread: false,
@@ -1542,6 +1571,14 @@ impl Store {
                 1 | 9 => r.folder_id = 2,
                 2 | 6 | 8 => r.folder_id = 3,
                 10 => r.in_archive = true,
+                _ => {}
+            }
+            match r.id {
+                // Demo unread reactions on the WaterUI devs chat — the ❤
+                // badge + floating jump button mirror `unread_mentions`.
+                1 => r.unread_reactions = 2,
+                // Alice runs a 24 h auto-delete timer (row clock icon).
+                2 => r.auto_delete = 86_400,
                 _ => {}
             }
         }
@@ -1656,6 +1693,7 @@ impl Store {
             pending: false,
             highlighted: false,
             unread_divider: false,
+            unread_reaction: false,
             group_first: true,
             group_last: true,
             avatar_col: false,
@@ -1725,6 +1763,8 @@ impl Store {
         // — the media slot draws the image and tapping opens the viewer.
         msgs.last_mut().unwrap().media_file = 1;
         msgs[2].unread_divider = true;
+        // Unread-reaction jump target (mirrors updateMessageUnreadReactions).
+        msgs[2].unread_reaction = true;
         msgs.push(svc(18, "Bob joined the group"));
         // A second named sender exercises per-peer colors on the sender name
         // and the run avatar in group chats.
@@ -2446,6 +2486,7 @@ impl Store {
             search_styled: StyledStr::empty(),
             mentions_me: false,
             unread_divider: false,
+            unread_reaction: false,
             group_first: true,
             group_last: true,
             avatar_col: false,
@@ -2548,6 +2589,8 @@ impl Store {
             order,
             unread: chat.unread_count,
             unread_mentions: chat.unread_mention_count,
+            unread_reactions: chat.unread_reaction_count,
+            auto_delete: chat.message_auto_delete_time,
             pinned,
             muted,
             marked_unread: chat.is_marked_as_unread,
@@ -2780,6 +2823,20 @@ impl Store {
                 self.update_chat_row(u.chat_id, |r| {
                     r.unread_mentions = u.unread_mention_count
                 });
+            }
+            enums::Update::ChatUnreadReactionCount(u) => {
+                self.update_chat_row(u.chat_id, |r| {
+                    r.unread_reactions = u.unread_reaction_count
+                });
+            }
+            // Per-message unread reactions (supergroups/channels): flag the
+            // earliest one so the floating ❤ button can jump to it.
+            enums::Update::MessageUnreadReactions(u) => {
+                if u.chat_id == self.open_chat.get() {
+                    self.update_message_row(u.message_id, |r| {
+                        r.unread_reaction = u.unread_reaction_count > 0
+                    });
+                }
             }
             enums::Update::MessageInteractionInfo(u) => {
                 if u.chat_id == self.open_chat.get() {
@@ -3974,6 +4031,7 @@ impl Store {
                 search_styled: StyledStr::empty(),
                 mentions_me: false,
                 unread_divider: false,
+                unread_reaction: false,
                 day,
                 day_header: false,
                 day_label: Str::from(""),
@@ -4189,6 +4247,24 @@ impl Store {
         }
         let open = self.open_chat.get();
         self.update_chat_row(open, |r| r.unread_mentions = 0);
+    }
+
+    /// r39: the floating `❤` button jumps to the first message carrying
+    /// unread reactions and clears the chat's unread-reaction count
+    /// (Desktop parity with the `@` mention jump).
+    pub fn reaction_jump(&self) {
+        let target = self
+            .messages
+            .snapshot()
+            .iter()
+            .find(|r| r.unread_reaction)
+            .map(|r| r.id);
+        if let Some(id) = target {
+            self.update_message_row(id, |r| r.unread_reaction = false);
+            self.jump_to_message(id);
+        }
+        let open = self.open_chat.get();
+        self.update_chat_row(open, |r| r.unread_reactions = 0);
     }
 
     /// r35: Desktop's double-tap quick-react — toggles the default ❤️.
@@ -5072,6 +5148,7 @@ impl Store {
             pending: true,
             highlighted: false,
             unread_divider: false,
+            unread_reaction: false,
             group_first: true,
             group_last: true,
             avatar_col: false,
@@ -5703,6 +5780,117 @@ impl Store {
         self.notify("Text copied");
     }
 
+    /// Translate a message into English (`translateMessageText`); the
+    /// bubble swaps the body for the result until "Show original".
+    pub fn translate_message(&self, row: &MessageRow) {
+        let id = row.id;
+        if self.client_id.get() == 0 {
+            // Demo: canned translation so the bubble visibly swaps without
+            // a TDLib round-trip.
+            let t = Str::from(format!("[EN] {}", row.text));
+            self.translated.with_mut(|m| {
+                m.insert(id, t);
+            });
+            return;
+        }
+        let chat_id = self.open_chat.get();
+        let client = self.client_id.get();
+        let tr = self.translated.clone();
+        spawn_local(async move {
+            if let Ok(enums::FormattedText::FormattedText(ft)) =
+                functions::translate_message_text(chat_id, id, "en".into(), client).await
+            {
+                tr.with_mut(|m| {
+                    m.insert(id, ft.text.into());
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Restore the original text — removes the inline translation.
+    pub fn untranslate(&self, message_id: i64) {
+        self.translated.with_mut(|m| {
+            m.remove(&message_id);
+        });
+    }
+
+    /// Copy the message's public `t.me` link (`getMessageLink`) to the
+    /// clipboard — private chats return an error, hence the notify path.
+    pub fn copy_link(&self, row: &MessageRow) {
+        let id = row.id;
+        if self.client_id.get() == 0 {
+            let link = format!("https://t.me/watergram/{id}");
+            self.clipboard.set_from(link.clone());
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                let _ = cb.set_text(link);
+            }
+            self.notify("Link copied");
+            return;
+        }
+        let chat_id = self.open_chat.get();
+        let client = self.client_id.get();
+        let store = self.clone();
+        spawn_local(async move {
+            match functions::get_message_link(chat_id, id, 0, false, false, client).await {
+                Ok(enums::MessageLink::MessageLink(l)) => {
+                    store.clipboard.set_from(l.link.clone());
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(l.link);
+                    }
+                    store.notify("Link copied");
+                }
+                _ => store.notify("No link for this message"),
+            }
+        })
+        .detach();
+    }
+
+    /// Copy a photo message's decoded image to the system clipboard
+    /// (Desktop's "Copy Image" on photo bubbles).
+    pub fn copy_image(&self, row: &MessageRow) {
+        let path = self.file_signal(row.media_file).snapshot().to_string();
+        if path.is_empty() {
+            self.notify("No image to copy");
+            return;
+        }
+        match image::open(&path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                let data = arboard::ImageData {
+                    width: w,
+                    height: h,
+                    bytes: rgba.into_raw().into(),
+                };
+                let ok = arboard::Clipboard::new()
+                    .and_then(|mut cb| cb.set_image(data))
+                    .is_ok();
+                self.notify(if ok { "Image copied" } else { "Clipboard unavailable" });
+            }
+            Err(_) => self.notify("Could not decode image"),
+        }
+    }
+
+    /// Chat auto-delete timer (`setChatMessageAutoDeleteTime`, seconds).
+    pub fn set_auto_delete(&self, chat_id: i64, secs: i32) {
+        if self.client_id.get() == 0 {
+            self.update_chat_row(chat_id, |r| r.auto_delete = secs);
+            let msg: Str = if secs == 0 {
+                "Auto-delete off".into()
+            } else {
+                format!("Auto-delete: {}", auto_delete_label(secs)).into()
+            };
+            self.notify(msg);
+            return;
+        }
+        let client = self.client_id.get();
+        spawn_local(async move {
+            let _ = functions::set_chat_message_auto_delete_time(chat_id, secs, client).await;
+        })
+        .detach();
+    }
+
     /// Batch-copy the selected messages: texts joined by newlines in
     /// message order (Desktop's multi-select Copy keeps the selection).
     pub fn copy_selected(&self) {
@@ -5791,6 +5979,7 @@ impl Store {
             self.update_chat_row(chat_id, |r| {
                 r.unread = 0;
                 r.unread_mentions = 0;
+                r.unread_reactions = 0;
                 r.marked_unread = false;
             });
             self.demo_recount_folders();
@@ -5825,6 +6014,7 @@ impl Store {
         self.update_chat_row(chat_id, |r| {
             r.unread = 0;
             r.unread_mentions = 0;
+            r.unread_reactions = 0;
             r.marked_unread = false;
         });
         self.demo_recount_folders();
@@ -7595,6 +7785,8 @@ impl Store {
             order: 0,
             unread: 0,
             unread_mentions: 0,
+            unread_reactions: 0,
+            auto_delete: 0,
             pinned: false,
             muted: false,
             marked_unread: false,
