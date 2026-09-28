@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use waterui_backend_core::widget::ModalInteraction;
 use waterui::component::list::{List, ListItem};
-use waterui::component::menu::{MenuView, Shortcut};
-use waterui::key::{Key, KeyHandling, KeyPress, NamedKey};
+use waterui::component::menu::{Command, MenuView, Shortcut};
+use waterui::key::{Key, KeyHandling, KeyPress, Modifiers, NamedKey};
 use waterui::layout::frame::Frame;
 use waterui::graphics::GpuSurface;
 use crate::capture::VideoNoteGpu;
@@ -50,7 +50,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{auto_delete_label, highlight_styled, AccountRow, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, SearchRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store};
+use crate::state::{auto_delete_label, highlight_styled, AccountRow, BotCmd, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, SearchRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::image;
@@ -112,6 +112,25 @@ pub fn root(store: Store) -> impl View {
         Screen::Register => register_screen(inner.clone()).anyview(),
         Screen::Qr => qr_screen(inner.clone()).anyview(),
         Screen::Main => main_screen(inner.clone()).anyview(),
+    })
+    // Window-level chords, bubbled from whatever is focused: Alt+↑/↓
+    // switch between chats (Telegram Desktop). Must sit INSIDE the
+    // `.state(&store)` scope — handlers extract `Store` from the env at
+    // their own node, and only ancestors contribute to it.
+    .on_key_press(|Use(press): Use<KeyPress>, store: Store| {
+        if !press.modifiers.contains(Modifiers::ALT) {
+            return KeyHandling::Ignored;
+        }
+        match press.key {
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                if store.chat_switch(press.key == Key::Named(NamedKey::ArrowDown)) {
+                    KeyHandling::Handled
+                } else {
+                    KeyHandling::Ignored
+                }
+            }
+            _ => KeyHandling::Ignored,
+        }
     })
     .state(&store)
     // Transient toasts: store.notify() writes (seq, msg); the window's
@@ -389,11 +408,6 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
     // Files / Links — visible whenever a query is active, even when a tab
     // yields no hits (the strip must stay so the user can switch back).
     let searching = store.search.map(|q: Str| !q.is_empty()).distinct();
-    // nami defect (DOGFOOD r41-2): clones of one `Distinct` share the dedup
-    // cell, so only the first watcher sees each transition — a second
-    // `when(searching.clone())`/`watch` would stay dead forever. Give the
-    // pane its own `distinct` instance with its own cell.
-    let show_results = store.search.map(|q: Str| !q.is_empty()).distinct();
     // The whole results pane is ONE `SignalCollection` of `SearchRow`s —
     // sections/labels/empty-state are data, so a tab switch is a
     // collection update (no nested `when`s inside the `when` payload).
@@ -739,7 +753,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             let filtered_else = filtered.clone();
             let list_sel = store.list_selection.clone();
             let rows_else = rows_store.clone();
-            when(show_results, { let rows_else = rows_else.clone(); move || {
+            when(searching.clone(), { let rows_else = rows_else.clone(); move || {
                 // One List over `SearchRow`s — the section composition is
                 // pure data (see the `search_rows` binding above).
                 let row_store = rows_else.clone();
@@ -1303,6 +1317,21 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         .zip(&store.completion_off)
         .map(|(v, off)| !v.is_empty() && !off)
         .distinct();
+    // `/` bot-command completion: a leading `/token` filters the selected
+    // chat's command table (Demo: `bot_cmds`; real path: `getCommands`).
+    let store_cmds = store.clone();
+    let botcmd_sig = store
+        .composer
+        .zip(&store.selected)
+        .map(move |(q, sel)| {
+            sel.map(|id| store_cmds.botcmd_suggest(id, &q))
+                .unwrap_or_default()
+        });
+    let botcmd_rows = SignalCollection::new(botcmd_sig.clone());
+    let botcmd_show = botcmd_sig
+        .zip(&store.completion_off)
+        .map(|(v, off)| !v.is_empty() && !off)
+        .distinct();
     let poll_open = store.poll_open.clone();
     let store_for_poll = store.clone();
     // Modal Escape scopes, cloned before `store` moves into the `when`
@@ -1731,6 +1760,12 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         let cells = store_cells.clone();
         let emoji_tab2 = emoji_tab.clone();
         let sticker_q = store.sticker_query.clone();
+        // Bound outside the `when` payload: disjoint-field capture would
+        // otherwise move `store.emoji_query` and make the payload FnOnce.
+        let emoji_q = store.emoji_query.clone();
+        // The inner `when` payload move-captures `eq2`; cloning here keeps
+        // the outer `Fn` closure borrow-only.
+        let eq2 = emoji_q.clone();
         let packs_b = store.sticker_packs.clone();
         let items_b = sticker_items.clone();
         vstack((
@@ -1743,7 +1778,44 @@ pub(crate) fn chat_column(store: Store) -> impl View {
             ))
             .spacing(4.0)
             .padding_with((2.0, 8.0)),
-            when(emoji_tab2, emoji_grid).otherwise(move || {
+            when(emoji_tab2, move || {
+                // Panel search field like Desktop's — substring match over
+                // the shortcode table; `watch` swaps the whole grid region
+                // so the filtered list never rides the late-mounted `when`
+                // payload hazard (r36-2/#251).
+                vstack((
+                    field("Emoji search", &eq2)
+                        .prompt("😀 emoji")
+                        .hide_label(),
+                    watch(eq2.clone(), move |q: Str| {
+                        let hits = Store::emoji_search(&q);
+                        if hits.is_empty() {
+                            emoji_grid().anyview()
+                        } else {
+                            scroll(vstack(hits.iter().map(|s| {
+                                let emo = s.emoji.to_string();
+                                hstack((
+                                    text(s.emoji.clone()).body(),
+                                    text!(":{n}:", n = s.name.clone())
+                                        .caption()
+                                        .muted(),
+                                    spacer(),
+                                ))
+                                .spacing(8.0)
+                                .padding_with((4.0, 8.0))
+                                .on_tap(move |store: Store| store.insert_emoji(&emo))
+                                .a11y_label(Str::from(format!("Insert :{}:", s.name)))
+                                .a11y_role(AccessibilityRole::Button)
+                                .anyview()
+                            }).collect::<Vec<_>>()))
+                            .max_height(140.0)
+                            .anyview()
+                        }
+                    }),
+                ))
+                .spacing(4.0)
+            })
+            .otherwise(move || {
                 let cells = cells.clone();
                 vstack((
                     hstack((
@@ -1854,6 +1926,25 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 .padding_with((6.0, 12.0))
                 .on_tap(move |store: Store| store.apply_emoji(&emo))
                 .a11y_label(Str::from(format!("Insert :{}:", s.name)))
+                .a11y_role(AccessibilityRole::Button)
+            })
+            .spacing(0.0)
+            .padding_with((4.0, 0.0))
+            .background(Surface)
+            .clip(RoundedRectangle::new(0.12))
+        }),
+        when(botcmd_show, move || {
+            VStack::for_each(botcmd_rows.clone(), move |c: BotCmd| {
+                let cmd = c.cmd.to_string();
+                hstack((
+                    text(Str::from(format!("/{}", c.cmd))).body(),
+                    text(c.desc.clone()).caption().muted(),
+                    spacer(),
+                ))
+                .spacing(8.0)
+                .padding_with((6.0, 12.0))
+                .on_tap(move |store: Store| store.apply_botcmd(&cmd))
+                .a11y_label(Str::from(format!("Run /{}", c.cmd)))
                 .a11y_role(AccessibilityRole::Button)
             })
             .spacing(0.0)
@@ -2355,6 +2446,37 @@ fn reaction_chip(row: &MessageRow, c: &ReactionChip, surface: ChipSurface) -> An
     let e2 = emoji.to_string();
     let label = format!("{} {}", emoji, c.count);
     let r = row.clone();
+    // Right-click a chip → who reacted, like Desktop's reaction-details
+    // list: inert name rows (+ "+N more" for counts beyond the recent
+    // window), and "Remove your reaction" when the chip is ours.
+    let mut menu_items: Vec<Command> = c
+        .reactors
+        .iter()
+        .map(|name| {
+            Command::builder(
+                text!("{name} reacted with {emoji}", name = name.clone(), emoji = emoji.clone()),
+            )
+            .action(|| {})
+            .disabled(true)
+        })
+        .collect();
+    let extra = c.count - c.reactors.len() as i32;
+    if extra > 0 && !menu_items.is_empty() {
+        menu_items.push(
+            Command::builder(text!("+{#extra} more", extra = extra))
+                .action(|| {})
+                .disabled(true),
+        );
+    }
+    if c.chosen {
+        let r3 = row.clone();
+        let e3 = emoji.to_string();
+        menu_items.push(
+            "Remove your reaction"
+                .action(move |store: Store| store.toggle_reaction(&r3, &e3))
+                .destructive(),
+        );
+    }
     let pill = text(label)
         .caption()
         .padding_with((1.0, 6.0))
@@ -2366,6 +2488,11 @@ fn reaction_chip(row: &MessageRow, c: &ReactionChip, surface: ChipSurface) -> An
             c.count,
             if c.count == 1 { "reaction" } else { "reactions" }
         ));
+    let pill = if menu_items.is_empty() {
+        pill.anyview()
+    } else {
+        pill.context_menu(menu_items).anyview()
+    };
     match (surface, c.chosen) {
         (ChipSurface::Outgoing, true) => pill
             .foreground(Accent)

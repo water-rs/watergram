@@ -461,3 +461,61 @@ positives observed. (Patterns from earlier rounds folded in.)
     `SignalExt::distinct` (suggest "derive a second instance from the
     source") would catch this at write time. Pattern:
     `let b = distinct_signal.clone()` → warn.
+
+## r42
+
+- **nami#31 fix verified** — `Distinct` dedup is now per-watcher on nami
+  dev `ebe55e7`; reverted the per-consumer `distinct` workaround in the
+  sidebar search (one shared `searching` instance feeds both `when`
+  arms again) and re-verified the second subscriber live
+  (r42_searchpane_1400: the results pane — the clone-side watcher —
+  renders matches + highlights again). The "signal-combinator traps"
+  entry from r41 should be marked *fixed upstream* rather than deleted:
+  the guidance stays useful for anyone pinned before ebe55e7.
+- **`.state(&x)`-before-handler trap hit again — with `.on_key_press`
+  and a full `Store` extract** (entry #3, now confirmed for keyboard
+  handlers too). `.state(&store).on_key_press(|_, store: Store| ..)`
+  compiles and panics on the *first keystroke*:
+  `failed to extract Store … not found at position 0; install the
+  value with .state(&value) in the handler's modifier chain or on an
+  ancestor` (waterui `core/src/foundation/handler.rs:31`). The panic
+  message is now excellent — it names the fix — but the crash is still
+  runtime-only and fires on user input, not at mount. The existing
+  lint candidate should include `.on_key_press`/`.on_key_release` in
+  its modifier list; a compile-time check would have saved a rebuild
+  cycle.
+- **`Window::new` title takes `impl IntoComputed<Str>`** — a live
+  computed title (`store.window_title()`) flows through to X11
+  WM_NAME/_NET_WM_NAME and updates when the signal changes. I had to
+  read `window.rs` to learn the title accepts a signal rather than a
+  static string — worth one line in the window reference.
+- **`Command::builder` accepts `text!` output via `IntoLabel`** —
+  `Command::builder(text!("{n} reacted with {e}", n=name, e=emoji))`
+  compiles (controls `label.rs:268` impls `IntoLabel` for `StyledStr`)
+  and was needed to stay lint-clean under `manual_string_signal`.
+  The Command/Menu reference shows string literals only.
+- **Disabled `Command`s make good info rows in context menus** —
+  per-reactor "Alice reacted with 👍" rows are
+  `Command::builder(..).action(||{}).disabled(true)`: they render as
+  dimmed non-interactive items, which is exactly the Desktop pattern.
+  Worth a snippet — menus aren't only actions.
+- **Rust 2021 disjoint-field capture, sharper instance** — a `move`
+  `when`/`watch` payload that mentions `store.emoji_query.clone()`
+  moves the *field* out of `store` (closure turns `FnOnce`). Hoist
+  `let eq = store.emoji_query.clone()` to the enclosing scope; the
+  `move` closure then captures `eq` whole. (Extends the r41 note —
+  same trap, now also inside nested `when` under `when`.)
+- **Lint candidates (new this round):**
+  - **`manual_string_signal` suggests `s!` — there is no `s!` macro.**
+    On `text!`-incompatible `format!`/`String` sites the lint's help
+    text reads "use `s!(..)`"; `s!` is not exported by the waterui
+    facade at a2e63ddd (checked: no such macro in `core`/macros
+    re-exports; `text!`/`rich_text!` are the interpolation macros).
+    Recorded `#[expect(manual_string_signal, reason="suggested s!
+    macro does not exist; Computed via map() is the signal form")]` on
+    `window_title` — false positive by suggestion, the lint itself is
+    right that a String literal isn't a signal.
+    **Fix for the lint:** point at `text!` interpolation or
+    `map().computed()` instead.
+  - **`.on_key_press` in the `.state` ordering lint** — see above;
+    extend the existing candidate's modifier list.
