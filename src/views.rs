@@ -57,11 +57,13 @@ use crate::state::{
 use mdi::account_group;
 use mdi::account_plus;
 use mdi::alert_circle;
+use mdi::alert_decagram;
 use mdi::at;
 use mdi::bell_off;
 use mdi::calendar;
 use mdi::camera;
 use mdi::check;
+use mdi::check_decagram;
 use mdi::chevron_down;
 use mdi::chevron_left;
 use mdi::chevron_right;
@@ -167,6 +169,22 @@ pub fn root(store: Store) -> impl View {
         |(_, msg): (u64, Str), sb: Option<SnackbarManager>| {
             if let Some(sb) = sb {
                 sb.show(Snackbar::new(msg));
+            }
+        },
+    )
+    // Delete snackbar with Undo (Telegram Desktop). `undo_notice` bumps
+    // only on a new batch, so a snackbar never re-fires on idle writes.
+    .on_change(
+        &store.undo_notice,
+        |(_, n): (u64, i32), sb: Option<SnackbarManager>, store: Store| {
+            if let Some(sb) = sb {
+                sb.show(
+                    Snackbar::new(format!(
+                        "Deleted {n} message{}",
+                        if n == 1 { "" } else { "s" }
+                    ))
+                    .action("Undo", move || store.undo_delete()),
+                );
             }
         },
     )
@@ -1132,6 +1150,21 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                                 Color::from(Foreground)
                             })
                     },
+                    // Verified / scam badge right after the title —
+                    // Telegram Desktop's blue check / red warning marks.
+                    match row.badge.as_str() {
+                        "verified" => check_decagram()
+                            .tint(Accent)
+                            .size(14.0, 14.0)
+                            .a11y_label("Verified")
+                            .anyview(),
+                        "scam" => alert_decagram()
+                            .tint(Error)
+                            .size(14.0, 14.0)
+                            .a11y_label("Scam")
+                            .anyview(),
+                        _ => spacer().width(0.0).anyview(),
+                    },
                     if row.muted {
                         bell_off()
                             .tint(MutedForeground)
@@ -1236,6 +1269,9 @@ fn chat_row_menu(row: &ChatRow) -> impl MenuView {
             ),
         ),
         "Join chat".action(move |store: Store| store.join(id)),
+        // Desktop's "Report" on the chat-row menu (spam flag — same call
+        // the chat action bar's Report button makes).
+        "Report".action(move |store: Store| store.report_chat(id)),
         "Clear history".action(move |store: Store| store.clear_history(id)),
         "Leave chat".action(move |store: Store| store.leave(id)),
     )
@@ -2185,7 +2221,16 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         .map(move |rows| {
             rows.iter()
                 .find(|r| r.id == chat_id)
-                .map(|r| r.title.clone())
+                .map(|r| {
+                    // The nav title slot is text-only (IntoText) — the
+                    // verification mark travels as a glyph suffix, same
+                    // position Desktop draws its badge.
+                    match r.badge.as_str() {
+                        "verified" => Str::from(format!("{} ✓", r.title)),
+                        "scam" => Str::from(format!("{} ⚠", r.title)),
+                        _ => r.title.clone(),
+                    }
+                })
                 .unwrap_or_default()
         })
         .distinct();
@@ -3883,6 +3928,7 @@ pub(crate) fn profile_view(store: Store) -> NavigationView {
     let bio = card.map(|c| c.as_ref().map(|c| c.bio.clone()).unwrap_or_default());
     let online = card.map(|c| c.as_ref().map(|c| c.online).unwrap_or(false));
     let uid = card.map(|c| c.as_ref().map(|c| c.user_id).unwrap_or(0));
+    let not_contact = card.map(|c| c.as_ref().map(|c| !c.is_contact).unwrap_or(false));
 
     // Desktop parity: username/phone/bio fields are tap-to-copy.
     let u_copy = username.clone();
@@ -3929,6 +3975,9 @@ pub(crate) fn profile_view(store: Store) -> NavigationView {
                 .a11y_role(AccessibilityRole::Button),
             hstack((
                 spacer(),
+                when(not_contact.distinct(), || {
+                    button("Add to contacts").action(|store: Store| store.profile_add_contact())
+                }),
                 button("Message").action(move |store: Store| {
                     let id = uid.snapshot();
                     if id != 0 {
@@ -3936,7 +3985,8 @@ pub(crate) fn profile_view(store: Store) -> NavigationView {
                         store.start_chat_with(id);
                     }
                 }),
-            )),
+            ))
+            .spacing(8.0),
         ))
         .spacing(10.0)
         .padding_with((12.0, 16.0)),
@@ -4515,20 +4565,12 @@ fn delete_confirm_card(store: Store) -> impl View {
             },
             hstack((
                 spacer(),
-                text("Cancel")
-                    .body()
-                    .foreground(Accent)
-                    .padding_with((6.0, 12.0))
-                    .on_tap(|store: Store| store.dismiss_delete())
-                    .a11y_role(AccessibilityRole::Button)
+                button("Cancel")
+                    .action(|store: Store| store.dismiss_delete())
                     .a11y_label("Cancel"),
-                text("Delete")
-                    .body()
-                    .bold()
+                button("Delete")
+                    .action(|store: Store| store.confirm_delete_now())
                     .foreground(Error)
-                    .padding_with((6.0, 12.0))
-                    .on_tap(|store: Store| store.confirm_delete_now())
-                    .a11y_role(AccessibilityRole::Button)
                     .a11y_label("Delete"),
             ))
             .spacing(8.0),

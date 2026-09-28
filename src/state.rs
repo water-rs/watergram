@@ -163,6 +163,12 @@ pub struct ChatRow {
     /// Private-chat peer user id — the action bar's add-contact and
     /// share-phone calls need it.
     pub peer_user: i64,
+    /// Peer verification from TDLib `verificationStatus`: "" / "verified" /
+    /// "scam" — renders the badge after the title like Telegram Desktop.
+    pub badge: Str,
+    /// Group/channel online-member count (`updateChatOnlineMemberCount`);
+    /// 0 = unknown, subtitle stays "N members".
+    pub online_count: i32,
 }
 
 /// Style metadata isn't `PartialEq`, so styled fields compare by plain text
@@ -200,6 +206,8 @@ impl PartialEq for ChatRow {
             && self.action_bar == o.action_bar
             && self.action_title == o.action_title
             && self.peer_user == o.peer_user
+            && self.badge == o.badge
+            && self.online_count == o.online_count
     }
 }
 impl Eq for ChatRow {}
@@ -795,6 +803,13 @@ pub struct Store {
     /// the revoke checkbox's current value.
     pub confirm_delete: Binding<Option<DeleteAsk>>,
     pub delete_revoke: Binding<bool>,
+    /// Rows stashed by the last confirmed delete — `undo_delete` merges
+    /// them back. Only the demo path arms it: the real path's
+    /// `deleteMessages` is server-committed and has no undelete.
+    pub undo_buffer: Rc<RefCell<Vec<MessageRow>>>,
+    /// (seq, deleted count) — the root view shows the Undo snackbar on
+    /// each new delete batch.
+    pub undo_notice: Binding<(u64, i32)>,
     /// Unread-chat count per sidebar list (TDLib `updateUnreadChatCount`):
     /// key 0 = Main (All), -1 = Archive, n = folder id.
     pub folder_unreads: Binding<HashMap<i32, i32>>,
@@ -1189,6 +1204,9 @@ pub struct ProfileCard {
     pub phone: Str,
     pub bio: Str,
     pub online: bool,
+    /// TDLib `user.is_contact` — the card's "Add to contacts" button only
+    /// shows for non-contacts (Desktop parity).
+    pub is_contact: bool,
 }
 
 /// One row of the read-only privacy summary in Settings.
@@ -1639,6 +1657,8 @@ impl Store {
             search_filter: Binding::default(),
             confirm_delete: Binding::<Option<DeleteAsk>>::default(),
             delete_revoke: Binding::bool(false),
+            undo_buffer: Rc::new(RefCell::new(Vec::new())),
+            undo_notice: Binding::container((0, 0)),
             folder_unreads: Binding::<HashMap<i32, i32>>::default(),
             demo_roster: Rc::new(RefCell::new(Vec::new())),
             demo_corpus: Rc::new(RefCell::new(Vec::new())),
@@ -1879,6 +1899,8 @@ impl Store {
                 action_bar: "".into(),
                 action_title: "".into(),
                 peer_user: 0,
+                badge: "".into(),
+                online_count: 0,
             }
         };
         // kind_icon mirrors the real path's values (state.rs `kind_icon`
@@ -2073,6 +2095,17 @@ impl Store {
                 }
                 8 => r.peer_user = 14,
                 9 => r.action_bar = "report_spam".into(),
+                _ => {}
+            }
+            // Verification badges + a live online count — the real path
+            // fills these from `verificationStatus` and
+            // `updateChatOnlineMemberCount`.
+            match r.id {
+                1 => {
+                    r.badge = "verified".into();
+                    r.online_count = 12;
+                }
+                9 => r.badge = "scam".into(),
                 _ => {}
             }
         }
@@ -2899,7 +2932,13 @@ impl Store {
                     .map(
                         |r| match (r.typing, r.kind_icon.to_string().as_str(), r.online) {
                             (true, _, _) => Str::from("typing…"),
-                            (false, "group" | "channel", _) => mc.clone(),
+                            (false, "group" | "channel", _) => {
+                                if r.online_count > 0 && !mc.is_empty() {
+                                    Str::from(format!("{}, {} online", mc, r.online_count))
+                                } else {
+                                    mc.clone()
+                                }
+                            }
                             (false, _, true) => Str::from("online"),
                             _ => Str::from(""),
                         },
@@ -3514,6 +3553,15 @@ impl Store {
                 .unwrap_or(false),
             _ => false,
         };
+        let badge = match &chat.r#type {
+            enums::ChatType::Private(p) => self
+                .users
+                .borrow()
+                .get(&p.user_id)
+                .map(Self::verification_badge)
+                .unwrap_or_default(),
+            _ => "".into(),
+        };
         let kind_icon = match &chat.r#type {
             enums::ChatType::Private(_) | enums::ChatType::Secret(_) => {
                 if chat.id == self.my_id.get() {
@@ -3586,6 +3634,8 @@ impl Store {
             action_bar,
             action_title,
             peer_user,
+            badge,
+            online_count: 0,
         };
         let mut list = self.chats.snapshot();
         match list.iter().position(|r| r.id == chat.id) {
@@ -3601,6 +3651,47 @@ impl Store {
         }
         list.sort();
         self.chats.set(list);
+        // Supergroup verification arrives with the group object, not the
+        // chat — fetch it once per upsert like Desktop does for the row
+        // badge. TDLib resolves known groups locally.
+        if let enums::ChatType::Supergroup(sg) = &chat.r#type {
+            let sgid = sg.supergroup_id;
+            let cid = chat.id;
+            let client = self.client_id.get();
+            if client != 0 {
+                let store = self.clone();
+                spawn_local(async move {
+                    if let Ok(enums::Supergroup::Supergroup(g)) =
+                        functions::get_supergroup(sgid, client).await
+                        && let Some(vs) = g.verification_status
+                    {
+                        store.update_chat_row(cid, |r| {
+                            r.badge = Self::verification_badge_str(&vs);
+                        });
+                    }
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// TDLib `verificationStatus` on a user → the chat-row badge tag.
+    fn verification_badge(user: &types::User) -> Str {
+        user.verification_status
+            .as_ref()
+            .map(Self::verification_badge_str)
+            .unwrap_or_default()
+    }
+
+    /// "" / "verified" / "scam" — the tags `chat_row` renders.
+    pub(crate) fn verification_badge_str(vs: &types::VerificationStatus) -> Str {
+        if vs.is_verified {
+            "verified".into()
+        } else if vs.is_scam || vs.is_fake {
+            "scam".into()
+        } else {
+            "".into()
+        }
     }
 
     fn update_chat_row(&self, chat_id: i64, f: impl Fn(&mut ChatRow)) {
@@ -3686,6 +3777,18 @@ impl Store {
         match u {
             enums::Update::AuthorizationState(s) => self.on_auth_state(s.authorization_state),
             enums::Update::User(u) => {
+                let badge = Self::verification_badge(&u.user);
+                let target = self
+                    .chat_objs
+                    .borrow()
+                    .iter()
+                    .find(|(_, c)| {
+                        matches!(&c.r#type, enums::ChatType::Private(p) if p.user_id == u.user.id)
+                    })
+                    .map(|(id, _)| *id);
+                if let Some(id) = target {
+                    self.update_chat_row(id, |r| r.badge = badge.clone());
+                }
                 self.users.borrow_mut().insert(u.user.id, u.user);
             }
             enums::Update::UserStatus(u) => {
@@ -4000,6 +4103,13 @@ impl Store {
             }
             enums::Update::File(f) => {
                 self.register_file(&f.file);
+            }
+            // `updateChatOnlineMemberCount` — the group subtitle's
+            // "N members, M online" tail (Desktop parity).
+            enums::Update::ChatOnlineMemberCount(u) => {
+                self.update_chat_row(u.chat_id, |r| {
+                    r.online_count = u.online_member_count;
+                });
             }
             enums::Update::Option(o) => {
                 if o.name == "my_id"
@@ -6090,6 +6200,9 @@ impl Store {
                 phone: format!("+1 555 01{:02}", (user_id % 89) + 10).into(),
                 bio: format!("{name} — demo account").into(),
                 online: user_id % 2 == 0,
+                // Demo: treat the card as a non-contact so the "Add to
+                // contacts" button is visible like on an unknown sender.
+                is_contact: false,
             }));
             self.show_profile();
             return;
@@ -7290,15 +7403,64 @@ impl Store {
         self.selected_msgs.set(Vec::new());
         let chat_id = self.open_chat.get();
         if self.client_id.get() == 0 {
-            // Demo: drop the rows the way a real updateDeleteMessages would.
+            // Demo: drop the rows the way a real updateDeleteMessages would,
+            // stashing them for the Undo snackbar.
             let mut msgs = self.messages.snapshot();
+            let removed: Vec<MessageRow> = msgs
+                .iter()
+                .filter(|r| ask.ids.contains(&r.id))
+                .cloned()
+                .collect();
             msgs.retain(|r| !ask.ids.contains(&r.id));
             self.messages.set(msgs);
+            if !removed.is_empty() {
+                *self.undo_buffer.borrow_mut() = removed.clone();
+                let (seq, _) = self.undo_notice.snapshot();
+                self.undo_notice.set((seq + 1, removed.len() as i32));
+            }
             return;
         }
         let client = self.client_id.get();
         spawn_local(async move {
             let _ = functions::delete_messages(chat_id, ask.ids, revoke, client).await;
+        })
+        .detach();
+    }
+
+    /// Restore the rows stashed by the last demo delete — the Undo action
+    /// on the delete snackbar (Desktop shows the same affordance; the real
+    /// path's server-side `deleteMessages` has no undelete so the stash is
+    /// only armed in demo).
+    pub fn undo_delete(&self) {
+        let mut stash = std::mem::take(&mut *self.undo_buffer.borrow_mut());
+        if stash.is_empty() {
+            return;
+        }
+        let mut msgs = self.messages.snapshot();
+        msgs.append(&mut stash);
+        msgs.sort();
+        self.set_messages(msgs);
+        self.notify("Restored");
+    }
+
+    /// Row-menu "Report" — flags the chat as spam like Desktop's report on
+    /// chats you're not a member of. TDLib's multi-step reasons are out of
+    /// scope; "spam" is the default reason both here and on the action bar.
+    pub fn report_chat(&self, chat_id: i64) {
+        self.notify("Reported");
+        let client = self.client_id.get();
+        if client == 0 {
+            return;
+        }
+        spawn_local(async move {
+            let _ = functions::report_chat(
+                chat_id,
+                String::new(),
+                Vec::new(),
+                "spam".to_string(),
+                client,
+            )
+            .await;
         })
         .detach();
     }
@@ -9142,6 +9304,7 @@ impl Store {
                     .into();
                 card.phone = u.phone_number.clone().into();
                 card.online = matches!(u.status, enums::UserStatus::Online(_));
+                card.is_contact = u.is_contact;
             }
             if let Ok(enums::UserFullInfo::UserFullInfo(f)) =
                 functions::get_user_full_info(user_id, client).await
@@ -9153,6 +9316,41 @@ impl Store {
             store.show_profile();
         })
         .detach();
+    }
+
+    /// Profile card "Add to contacts" (Desktop parity) — `addContact`,
+    /// then the button collapses as the card's `is_contact` flips.
+    pub fn profile_add_contact(&self) {
+        let Some(card) = self.profile.snapshot() else {
+            return;
+        };
+        if card.is_contact {
+            return;
+        }
+        self.notify("Added to contacts");
+        let client = self.client_id.get();
+        let uid = card.user_id;
+        let name = card.name.to_string();
+        if client != 0 {
+            spawn_local(async move {
+                let _ = functions::add_contact(
+                    uid,
+                    types::ImportedContact {
+                        phone_number: String::new(),
+                        first_name: name,
+                        last_name: String::new(),
+                        note: types::FormattedText::default(),
+                    },
+                    false,
+                    client,
+                )
+                .await;
+            })
+            .detach();
+        }
+        let mut card = card;
+        card.is_contact = true;
+        self.profile.set(Some(card));
     }
 
     /// Upload the picked Settings file as the account's profile photo.
@@ -9908,6 +10106,8 @@ impl Store {
             action_bar: "".into(),
             action_title: "".into(),
             peer_user: 0,
+            badge: "".into(),
+            online_count: 0,
         };
         let mut list = self.server_results.snapshot();
         if !list.iter().any(|r| r.id == row.id) {
