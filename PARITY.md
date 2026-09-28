@@ -44,7 +44,7 @@
 | 打开会话 + 历史分页 | ✅ | `getChatHistory` 向前翻页 | `messages_render` |
 | 发送文本 | ✅ | `sendMessage(inputMessageText)` | `composer_sends_and_clears` |
 | 输入框 Markdown（*粗* _斜_ `码` ~~删~~ \|\|剧透\|\|） | ✅ | `parse_markdown` 发送时转 `FormattedText` 实体（UTF-16 offset），demo 走本地回显行；编辑路径同样解析 | `parse_markdown_strips_delimiters_and_offsets_utf16` `send_demo_echo_appends_outgoing_row` |
-| 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | 🟡 | r40 起部分可用：Ctrl+F（⋮ 菜单 "Search in chat" 经 MenuShortcutRegistry）、Ctrl+R 标记已读、Enter 发送（`TextField::on_submit`）、↑ 编辑上一条、Esc 关闭弹层、←/→ 查看器翻页（`on_key_press` 冒泡，waterui#1265 / hydrolysis#261 落地）；r42 起 Alt+↑↓ 切会话经根 `.on_key_press` 冒泡落地；Ctrl+W 关窗仍缺 | — |
+| 全局快捷键（Ctrl+F 搜索 / Ctrl+W 关窗 / Alt+↑↓ 切会话 等） | ✅ | Ctrl+W 三宽实测关窗退出进程（常驻 hamburger Menu 的 "Quit Telegram" 携带 `Shortcut::new("w").control()`，挂载 Menu 的 chord 经 MenuShortcutRegistry 全局派发→`win_state=Closed`→`remove_closed_windows` 退出事件循环）；另有 Ctrl+F 搜索、Ctrl+R 已读、Enter 发送（`on_submit`）、↑ 编辑、Esc 关弹层、←/→ 查看器、Alt+↑↓ 切会话 | 三宽实测进程退出（r43_quit_1400 关窗后根图空黑+进程退出） |
 | Alt+↑/↓ 切换会话 | ✅ | 根 `.on_key_press`（冒泡自任意焦点）→ `chat_switch(down)` 沿当前文件夹名册 ±1 步进；handler 须在 `.state(&store)` 作用域内（env 只含祖先链的 `.state`） | `chat_switch_walks_roster` + 三宽实机验证（r42_altup*/r42_altdown1400） |
 | 编辑消息 | ✅ | `editMessageText`；`message.edit_date` → 气泡内 "edited" 标记 | — |
 | 删除消息 | ✅ | `deleteMessages` + 删除确认卡（"Delete N messages?"，私聊含 "Also delete for <peer>" 勾选框驱动 `revoke` 标志，Cancel/红色 Delete，Esc/点遮罩关闭） | `delete_confirm_card_flow` |
@@ -70,10 +70,12 @@
 | 多选消息（批量删除/批量转发） | ✅ | `deleteMessages(revoke)` / `forwardMessages` 批处理 + 选择条（☑/☐ 行内勾选，实测 "1 selected"→"2 selected"）；选择条 Copy/Forward/Delete/✕ 实测派发（hydrolysis#239 修复 `when` payload 按钮，r37 实机验证转发流程走通） | `multi_select_bar_appears` |
 | 投票显示与投票 | ✅ | `MessagePoll` → 问题/选项/得票条/已选✓/总数；`setPollAnswer` 投票 | `poll_renders_in_bubble` |
 | 创建投票 | ✅ | 附件菜单 → 创建投票：问题 + 2–10 选项 + 匿名/多选/测验标记 → `sendMessage(inputMessagePoll)`，含 Regular/Quiz 两型与 correct_option_id | `poll_creator_sends_and_resets` `poll_option_remove_shifts` |
+| 停止投票 | ✅ | `stopPoll`（仅自己发起的投票行右键菜单 "Stop poll"）→ "Poll stopped" toast + 行尾改 "N votes · closed"，选项行变禁用态 | `stop_poll_closes_demo_poll` + 三宽实测（r43_stoppoll*） |
 | 定时消息列表/立即发送 | ✅ | `getChatScheduledMessages` 面板 + `editMessageSchedulingState(None)`（工具栏时钟） | `scheduled_panel_lists_rows` |
 | 草稿跨端同步 | ✅ | `setChatDraftMessage`（切换会话时把本地草稿推到服务器，`updateChatDraftMessage` 端已收） | `drafts_saved_per_chat` |
 | 转发不带署名 | ✅ | `forwardMessages(send_copy)`（转发横幅「Without attribution」切换） | `forward_banner_has_noattr_chip` |
 | 转发带评论 | ✅ | 转发横幅内评论字段 → `forwardMessages` 完成后同聊天 `sendMessage` 文本附言 | `forward_banner_shows_comment_field` |
+| 保存到收藏夹 | ✅ | 消息右键 "Save to Saved Messages" → `forwardMessages` 到本人私聊（demo 追加到 chat 3 行 + "Saved" toast）；Saved Messages 会话内可见追加行 | `save_to_saved_appends_demo` + 三宽实测（r43_saveto*） |
 | @提及/用户名补全 | ✅ | 输入框尾部 @token → `searchChatMembers`+`getUser`(username) 过滤弹层，选中回填 `@username ` | `mention_popup_filters_and_inserts`, `mention_token_parses` |
 | 共享媒体浏览（聊天内图/视频网格） | ✅ | `searchChatMessages(filter PhotoAndVideo)` → 右侧信息面板 3 列网格 | `info_panel_shows_shared_media` |
 | 信息面板共享内容标签页 | ✅ | 「Shared」区 `shared_tab` Media/Files/Links 三 tab：媒体网格 / 文档行 / 链接行，点击行内跳转对应消息 | `info_panel_shows_shared_media` `probe_overlay_chunk` + 实测截图（r37_info*/_files/_links） |
@@ -95,6 +97,7 @@
 | 会话列表 FAB 新建聊天钮 | ✅ | 会话列右下 ✎ 圆形 Accent 钮 → `nav.push(Route::NewChat)`（r40 实测点开 New chat 面板） | 实测截图（r40d_fab、r40_600_fab） |
 | 操作反馈 toast | ✅ | `SnackbarManager` + `.snackbar(...)` 浮层：复制/置顶/转发完成/删除等提示（"2 messages forwarded" 实测出现）；按 Desktop 底部居中条 | `toast_notice_fires_on_copy` + 实测截图（r37_snack*/r37d_fwded.png） |
 | 频道贴 footer（浏览数/签名） | ✅ | `kind_icon="channel"` 贴子行尾：👁 `view_count` + `author_signature` | `channel_post_footer_shows_views` + 实测截图（r37_channel*） |
+| 频道贴评论区 | ✅ | `interaction_info.reply_info.reply_count` → 行尾 💬 N chip → `open_comments` 弹层（`comments_list`，发送者+正文行，demo 播种）；点击 chip 开串 | `open_comments_seeds_thread` + 三宽实测（r43_comments*） |
 | 跳转到日期弹层 | ✅ | 工具栏日历钮 → 日期弹层 → `date_jump_target` 定位并高亮目标消息 | `date_jump_popup_opens` + 实测截图（r37_jump*） |
 | 拖拽文件进窗口发送 | ❌ | 框架双层缺口：waterui `DragData` 仅 Text|Url 无 File；hydrolysis 未桥接 winit DroppedFile/HoveredFile — DOGFOOD r34-1 | — |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
@@ -125,6 +128,7 @@
 | 媒体查看器（点图大图/播放） | ✅ | 覆盖层 zstack：Photo/`video_player` + 发送者/说明/关闭 + ‹ › 边钮与 ←/→ 键沿会话媒体翻页（`viewer_step` + `on_key_press`，r40）；‹ › 已知缺陷 DOGFOOD r40-1（`when` 层无遮挡注册，点按可同时命中底层媒体行） | `media_viewer_overlay`、`viewer_step_cycles_media` |
 | 复制图片到剪贴板 | ✅ | 右键菜单「Copy image」（仅图片行）→ `file_signal` 快照路径 → `image::open`→`to_rgba8` → arboard `set_image` + "Image copied" toast | `copy_image_decodes_demo_photo` + 实测截图（r39_copyimg*） |
 | Emoji 选择面板 | ✅ | 本地 Emoji 网格（~300 项，VS16 整段）→ 插入输入框；与贴纸/GIF 同一面板三 tab | `emoji_tab_shows_grid` |
+| Emoji 面板最近使用条 | ✅ | 面板顶部 `recent_emojis` 横条（每次插入自头顶插、去重、上限按 Desktop 类节奏）；点击条内 emoji 直接插入并前置到条首 | `insert_emoji_updates_recents` + 三宽实测（r43_recents*） |
 | Emoji 面板搜索 | ✅ | Emoji tab 顶部 `emoji_query` 字段 → `emoji_search` 名/短码前缀命中 ≤30 行（emoji+`:shortcode:`），点选插入输入框，清空还原网格；`watch` 驱动换区（`when` payload 晚挂载缺陷 hydrolysis#251 故取 watch+anyview） | `emoji_search_matches_names` + 三宽实机验证（r42_emojisearch*/r42_emojiinsert1400） |
 | 发送前预览+说明编辑 | ✅ | 附件条：图片缩略图+文件名+caption 输入框（发送时并入消息 caption） | `attach_preview_shows_caption_field` |
 
@@ -147,7 +151,8 @@
 |---|---|---|---|
 | 联系人列表 | ✅ | `getContacts` + `getUser`（新建聊天页，点击开聊） | `contacts_list_renders` |
 | 添加/删除联系人 | ✅ | `importContacts`（电话+姓名表单）/`removeContacts`（行右键菜单） | `contacts_add_form_opens` |
-| 查看对方资料 | ✅ | `getUser` + `getUserFullInfo` → Profile 路由（名/用户名/电话/简介/在线 + Message 按钮） | `profile_view_renders` |
+| 查看对方资料 | ✅ | `getUser` + `getUserFullInfo` → Profile 路由（名/用户名/电话/简介/在线 + Message 按钮）；紧凑单列（<700）下 push Profile 同时 `selected=None` 使资料页立即可见（否则压入被详情列遮住的侧栏栈） | `profile_view_renders` + 三宽实测（r43_profile*） |
+| 资料字段点按复制 | ✅ | Profile 卡 @username/电话/简介字段 `.on_tap` → `copy_field`（arboard + "Copied" toast，a11y_label "Copy username"） | `copy_field_copies_value` + 三宽实测（r43_profile*） |
 | 编辑自己资料（名/简介/用户名/头像） | ✅ | `setName`/`setBio`/`setUsername` + `setProfilePhoto`（Settings 选图上传） | `settings_shows_sections` |
 
 ## 7. 设置
@@ -172,7 +177,7 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：126 项 ｜ 部分 🟡：1 项（全局快捷键 r42 起 Alt+↑↓ 落地，余 Ctrl+W 等缺）｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
+- 已实现 ✅：131 项 ｜ 部分 🟡：0 项｜ 未实现 ❌：1 项（拖放文件发送 DOGFOOD r34-1）
 - r41 补录：机器人内联键盘（replyMarkup 按钮行+分类型分发）、聊天操作条（chatActionBar* 全型，替换输入框区）、消息信息卡（getMessageReadDate+getMessageViewers）、全局搜索过滤标签（All/Chats/Media/Files/Links）、文件夹编辑器会话选择器（getChatFolder 回填 + included_chat_ids 写回）—— 均 1400/800/600 实机验证；m3 锁已解除（waterui ee85dc47 含 TabItemLayout），m3→b21c79f6；waterkit 锁亦解除（video-gpu#35 已并 01f3d3fc，pin waterkit dev 11300217 software-decode），waterkit*→11300217 + video-gpu→01f3d3fc
 - r39 新增：自动删除定时器（行菜单嵌套 `Menu`）、未读回应 ❤ 徽标+浮动跳转钮、消息翻译（内联互换+还原）、复制消息链接、复制图片 —— 五项均 1400/800/600 实机验证
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
@@ -180,3 +185,4 @@
 - r37 补录：toast 提示（Snackbar）、频道贴 footer（👁 浏览数+签名）、跳转到日期弹层、相册合并气泡、信息面板共享 Media/Files/Links 标签页；多选批处理升 ✅（hydrolysis#239 修复实测）。
 - r40 补录：文件夹右键菜单（Mark all as read）、会话列 FAB ✎ 新建聊天、视频 m:ss 时长角标、查看器 ‹ › 边钮+←/→ 键翻页、菜单 Command::shortcut 提示（Ctrl+C/Ctrl+R/Ctrl+F）+ 键事件面落地（on_key_press/on_submit，全局快捷键 ❌→🟡）——均 1400/800/600 实机验证；新缺陷 DOGFOOD r40-1（`when` 弹层无遮挡注册）。
 - r42 补录：窗口标题未读数（`Watergram (N)`，WM_NAME 实测）、机器人 `/` 命令补全（`/st`→`/status` 弹层+点选回填）、Alt+↑↓ 切换会话（根 `.on_key_press` 冒泡）、Emoji 面板搜索（`fire`→`🔥 :fire:` 命中+插入）、回应 chip 反应者菜单（"Alice reacted with 👍" 行 + Remove your reaction）——均 1400/800/600 实机验证（r42_* 截图）；nami ebe55e7（nami#31）落地后撤销 per-consumer distinct workaround，侧栏搜索 `when(searching)` 第二订阅者复通实测（r42_searchpane1400）；DOGFOOD r40-1 经 hydrolysis#269 验证关闭。
+- r43 补录：Emoji 面板最近使用条、资料字段点按复制（@username/电话/简介→"Copied" toast）、频道贴 💬 评论弹层、停止投票（"Poll stopped"+closed footer）、保存到收藏夹（追加到 Saved Messages+toast）——均 1400/800/600 实机验证（r43_* 截图）；Ctrl+W 补全→快捷键升 ✅（根因是 app 代码：无任何 Command 携带 chord，挂载 Menu 的 shortcut 注册表本就全局派发）；紧凑宽（<700）Profile 推送不可见的 app 级修正：`show_profile` 在紧凑宽 `selected=None`，使压入侧栏栈的资料页立即可见（hydrolysis 紧凑语义：`render_compact_split` 只渲染一列，selection=Some 时详情列覆盖侧栏栈）；新缺陷 DOGFOOD r43-1（`App::menu_bar` 三个 runner 均解构丢弃）。

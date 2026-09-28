@@ -10,6 +10,7 @@ use std::time::Duration;
 use waterui_backend_core::widget::ModalInteraction;
 use waterui::component::list::{List, ListItem};
 use waterui::component::menu::{Command, MenuView, Shortcut};
+use waterui::window::WindowState;
 use waterui::key::{Key, KeyHandling, KeyPress, Modifiers, NamedKey};
 use waterui::layout::frame::Frame;
 use waterui::graphics::GpuSurface;
@@ -50,7 +51,7 @@ use waterui_barcode::Barcode;
 use tdlib_rs::enums;
 use waterui_icons_material_icon as mdi;
 
-use crate::state::{auto_delete_label, highlight_styled, AccountRow, BotCmd, ChatRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, SearchRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store};
+use crate::state::{auto_delete_label, highlight_styled, AccountRow, BotCmd, ChatRow, CommentRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow, MediaChunkRow, PackRow, RecentEmoji, SearchRow, MemberRow, MessageRow, PinnedRow, PollRow, PrivacyRow, ReactionChip, Route, Screen, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem, Store};
 use waterui::text::styled::StyledStr;
 use mdi::folder_plus;
 use mdi::image;
@@ -332,6 +333,18 @@ pub(crate) fn sidebar_stack(store: Store) -> impl View {
                             store
                                 .tr("Settings", 0, "Settings")
                                 .action(move || s.nav.push(Route::Settings))
+                        }, {
+                            // Desktop: Ctrl+W quits. Chords on a mounted Menu
+                            // arm globally via MenuShortcutRegistry even while
+                            // the popup is closed (hydrolysis#247); a winit
+                            // `App::menu_bar` is dropped by the runner, so the
+                            // window menu is the only command surface.
+                            store
+                                .tr("Quit", 0, "Quit Telegram")
+                                .action(move |store: Store| {
+                                    store.win_state.set(WindowState::Closed)
+                                })
+                                .shortcut(Shortcut::new("w").control())
                         }),
                     ),
                 )),
@@ -1768,6 +1781,7 @@ pub(crate) fn chat_column(store: Store) -> impl View {
         let eq2 = emoji_q.clone();
         let packs_b = store.sticker_packs.clone();
         let items_b = sticker_items.clone();
+        let recents = SignalCollection::new(store.recent_emojis.clone());
         vstack((
             // Picker tabs: Emoji grid is local; Stickers/GIFs query TDLib.
             hstack((
@@ -1783,10 +1797,29 @@ pub(crate) fn chat_column(store: Store) -> impl View {
                 // the shortcode table; `watch` swaps the whole grid region
                 // so the filtered list never rides the late-mounted `when`
                 // payload hazard (r36-2/#251).
+                let recents = recents.clone();
                 vstack((
                     field("Emoji search", &eq2)
                         .prompt("😀 emoji")
                         .hide_label(),
+                    // Desktop's "Frequently used" strip — most-recently
+                    // inserted first, tapped cells insert like grid cells.
+                    vstack((
+                        text("Frequently used").caption().muted(),
+                        scroll_horizontal(HStack::for_each(
+                            recents,
+                            |cell: RecentEmoji| {
+                                let emo = cell.emoji.clone();
+                                let label = cell.emoji.clone();
+                                text(emo.to_string())
+                                    .headline()
+                                    .padding_with((4.0, 4.0))
+                                    .on_tap(move |store: Store| store.insert_emoji(&emo))
+                                    .a11y_label(label)
+                                    .a11y_role(AccessibilityRole::Button)
+                            },
+                        )),
+                    )),
                     watch(eq2.clone(), move |q: Str| {
                         let hits = Store::emoji_search(&q);
                         if hits.is_empty() {
@@ -2201,6 +2234,8 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         .distinct();
     let del_open = store.confirm_delete.is_some().distinct();
     let store_del = store.clone();
+    let com_open = store.comments_open.is_some().distinct();
+    let store_com = store.clone();
     let store_for_info_overlay = store.clone();
     // Honest reproduction: `when(a).otherwise(b)` (WhenComplete) panics at
     // mount on the shipped renderers — nami#23, DOGFOOD r11-4a. Kept in this
@@ -2307,6 +2342,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
         // Delete-confirm card (Desktop's "Delete N messages?" dialog with
         // the "Also delete for <peer>" checkbox in private chats).
         when(del_open, move || delete_confirm_card(store_del.clone())),
+        when(com_open, move || comments_card(store_com.clone())),
         // "Show message info" card (Desktop's message-info dialog).
         when(msg_info_open, move || msg_info_card(store_info_card.clone())),
         when(viewer_open, move || viewer_layer(store_for_viewer.clone())),
@@ -2937,7 +2973,18 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     // (Telegram Desktop meta order).
     let footer = row.post_footer();
     let footer2 = footer.clone();
+    let n_comments = row.comments;
+    let post_id = row.id;
     let meta_overlay = hstack((
+        // Channel post "💬 N comments" → the comments thread popup
+        // (Desktop draws it as a separate footer line under the post).
+        when(n_comments > 0, move || {
+            text!("💬 {#n_comments} comments", n_comments = n_comments)
+                .caption()
+                .on_tap(move |store: Store| store.open_comments(post_id))
+                .a11y_label("View comments")
+                .a11y_role(AccessibilityRole::Button)
+        }),
         when(!footer.is_empty(), move || {
             text(footer2.clone()).caption()
         }),
@@ -3049,6 +3096,8 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
     let r_link = row.clone();
     let r_img = row.clone();
     let r_info = row.clone();
+    let r_saved = row.clone();
+    let r_poll = row.id;
     let pin_label: &'static str = if pinned {
         "Unpin message"
     } else {
@@ -3079,6 +3128,16 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
             }
         }),
         "Forward".action(move |store: Store| store.start_forward(&r2)),
+        // Desktop's message-menu quick action — forwards into the user's
+        // own Saved Messages chat without leaving this one.
+        "Save to Saved Messages".action(move |store: Store| {
+            store.save_to_saved(&r_saved)
+        }),
+        // Poll creator only — closing is the last action an open poll takes.
+        (row.poll.as_ref().map(|p| !p.closed).unwrap_or(false) && row.outgoing)
+            .then(|| {
+                "Stop poll".action(move |store: Store| store.stop_poll(r_poll))
+            }),
         "Select".action(move |store: Store| store.toggle_select(r11)),
         // Desktop's "Info" on outgoing messages: read time, views and the
         // seen-by list (getMessageReadDate / getMessageViewers).
@@ -3774,16 +3833,48 @@ pub(crate) fn profile_view(store: Store) -> NavigationView {
     let online = card.map(|c| c.as_ref().map(|c| c.online).unwrap_or(false));
     let uid = card.map(|c| c.as_ref().map(|c| c.user_id).unwrap_or(0));
 
+    // Desktop parity: username/phone/bio fields are tap-to-copy.
+    let u_copy = username.clone();
+    let p_copy = phone.clone();
+    let b_copy = bio.clone();
     let content = scroll(vstack((
         text!("{name}", name = name.clone()).headline(),
         text!("{username}", username = username.clone())
             .caption()
-            .muted(),
+            .muted()
+            .on_tap(move |store: Store| {
+                let v = u_copy.snapshot().to_string();
+                if !v.is_empty() {
+                    store.copy_field(&v);
+                }
+            })
+            .a11y_role(AccessibilityRole::Button),
         when(online.distinct(), || {
             text("online").caption().foreground(Accent)
         }),
-        hstack((text("Phone"), spacer(), text!("{phone}", phone = phone.clone()).muted())),
-        text!("{bio}", bio = bio.clone()).body().muted(),
+        hstack((
+            text("Phone"),
+            spacer(),
+            text!("{phone}", phone = phone.clone())
+                .muted()
+                .on_tap(move |store: Store| {
+                    let v = p_copy.snapshot().to_string();
+                    if !v.is_empty() {
+                        store.copy_field(&v);
+                    }
+                })
+                .a11y_role(AccessibilityRole::Button),
+        )),
+        text!("{bio}", bio = bio.clone())
+            .body()
+            .muted()
+            .on_tap(move |store: Store| {
+                let v = b_copy.snapshot().to_string();
+                if !v.is_empty() {
+                    store.copy_field(&v);
+                }
+            })
+            .a11y_role(AccessibilityRole::Button),
         hstack((
             spacer(),
             button("Message").action(move |store: Store| {
@@ -4400,6 +4491,46 @@ fn delete_confirm_card(store: Store) -> impl View {
         .background(Surface)
         .clip(RoundedRectangle::new(0.08))
         .max_width(300.0),
+    ))
+    .with(esc)
+}
+
+/// Channel comments thread popup — Desktop's "N Comments" footer opens
+/// the linked discussion thread; ours lists `getMessageThreadHistory`
+/// rows (demo corpus when offline).
+fn comments_card(store: Store) -> impl View {
+    let esc = modal_escape(store.clone(), |s| s.comments_open.set(None));
+    let rows = SignalCollection::new(store.comments_list.clone());
+    zstack((
+        Rectangle
+            .fill(WithOpacity::new(Srgb::from_hex("#000000"), 0.45))
+            .on_tap(|store: Store| store.comments_open.set(None)),
+        vstack((
+            hstack((
+                text("Comments").body().bold(),
+                spacer(),
+                text("✕")
+                    .body()
+                    .padding_with((4.0, 8.0))
+                    .on_tap(|store: Store| store.comments_open.set(None))
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_label("Close comments"),
+            )),
+            scroll(VStack::for_each(rows, |c: CommentRow| {
+                vstack((
+                    text(c.sender).caption().bold(),
+                    text(c.text).body(),
+                ))
+                .spacing(2.0)
+                .leading()
+            }))
+            .max_height(240.0),
+        ))
+        .spacing(10.0)
+        .padding_with(16.0)
+        .background(Surface)
+        .clip(RoundedRectangle::new(0.08))
+        .max_width(360.0),
     ))
     .with(esc)
 }

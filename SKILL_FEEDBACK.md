@@ -519,3 +519,43 @@ positives observed. (Patterns from earlier rounds folded in.)
     `map().computed()` instead.
   - **`.on_key_press` in the `.state` ordering lint** — see above;
     extend the existing candidate's modifier list.
+
+## r43
+
+- **`NavigationSplitView` compact mode is one column — the reference never
+  says so.** navigation.md only says it "adapts to a sliding pane on a
+  phone and side-by-side columns on a large window." The actual rule
+  (learned from hydrolysis `widgets/nav/navigation.rs`
+  `split_measure_plan` / `render_compact_split`): below
+  `sidebar_ideal + 360` the split renders **exactly one column** — the
+  detail when `primary_selection` is `Some`, the sidebar otherwise — and
+  the rendered back control just sets `selection=None`. Consequence an
+  app author needs spelled out: at compact widths, pushing a page onto a
+  `NavigationStack` that lives in the sidebar is invisible until the user
+  presses back. To show a pushed page immediately (e.g. tap a sender →
+  Profile while a chat is open at 600px), also set `selection=None`, or
+  give the detail column its own `NavigationStack`. Watergram chose the
+  former (`Store::show_profile` deselects below 700px — the same
+  threshold the framework computes from `sidebar_width.ideal + 360`).
+  One paragraph in the "Split views" section would have saved a debug
+  loop where the tap looked dead.
+- **`App::menu_bar` — the skill says nothing, the runners drop it.** No
+  skill file mentions `menu_bar`; the hydrolysis runners destructure and
+  discard it (`winit_runner.rs:225`, `web_runner.rs:302`,
+  `runner/mod.rs:179`), so app-level menus render nothing and arm no
+  shortcuts on hydrolysis (DOGFOOD r43-1). App-level commands still work
+  via an always-mounted in-window `Menu` — worth one line in the window
+  or components reference until the runner realizes the bar.
+- **A mounted `Menu`'s `shortcut` chords arm globally — not just while
+  its popup is open.** `MenuShortcutRegistry` collects every mounted
+  `Menu`'s commands regardless of popup state
+  (`input/menu_shortcuts.rs`), and dispatch precedes text input and the
+  plain-modifier early-return (`hit_test.rs:2352-2359`). So a "Quit"
+  command in an always-mounted hamburger menu makes Ctrl+W work
+  app-wide — this *solved* our global-shortcut gap, and it is the
+  correct mental model for "menu shortcuts are window-scoped, always
+  armed" rather than "armed while open." The Menu reference should say
+  this explicitly.
+- **Lint candidates (new this round):** none new — clippy/dylint clean
+  on all new code; `Binding::snapshot()` (not `.get()`) was a plain
+  compile error, no lint would have caught it.
