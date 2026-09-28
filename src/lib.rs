@@ -35,6 +35,7 @@ fn demo_page() -> Option<&'static str> {
             "emoji" => "emoji",
             "info" => "info",
             "attach" => "attach",
+            "profile" => "profile",
             _ => "list",
         })
 }
@@ -106,6 +107,18 @@ pub fn app(mut env: Environment) -> App {
             store.open_chat.set(1);
             store.regroup_messages();
         }
+        if demo_page() == Some("profile") {
+            store.selected.set(Some(1));
+            store.open_chat.set(1);
+            store.regroup_messages();
+            // Non-contact demo card — exercises the "Add to contacts" row
+            // without needing a live `.on_tap` press (DOGFOOD r45-1).
+            store.open_peer(101, 1, "Alice".into());
+            // Compact (<700px) is single-column: `show_profile` deselects
+            // only when `win_frame` is already measured, which it is not
+            // during seed — the selected chat would cover the pushed route.
+            store.selected.set(None);
+        }
     }
     env.install(
         Theme::new().color_scheme(store.dark.select(ColorScheme::Dark, ColorScheme::Light)),
@@ -114,7 +127,7 @@ pub fn app(mut env: Environment) -> App {
     // `|s: Store|` by DI instead of capturing the reactive handle. `#[state]`
     // extraction reads `State<Store>` (the slot `.state(&v)` installs), so the
     // wrapper goes in — not the bare value.
-    env.insert(waterui::extract::State(store.clone()));
+    env.insert(State(store.clone()));
     let win_state = store.win_state.clone();
     let store_for_content = store.clone();
     let mut win = Window::new(store.window_title(), win_state, move || {
@@ -216,8 +229,8 @@ pub fn app(mut env: Environment) -> App {
 #[cfg(test)]
 mod tests {
     use crate::state::{
-        ChatRow, FolderRow, MessageRow, PinnedRow, PollRow, ReactionChip, Screen, SharedMediaRow,
-        Store, parse_markdown,
+        ChatRow, FolderRow, MessageRow, PinnedRow, PollRow, ProfileCard, ReactionChip, Screen,
+        SharedMediaRow, Store, parse_markdown,
     };
     use crate::views;
     use chrono::Datelike;
@@ -256,6 +269,8 @@ mod tests {
             action_bar: "".into(),
             action_title: "".into(),
             peer_user: 0,
+            badge: "".into(),
+            online_count: 0,
             title_styled: waterui::text::styled::StyledStr::empty(),
             preview_styled: waterui::text::styled::StyledStr::empty(),
         }
@@ -1673,6 +1688,7 @@ mod tests {
             phone: "+1999".into(),
             bio: "hello world".into(),
             online: true,
+            is_contact: true,
         }));
         let mut app = ui.mount(move || views::profile_view(store.clone()).state(&store));
         app.query().label("Alice A").assert_exists();
@@ -2071,6 +2087,8 @@ mod tests {
                     action_bar: "".into(),
                     action_title: "".into(),
                     peer_user: 0,
+                    badge: "".into(),
+                    online_count: 0,
                     title_styled: waterui::text::styled::StyledStr::empty(),
                     preview_styled: waterui::text::styled::StyledStr::empty(),
                 },
@@ -2166,6 +2184,8 @@ mod tests {
                     action_bar: "".into(),
                     action_title: "".into(),
                     peer_user: 0,
+                    badge: "".into(),
+                    online_count: 0,
                     title_styled: waterui::text::styled::StyledStr::empty(),
                     preview_styled: waterui::text::styled::StyledStr::empty(),
                 },
@@ -4554,6 +4574,132 @@ mod tests {
         assert!(store.confirm_delete.snapshot().is_none());
         // Demo drops the rows the way `updateDeleteMessages` would.
         assert!(!store.messages.snapshot().iter().any(|r| r.id == 10));
+    }
+
+    /// r45 pick: the delete snackbar's Undo merges the stashed rows back
+    /// in id order and drains the stash (a second tap is a no-op).
+    #[test]
+    fn delete_undo_restores_rows() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        let before = store.messages.snapshot().len();
+        store.ask_delete_message(10);
+        store.confirm_delete_now();
+        assert_eq!(store.undo_notice.snapshot().1, 1);
+        assert_eq!(store.messages.snapshot().len(), before - 1);
+        store.undo_delete();
+        let msgs = store.messages.snapshot();
+        assert_eq!(msgs.len(), before);
+        assert!(msgs.iter().any(|r| r.id == 10));
+        store.undo_delete();
+        assert_eq!(store.messages.snapshot().len(), before);
+    }
+
+    /// r45 pick: a group subtitle gains ", N online" once
+    /// `updateChatOnlineMemberCount` lands on the row.
+    #[test]
+    fn group_subtitle_online_count() {
+        let store = store();
+        let mut g = chat(7, "dogfood crew", "p", 1);
+        g.kind_icon = "group".into();
+        g.online_count = 12;
+        store.chats.set(vec![g]);
+        store.members_count.set_from("5 members");
+        assert_eq!(
+            store.chat_subtitle(7).snapshot().to_string(),
+            "5 members, 12 online"
+        );
+    }
+
+    /// r45 pick: verificationStatus → row badge tag ("verified"/"scam"/"").
+    #[test]
+    fn verification_badge_mapping() {
+        use tdlib_rs::types::VerificationStatus as V;
+        let verified = V {
+            is_verified: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            Store::verification_badge_str(&verified).as_str(),
+            "verified"
+        );
+        let scam = V {
+            is_scam: true,
+            ..Default::default()
+        };
+        assert_eq!(Store::verification_badge_str(&scam).as_str(), "scam");
+        let fake = V {
+            is_fake: true,
+            ..Default::default()
+        };
+        assert_eq!(Store::verification_badge_str(&fake).as_str(), "scam");
+        assert_eq!(Store::verification_badge_str(&V::default()).as_str(), "");
+    }
+
+    /// r45 pick: the row-menu Report item fires the toast (real path also
+    /// calls `reportChat` with the spam reason).
+    #[test]
+    fn report_chat_demo_toasts() {
+        let store = store();
+        store.report_chat(5);
+        assert_eq!(store.notice.snapshot().1.as_str(), "Reported");
+    }
+
+    /// r45 pick: profile "Add to contacts" flips `is_contact` so the button
+    /// collapses (the `addContact` call goes out on the real path).
+    #[test]
+    fn profile_add_contact_flips_flag() {
+        let store = store();
+        store.profile.set(Some(ProfileCard {
+            user_id: 12,
+            is_contact: false,
+            ..Default::default()
+        }));
+        store.profile_add_contact();
+        assert!(store.profile.snapshot().expect("card").is_contact);
+    }
+
+    /// r45 pick: a verified row renders the badge after the title.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn probe_chat_row_verified_badge(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        let mut app = ui.viewport(340, 200).mount_offscreen(move || {
+            views::chat_row(
+                store.clone(),
+                ChatRow {
+                    id: 1,
+                    title: "WaterUI devs".into(),
+                    preview: "test".into(),
+                    draft: "".into(),
+                    order: 0,
+                    unread: 0,
+                    unread_mentions: 0,
+                    unread_reactions: 0,
+                    auto_delete: 0,
+                    pinned: false,
+                    muted: false,
+                    marked_unread: false,
+                    in_archive: false,
+                    folder_id: 0,
+                    photo_file: 0,
+                    time: "14:32".into(),
+                    typing: false,
+                    online: false,
+                    kind_icon: "group".into(),
+                    accent: -1,
+                    action_bar: "".into(),
+                    action_title: "".into(),
+                    peer_user: 0,
+                    badge: "verified".into(),
+                    online_count: 0,
+                    title_styled: waterui::text::styled::StyledStr::empty(),
+                    preview_styled: waterui::text::styled::StyledStr::empty(),
+                },
+            )
+        });
+        app.semantic_mut().settle();
+        app.query().label("Verified").assert_exists();
     }
 
     /// r38 pick: the floating "N unread ↓" chip scrolls to the tail and

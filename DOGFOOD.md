@@ -3350,3 +3350,84 @@ in the top-anchored settings/row menus that don't hit the band.
 - **`signal_color(source)`** — live-reactive `.background(signal_color)`
   drives the chat-pane wallpaper preset (Appearance swatches).
 - **`App::menu_bar`** — now the single source for Ctrl+W/Ctrl+N/Ctrl+,.
+
+## r45 — repin hydrolysis 4a34cf9a (menu_bar merged upstream as #279; the mid-press emit kills every `.on_tap`)
+
+### Closure
+
+- **r43-1 CLOSED — landed upstream.** hydrolysis#279 merged; dev head is
+  `4a34cf9a`. watergram is repinned to it via `git` + `rev` with **no
+  path patch** (the r44 `../hydrolysis` patch is removed). `App::menu_bar`
+  remains the single chord source for Ctrl+W / Ctrl+N / Ctrl+, — all
+  three re-verified live on the rebuilt pin (see `shots/r45/`).
+- **r44-2 observed again, one data point added.** On 4a34cf9a a
+  low-placed row-menu popup (`214×524+155+479` at 1400×900) rendered all
+  items and *did* register pointer targets for every row — the PT dump
+  shows ten live bounds at local-y 35…553 — and a dead-center click on
+  the lowest live item ("Report", local bounds (14,371)-(89,393))
+  dispatched. So the dead band is confirmed intermittent per instance,
+  not positional: some popups register full coverage, some lose the
+  lower band. Entry left open; the fix should still clamp or cover.
+
+### r45-1: a scene emit mid-press clears the armed gesture recognizer — every `.on_tap` in the app is dead at human click speed
+
+`GestureEngine::truncate_targets` (waterui-backend-core @ `1b80ef5`,
+`backends/core/src/gesture.rs:290-295`) runs
+`ensure_active_recognizers_are_live` **synchronously inside the emit
+walk** (:606-610). `is_recognizer_live` (:612-615) decides by
+`Rc::ptr_eq` against `self.targets` — but while the scene is mid-emit
+the armed recognizer's `Rc` sits *beyond the truncated watermark*: its
+group was dropped from `targets` and has not re-registered yet. The
+check therefore fails and `active_recognizers.clear()` purges the
+in-flight press. `handle_pointer_up` (:395+) then dispatches into an
+empty set — the tap is lost silently (`gesture_changed=false`, no
+error). `sync_after_layout` (:500+) cannot rescue it: the re-armed
+`TapDetector` is a fresh object with `pressed=None`, so a down that
+preceded the flush is never paired.
+
+Instrumented proof (hydrolysis@4a34cf9a + traced backend-core, log
+`/tmp/wg_dbg1.log` on wgpu-wolfi):
+
+```
+21:42:39.823408  GESTURE down armed        x=961 y=507 armed=1     ← tap armed
+21:42:39.828511  GESTURE ensure-live CLEAR cleared=1 targets=4    ← +5 ms, mid-emit
+21:42:39.828526  GESTURE truncate_targets  before=14 len=4 act_before=1 act_after=0
+                 …pointer up → GESTURE up dispatch dispatched=0 fired=false
+```
+
+Why it is catastrophic in watergram specifically: the app re-emits the
+chat scene about every 33 ms (typing indicator, unread chip, presence),
+so `clear_targets`/`truncate_targets` runs continuously — a human-speed
+press (~80–150 ms down→up) almost always spans a flush. Observed live:
+`.on_tap` taps with a normal click-never fired; down→up pairs with ~0 ms
+inside-press fired six out of six (`armed=1 … dispatched=1 fired=true`
+in `/tmp/wg_dbg2.log`). Affected surfaces include **every `.on_tap` in
+the app**: sender-name/avatar/forwarded-badge → profile, modal scrims,
+bubble/row select, double-tap react — i.e. tap-to-open-profile is
+unusable.
+
+Minimal engine-level repro (no app code): register a tap recognizer,
+`handle_pointer_down` inside it, then `truncate_targets(0)` (or any len
+below its slot) before `handle_pointer_up` — the up dispatches to zero
+recognizers although the same `Rc` is re-registered immediately after.
+Expected: truncating `targets` must not clear `active_recognizers` for
+recognizers that are still armed and will be re-registered — e.g.
+defer the liveness sweep to `sync_after_layout`/frame end, or key
+`is_recognizer_live` by stable recognizer id rather than `Rc` identity
+within the truncated window.
+
+App posture: only the delete-confirm card is converted —
+`text().on_tap()` → `button("Cancel"/"Delete").action(…)`
+(views.rs `delete_confirm_card`): `register_interactive_pointer_target`
+(hydrolysis `widgets/controls/button.rs:644`) uses the pointer-target
+registry, which is not touched by `truncate_targets` — verified live,
+Delete dispatched across ~5 mid-press flushes (`changed=true`) and Undo
+restored the message. The remaining `.on_tap` surfaces are **not**
+worked around — they stay as documentation of the defect's blast
+radius; fix the engine, then they all recover at once.
+
+### Adopted this round
+
+- **`App::menu_bar` from upstream pin** — path patch removed; the
+  merged #279 implementation now arms the three app commands.
+- No other API changes adopted; pins only.

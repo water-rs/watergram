@@ -82,10 +82,7 @@ pollster = "1"
 # table applies, so hydrolysis's own [patch] is replicated here. Drop once a
 # release carries these.
 [patch.crates-io]
-# hydrolysis dev 68ec29a5 + the r44 `App::menu_bar` fix (devin/menu-bar
-# 057cc0b) — path-patched until the fix lands upstream; repin to the merge
-# sha and delete this comment when it does.
-hydrolysis = { path = "../hydrolysis" }
+hydrolysis = { git = "https://github.com/water-rs/hydrolysis", rev = "4a34cf9acf44218d496c43ecdee008f8f5eeabd7" }
 shaderloom = { git = "https://github.com/water-rs/shaderloom", rev = "fec1801849979239097cabbf2ad813e56a91132d" }
 nami = { git = "https://github.com/water-rs/nami", rev = "ebe55e7e5724a64878081cee44423ed00b266433" }
 nami-core = { git = "https://github.com/water-rs/nami", rev = "ebe55e7e5724a64878081cee44423ed00b266433" }
