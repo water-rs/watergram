@@ -14,7 +14,7 @@ mod td;
 mod views;
 
 use state::Store;
-use waterui::app::App;
+use waterui::app::{App, LastWindowPolicy};
 use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::preview;
@@ -35,7 +35,6 @@ fn demo_page() -> Option<&'static str> {
             "emoji" => "emoji",
             "info" => "info",
             "attach" => "attach",
-            "profile" => "profile",
             _ => "list",
         })
 }
@@ -106,18 +105,6 @@ pub fn app(mut env: Environment) -> App {
             store.selected.set(Some(1));
             store.open_chat.set(1);
             store.regroup_messages();
-        }
-        if demo_page() == Some("profile") {
-            store.selected.set(Some(1));
-            store.open_chat.set(1);
-            store.regroup_messages();
-            // Non-contact demo card — exercises the "Add to contacts" row
-            // without needing a live `.on_tap` press (DOGFOOD r45-1).
-            store.open_peer(101, 1, "Alice".into());
-            // Compact (<700px) is single-column: `show_profile` deselects
-            // only when `win_frame` is already measured, which it is not
-            // during seed — the selected chat would cover the pushed route.
-            store.selected.set(None);
         }
     }
     env.install(
@@ -195,8 +182,10 @@ pub fn app(mut env: Environment) -> App {
     {
         win.frame.set(Rect::new(Point::zero(), Size::new(w, h)));
     }
-    let mut app = App::new_with_windows([win], env);
-    // r43-1 fix lives in hydrolysis devin/menu-bar (66501fc): `App::menu_bar`
+    // Telegram Desktop quits with its last window — `Quit` is also the
+    // default, declared here so the behaviour survives a default change.
+    let mut app = App::new_with_windows([win], env).on_last_window_closed(LastWindowPolicy::Quit);
+    // r43-1 fixed in hydrolysis dev (4a34cf9a, PR #279): `App::menu_bar`
     // commands arm globally on `MenuShortcutRegistry` like a mounted `Menu`
     // (and render on NSApp.mainMenu on macOS). `env.insert(store)` above
     // puts Store in the app env so actions take `|s: Store|` by DI.
@@ -269,7 +258,7 @@ mod tests {
             action_bar: "".into(),
             action_title: "".into(),
             peer_user: 0,
-            badge: "".into(),
+            badge: crate::state::Verification::None,
             online_count: 0,
             title_styled: waterui::text::styled::StyledStr::empty(),
             preview_styled: waterui::text::styled::StyledStr::empty(),
@@ -2087,7 +2076,7 @@ mod tests {
                     action_bar: "".into(),
                     action_title: "".into(),
                     peer_user: 0,
-                    badge: "".into(),
+                    badge: crate::state::Verification::None,
                     online_count: 0,
                     title_styled: waterui::text::styled::StyledStr::empty(),
                     preview_styled: waterui::text::styled::StyledStr::empty(),
@@ -2184,7 +2173,7 @@ mod tests {
                     action_bar: "".into(),
                     action_title: "".into(),
                     peer_user: 0,
-                    badge: "".into(),
+                    badge: crate::state::Verification::None,
                     online_count: 0,
                     title_styled: waterui::text::styled::StyledStr::empty(),
                     preview_styled: waterui::text::styled::StyledStr::empty(),
@@ -4612,29 +4601,33 @@ mod tests {
         );
     }
 
-    /// r45 pick: verificationStatus → row badge tag ("verified"/"scam"/"").
+    /// r45 pick: verificationStatus → row badge enum.
     #[test]
     fn verification_badge_mapping() {
+        use crate::state::Verification;
         use tdlib_rs::types::VerificationStatus as V;
         let verified = V {
             is_verified: true,
             ..Default::default()
         };
         assert_eq!(
-            Store::verification_badge_str(&verified).as_str(),
-            "verified"
+            Store::verification_badge_str(&verified),
+            Verification::Verified
         );
         let scam = V {
             is_scam: true,
             ..Default::default()
         };
-        assert_eq!(Store::verification_badge_str(&scam).as_str(), "scam");
+        assert_eq!(Store::verification_badge_str(&scam), Verification::Scam);
         let fake = V {
             is_fake: true,
             ..Default::default()
         };
-        assert_eq!(Store::verification_badge_str(&fake).as_str(), "scam");
-        assert_eq!(Store::verification_badge_str(&V::default()).as_str(), "");
+        assert_eq!(Store::verification_badge_str(&fake), Verification::Scam);
+        assert_eq!(
+            Store::verification_badge_str(&V::default()),
+            Verification::None
+        );
     }
 
     /// r45 pick: the row-menu Report item fires the toast (real path also
@@ -4691,7 +4684,7 @@ mod tests {
                     action_bar: "".into(),
                     action_title: "".into(),
                     peer_user: 0,
-                    badge: "verified".into(),
+                    badge: crate::state::Verification::Verified,
                     online_count: 0,
                     title_styled: waterui::text::styled::StyledStr::empty(),
                     preview_styled: waterui::text::styled::StyledStr::empty(),
