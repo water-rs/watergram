@@ -52,7 +52,7 @@ use crate::state::{
     AccountRow, BotCmd, ChatRow, CommentRow, DayRow, DeleteAsk, EmojiSug, FolderRow, LangRow,
     MediaChunkRow, MemberRow, MessageRow, PackRow, PinnedRow, PollRow, PrivacyRow, ReactionChip,
     RecentEmoji, Route, Screen, SearchRow, SessionRow, SharedLinkRow, SharedMediaRow, StickerItem,
-    Store, auto_delete_label, highlight_styled,
+    Store, Verification, auto_delete_label, highlight_styled,
 };
 use mdi::account_group;
 use mdi::account_plus;
@@ -1152,18 +1152,18 @@ pub(crate) fn chat_row(store: Store, row: ChatRow) -> impl View {
                     },
                     // Verified / scam badge right after the title —
                     // Telegram Desktop's blue check / red warning marks.
-                    match row.badge.as_str() {
-                        "verified" => check_decagram()
+                    match row.badge {
+                        Verification::Verified => check_decagram()
                             .tint(Accent)
                             .size(14.0, 14.0)
                             .a11y_label("Verified")
                             .anyview(),
-                        "scam" => alert_decagram()
+                        Verification::Scam => alert_decagram()
                             .tint(Error)
                             .size(14.0, 14.0)
                             .a11y_label("Scam")
                             .anyview(),
-                        _ => spacer().width(0.0).anyview(),
+                        Verification::None => spacer().width(0.0).anyview(),
                     },
                     if row.muted {
                         bell_off()
@@ -2225,10 +2225,10 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     // The nav title slot is text-only (IntoText) — the
                     // verification mark travels as a glyph suffix, same
                     // position Desktop draws its badge.
-                    match r.badge.as_str() {
-                        "verified" => Str::from(format!("{} ✓", r.title)),
-                        "scam" => Str::from(format!("{} ⚠", r.title)),
-                        _ => r.title.clone(),
+                    match r.badge {
+                        Verification::Verified => Str::from(format!("{} ✓", r.title)),
+                        Verification::Scam => Str::from(format!("{} ⚠", r.title)),
+                        Verification::None => r.title.clone(),
                     }
                 })
                 .unwrap_or_default()

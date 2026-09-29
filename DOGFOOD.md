@@ -3369,7 +3369,21 @@ in the top-anchored settings/row menus that don't hit the band.
   not positional: some popups register full coverage, some lose the
   lower band. Entry left open; the fix should still clamp or cover.
 
-### r45-1: a scene emit mid-press clears the armed gesture recognizer — every `.on_tap` in the app is dead at human click speed
+### r45-1: a scene emit mid-press clears the armed gesture recognizer — every `.on_tap` in the app is dead at human click speed — FIXED @ `628ef285`
+
+**Fixed in waterui `628ef285` (PR water-rs/waterui#1317)** — squash-landed
+on `dev` from the fix branched off `dev` `1b80ef53`. Root cause below kept
+as the record: the liveness sweep ran mid-walk against the transient
+re-registration list. The fix drops `ensure_active_recognizers_are_live`
+from `truncate_targets` — emit-time bookkeeping truncates the tail only,
+and `sync_after_layout` reconciles the settled list: an armed recognizer
+whose retained target re-registers (same `Rc`) keeps its press state; a
+target that is really gone is re-hit-tested/cancelled as before.
+Regression test `tap_survives_reemitted_targets_during_press`
+(`backends/core/src/gesture.rs`): fails on `1b80ef53`, passes on
+`628ef285`. The `WATERGRAM_DEMO_PAGE=profile` seed added this round to
+reach a non-contact profile without `.on_tap` was deleted in r48 — the
+real tap path is live again (verified 14/14 under the same emit storm).
 
 `GestureEngine::truncate_targets` (waterui-backend-core @ `1b80ef5`,
 `backends/core/src/gesture.rs:290-295`) runs
@@ -3422,9 +3436,9 @@ App posture: only the delete-confirm card is converted —
 (hydrolysis `widgets/controls/button.rs:644`) uses the pointer-target
 registry, which is not touched by `truncate_targets` — verified live,
 Delete dispatched across ~5 mid-press flushes (`changed=true`) and Undo
-restored the message. The remaining `.on_tap` surfaces are **not**
-worked around — they stay as documentation of the defect's blast
-radius; fix the engine, then they all recover at once.
+restored the message. All other `.on_tap` surfaces stayed unworked
+through r45-r47 documenting the blast radius; with the r48 engine fix
+pinned they all recover at once — no app-side gesture change needed.
 
 ### Adopted this round
 

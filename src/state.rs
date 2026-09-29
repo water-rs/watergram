@@ -113,6 +113,16 @@ pub struct PinnedRow {
     pub label: Str,
 }
 
+/// Peer verification status on a chat row — the badge `chat_row` renders
+/// after the title like Telegram Desktop's blue check / red warning marks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Verification {
+    #[default]
+    None,
+    Verified,
+    Scam,
+}
+
 /// One row in the chat list. `Ord` is inverted so `Vec::sort` orders
 /// by `position.order` descending — pinned-first ordering is already encoded
 /// in the order value TDLib assigns.
@@ -163,9 +173,9 @@ pub struct ChatRow {
     /// Private-chat peer user id — the action bar's add-contact and
     /// share-phone calls need it.
     pub peer_user: i64,
-    /// Peer verification from TDLib `verificationStatus`: "" / "verified" /
-    /// "scam" — renders the badge after the title like Telegram Desktop.
-    pub badge: Str,
+    /// Peer verification from TDLib `verificationStatus` — renders the
+    /// badge after the title like Telegram Desktop.
+    pub badge: Verification,
     /// Group/channel online-member count (`updateChatOnlineMemberCount`);
     /// 0 = unknown, subtitle stays "N members".
     pub online_count: i32,
@@ -1899,7 +1909,7 @@ impl Store {
                 action_bar: "".into(),
                 action_title: "".into(),
                 peer_user: 0,
-                badge: "".into(),
+                badge: Verification::None,
                 online_count: 0,
             }
         };
@@ -2102,10 +2112,10 @@ impl Store {
             // `updateChatOnlineMemberCount`.
             match r.id {
                 1 => {
-                    r.badge = "verified".into();
+                    r.badge = Verification::Verified;
                     r.online_count = 12;
                 }
-                9 => r.badge = "scam".into(),
+                9 => r.badge = Verification::Scam,
                 _ => {}
             }
         }
@@ -3560,7 +3570,7 @@ impl Store {
                 .get(&p.user_id)
                 .map(Self::verification_badge)
                 .unwrap_or_default(),
-            _ => "".into(),
+            _ => Verification::None,
         };
         let kind_icon = match &chat.r#type {
             enums::ChatType::Private(_) | enums::ChatType::Secret(_) => {
@@ -3661,13 +3671,17 @@ impl Store {
             if client != 0 {
                 let store = self.clone();
                 spawn_local(async move {
-                    if let Ok(enums::Supergroup::Supergroup(g)) =
-                        functions::get_supergroup(sgid, client).await
-                        && let Some(vs) = g.verification_status
-                    {
-                        store.update_chat_row(cid, |r| {
-                            r.badge = Self::verification_badge_str(&vs);
-                        });
+                    match functions::get_supergroup(sgid, client).await {
+                        Ok(enums::Supergroup::Supergroup(g)) => {
+                            if let Some(vs) = g.verification_status {
+                                store.update_chat_row(cid, |r| {
+                                    r.badge = Self::verification_badge_str(&vs);
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(chat_id = cid, error = ?e, "get_supergroup failed");
+                        }
                     }
                 })
                 .detach();
@@ -3675,22 +3689,22 @@ impl Store {
         }
     }
 
-    /// TDLib `verificationStatus` on a user → the chat-row badge tag.
-    fn verification_badge(user: &types::User) -> Str {
+    /// TDLib `verificationStatus` on a user → the chat-row badge.
+    fn verification_badge(user: &types::User) -> Verification {
         user.verification_status
             .as_ref()
             .map(Self::verification_badge_str)
             .unwrap_or_default()
     }
 
-    /// "" / "verified" / "scam" — the tags `chat_row` renders.
-    pub(crate) fn verification_badge_str(vs: &types::VerificationStatus) -> Str {
+    /// TDLib `verificationStatus` → the badge `chat_row` renders.
+    pub(crate) fn verification_badge_str(vs: &types::VerificationStatus) -> Verification {
         if vs.is_verified {
-            "verified".into()
+            Verification::Verified
         } else if vs.is_scam || vs.is_fake {
-            "scam".into()
+            Verification::Scam
         } else {
-            "".into()
+            Verification::None
         }
     }
 
@@ -3787,7 +3801,7 @@ impl Store {
                     })
                     .map(|(id, _)| *id);
                 if let Some(id) = target {
-                    self.update_chat_row(id, |r| r.badge = badge.clone());
+                    self.update_chat_row(id, |r| r.badge = badge);
                 }
                 self.users.borrow_mut().insert(u.user.id, u.user);
             }
@@ -10106,7 +10120,7 @@ impl Store {
             action_bar: "".into(),
             action_title: "".into(),
             peer_user: 0,
-            badge: "".into(),
+            badge: Verification::None,
             online_count: 0,
         };
         let mut list = self.server_results.snapshot();
