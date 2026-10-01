@@ -1,0 +1,10 @@
+# Tests that write the real OS clipboard share one X11 selection. Nextest
+# isolates each test in its own process; this group runs the clipboard
+# writers one process at a time so two of them can never race the
+# claim/verify in clipboard-rs's X11 backend.
+[test-groups]
+os-clipboard = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/^tests::(toast_notice_fires_on_copy|copy_selected_joins_in_message_order|copy_link_writes_clipboard|copy_image_decodes_demo_photo|copy_field_copies_value|inline_keyboard_parses_and_dispatches|message_context_menu_desktop_items)$/)'
+test-group = 'os-clipboard'

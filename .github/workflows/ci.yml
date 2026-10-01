@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  PKG_CONFIG_PATH: /usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+
+jobs:
+  gate:
+    name: fmt + clippy + test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl-dev libgles-dev libglvnd-dev libfontconfig-dev libxkbcommon-dev \
+            libgbm-dev libva-dev libpipewire-0.3-dev libspa-0.2-dev \
+            libc++-dev libc++abi-dev libclang-dev libasound2-dev \
+            pkg-config curl ca-certificates gcc g++ xvfb
+
+      - name: rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # --lib: tests/tdlib_e2e.rs needs real Telegram api_id/hash + test-DC
+      # account credentials we do not have (it stays #[ignore]d). Nextest
+      # runs each test in its own process; the os-clipboard test group in
+      # .config/nextest.toml serializes the X11-selection writers.
+      - name: test (Xvfb + nextest)
+        run: xvfb-run -a cargo nextest run --lib --locked
+
+  dylint:
+    name: dylint (water-rs/lints)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl-dev libgles-dev libglvnd-dev libfontconfig-dev libxkbcommon-dev \
+            libgbm-dev libva-dev libpipewire-0.3-dev libspa-0.2-dev \
+            libc++-dev libc++abi-dev libclang-dev libasound2-dev \
+            pkg-config curl ca-certificates gcc g++
+
+      - name: rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # water-rs/lints pins this nightly in its rust-toolchain.toml; the
+      # dylint driver and lint libraries build against it.
+      - name: lint toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-28
+          components: llvm-tools-preview, rustc-dev
+          default: false
+
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # Prebuilt signed release binaries (cargo-binstall fallback inside
+      # install-action); `cargo install --locked` loses git2's TLS support.
+      - name: cargo-dylint
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-dylint@6.0.4,dylint-link@6.0.4
+
+      # Lint findings fail the job, same as clippy's -D warnings.
+      - name: dylint
+        env:
+          DYLINT_RUSTFLAGS: -D warnings
+        run: cargo dylint --all
