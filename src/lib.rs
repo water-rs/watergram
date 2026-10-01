@@ -301,6 +301,8 @@ mod tests {
             play_file: 0,
             media_label: "".into(),
             media_secs: 0,
+            media_w: 0,
+            media_h: 0,
             reaction_chips: Vec::new(),
             failed: false,
             pending: false,

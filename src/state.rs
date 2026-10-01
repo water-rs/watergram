@@ -282,6 +282,11 @@ pub struct MessageRow {
     /// renders as the m:ss corner badge on the thumbnail, as in Telegram
     /// Desktop.
     pub media_secs: i32,
+    /// Photo pixel dimensions from the content's photoSize (0 = unknown);
+    /// the bubble sizes the photo to the cap keeping this aspect, like
+    /// Telegram Desktop's media layout.
+    pub media_w: i32,
+    pub media_h: i32,
     pub reaction_chips: Vec<ReactionChip>,
     /// Emoji the current user has chosen on this message, if any.
     pub my_reaction: Str,
@@ -2580,6 +2585,8 @@ impl Store {
             play_file: 0,
             media_label: Str::from(media.to_string()),
             media_secs: 0,
+            media_w: 0,
+            media_h: 0,
             reaction_chips: Self::demo_chips(reactions),
             failed: false,
             pending: false,
@@ -2737,6 +2744,10 @@ impl Store {
         // A real file id resolves via the seeded demo PNG (`demo_photo_png`)
         // — the media slot draws the image and tapping opens the viewer.
         msgs.last_mut().unwrap().media_file = 1;
+        // `demo_photo_png` renders a 640x360 PNG — record its pixels so the
+        // bubble sizes the photo exactly like a TDLib `photoSize`.
+        msgs.last_mut().unwrap().media_w = 640;
+        msgs.last_mut().unwrap().media_h = 360;
         msgs[2].unread_divider = true;
         // Unread-reaction jump target (mirrors updateMessageUnreadReactions).
         msgs[2].unread_reaction = true;
@@ -3471,12 +3482,29 @@ impl Store {
         }
     }
 
+    /// Pixel dimensions of a photo payload (`photoSize` of the largest
+    /// variant); zero when the content carries no sized photo. The bubble
+    /// sizes the photo to its cap keeping this aspect, like Telegram
+    /// Desktop's media layout.
+    fn media_dims(content: &enums::MessageContent) -> (i32, i32) {
+        match content {
+            enums::MessageContent::MessagePhoto(p) => p
+                .photo
+                .sizes
+                .last()
+                .map(|s| (s.width, s.height))
+                .unwrap_or_default(),
+            _ => (0, 0),
+        }
+    }
+
     /// Build a `MessageRow` from a TDLib message. Runs on the UI thread, so it
     /// may borrow the caches and kick off file downloads.
     #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
     pub fn message_row(&self, m: &types::Message) -> MessageRow {
         let (mut text, media_file, media_label, play_file, media_secs) =
             Self::content_preview(&m.content);
+        let (media_w, media_h) = Self::media_dims(&m.content);
         if let enums::MessageContent::MessageText(t) = &m.content {
             text = t.text.text.clone().into();
         }
@@ -3744,6 +3772,8 @@ impl Store {
             play_file,
             media_label,
             media_secs,
+            media_w,
+            media_h,
             reaction_chips: reactions,
             my_reaction,
             failed,
@@ -5411,6 +5441,8 @@ impl Store {
                 play_file: 0,
                 media_label: Str::from(""),
                 media_secs: 0,
+                media_w: 0,
+                media_h: 0,
                 reaction_chips: Vec::new(),
                 my_reaction: Str::from(""),
                 styled: StyledStr::empty(),
@@ -7037,6 +7069,8 @@ impl Store {
             play_file: 0,
             media_label: Str::from(""),
             media_secs: 0,
+            media_w: 0,
+            media_h: 0,
             reaction_chips: Vec::new(),
             failed: false,
             pending: true,
@@ -7121,6 +7155,8 @@ impl Store {
                 play_file: 0,
                 media_label: Str::from(name.to_string()),
                 media_secs: 0,
+                media_w: 0,
+                media_h: 0,
                 reaction_chips: Vec::new(),
                 failed: false,
                 pending: true,

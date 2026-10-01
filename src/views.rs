@@ -26,6 +26,7 @@ use waterui::navigation::{
 };
 use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
+use waterui::reactive::signal::IntoComputed;
 use waterui::shape::{Circle, Path, Rectangle, RoundedRectangle, ShapeExt, UnevenRoundedRectangle};
 use waterui::snackbar::{Snackbar, SnackbarManager};
 use waterui::text::highlight::Language;
@@ -38,6 +39,7 @@ use waterui::video::video_player;
 use waterui::widget::condition::when;
 use waterui::window::WindowState;
 use waterui_backend_core::widget::ModalInteraction;
+use waterui_image::ContentMode;
 
 /// Escape-key dispatch for overlay layers: `ModalInteraction` marks a
 /// subtree as a modal scope, so the backend sends Escape to the topmost
@@ -710,14 +712,24 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 }
                             },
                         )),
-                        // Same chip metrics as the tab chips so the row stays at
-                        // chip height (the 40dp icon chip would stretch the row).
-                        button(Label::new("New folder", move || {
-                            folder_plus().foreground(Accent).size(14.0, 14.0)
-                        }))
-                        .style(ButtonStyle::Plain)
-                        .action(|store: Store| store.open_folder_editor(0))
-                        .padding_with((chip_pad_v, 8.0_f32)),
+                        // Same chip metrics as the tab chips so the row stays
+                        // at chip height. A Plain `button` with an icon-only
+                        // label reserves the M3 icon-button 48dp touch
+                        // target as its minimum box (hydrolysis-m3
+                        // icon_button::metrics, propagated by hydrolysis'
+                        // measure_button_node → button_chrome_size) plus
+                        // label padding — ~74pt claimed for a 14pt icon,
+                        // which squeezed the chip scroll to ~240pt in the
+                        // 340pt sidebar (r51 D10). A tap chip like the
+                        // folder tabs claims only the ~30pt it draws.
+                        folder_plus()
+                            .foreground(Accent)
+                            .size(14.0, 14.0)
+                            .a11y_hidden(true)
+                            .padding_with((chip_pad_v, 8.0_f32))
+                            .on_tap(|store: Store| store.open_folder_editor(0))
+                            .a11y_role(AccessibilityRole::Button)
+                            .a11y_label("New folder"),
                     ))
                     .height(chip_row_h)
                     .padding_with((4.0, 8.0)),
@@ -2711,7 +2723,15 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     let chips = row.reaction_chips.clone();
     let has_reactions = !chips.is_empty();
     let time = row.time.clone();
-    let media = media_slot(store, row);
+    // Signal-derived cap — Telegram Desktop's ~72%-of-pane rule with its
+    // absolute 480dp ceiling. Honest repro: `Frame::max_width` samples a
+    // signal only at mount (waterui#1214, DOGFOOD r11-2b), so the cap is
+    // whatever the mount-time pane width produces; no wrap inside the cap
+    // on hydrolysis yet (hydrolysis#130). No workaround applied.
+    let bubble_cap = store
+        .win_frame
+        .map(|f| ((f.width() - 340.0) * 0.72).clamp(220.0, 480.0));
+    let media = media_slot(store, row, bubble_cap.clone());
     let sender = row.sender.clone();
     let r_view = row.clone();
 
@@ -2827,55 +2847,75 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
         );
     }
     if let Some(poll) = &row.poll {
-        parts.push(poll_block(row.id, poll).anyview());
+        // Secondary poll text takes the same outgoing/incoming muted color
+        // as every other bubble part — `MutedForeground` on the Accent
+        // (lavender) fill is unreadable (r51 D7).
+        parts.push(poll_block(row.id, poll, muted_parts).anyview());
     }
     if has_text {
-        let text_part: AnyView = if emoji_n > 0 {
-            let size = if emoji_n <= 3 {
-                44.0
-            } else if emoji_n <= 8 {
-                34.0
-            } else {
-                26.0
-            };
-            text(body_text.clone()).size(size).anyview()
-        } else if row.search_hit && !row.search_styled.is_empty() {
-            // In-chat search match: the body renders with every occurrence
-            // highlighted via span `background` (Desktop parity; r35).
-            text(row.search_styled.clone()).body().anyview()
-        } else if has_styled {
-            if row.has_spoiler {
-                // Desktop masks spoiler spans until tapped. The mask is a
-                // span `TextStyle.background` in the text color —
-                // hydrolysis drops per-span backgrounds until #207 lands,
-                // so the spoiler text shows unmasked for now (r32-2).
-                let masked = store.spoiler_masked(row.id);
-                let masked_styled = body_styled.clone();
-                let open_styled = row.styled_open.clone();
-                let rid = row.id;
-                // Both variants stay mounted and flip `.visible` — under a
-                // `when()`'s Dynamic mount the mask branch disappears on
-                // reveal, taking its gesture region with it (r32-3: regions
-                // also sit ~15px below paint on virtualized rows).
-                let open = masked.not();
-                zstack((
-                    text(masked_styled.clone()).body().visible(masked.clone()),
-                    text(open_styled.clone()).body().visible(open.clone()),
-                ))
-                .on_tap(move |store: Store| store.reveal_spoiler(rid))
-                .a11y_role(AccessibilityRole::Button)
-                .a11y_label("Hidden text — tap to reveal")
-                .a11y_state_signal(open.map(|shown| AccessibilityState::new().hidden(shown)))
-                .anyview()
-            } else {
-                text(body_styled.clone()).body().anyview()
+        // `text_part` builds inside the `otherwise` closure — `AnyView` is
+        // not `Clone`, and a `when`/`otherwise` builder is `Fn() -> V`.
+        let make_text_part = {
+            let store = store.clone();
+            let row = row.clone();
+            let body_text = body_text.clone();
+            let body_styled = body_styled.clone();
+            move || -> AnyView {
+                if emoji_n > 0 {
+                    let size = if emoji_n <= 3 {
+                        44.0
+                    } else if emoji_n <= 8 {
+                        34.0
+                    } else {
+                        26.0
+                    };
+                    text(body_text.clone()).size(size).anyview()
+                } else if row.search_hit && !row.search_styled.is_empty() {
+                    // In-chat search match: the body renders with every
+                    // occurrence highlighted via span `background`
+                    // (Desktop parity; r35).
+                    text(row.search_styled.clone()).body().anyview()
+                } else if has_styled {
+                    if row.has_spoiler {
+                        // Desktop masks spoiler spans until tapped. The mask
+                        // is a span `TextStyle.background` in the text color —
+                        // hydrolysis drops per-span backgrounds until #207
+                        // lands, so the spoiler text shows unmasked for now
+                        // (r32-2).
+                        let masked = store.spoiler_masked(row.id);
+                        let masked_styled = body_styled.clone();
+                        let open_styled = row.styled_open.clone();
+                        let rid = row.id;
+                        // Both variants stay mounted and flip `.visible` —
+                        // under a `when()`'s Dynamic mount the mask branch
+                        // disappears on reveal, taking its gesture region
+                        // with it (r32-3: regions also sit ~15px below paint
+                        // on virtualized rows).
+                        let open = masked.not();
+                        zstack((
+                            text(masked_styled.clone()).body().visible(masked.clone()),
+                            text(open_styled.clone()).body().visible(open.clone()),
+                        ))
+                        .on_tap(move |store: Store| store.reveal_spoiler(rid))
+                        .a11y_role(AccessibilityRole::Button)
+                        .a11y_label("Hidden text — tap to reveal")
+                        .a11y_state_signal(
+                            open.map(|shown| AccessibilityState::new().hidden(shown)),
+                        )
+                        .anyview()
+                    } else {
+                        text(body_styled.clone()).body().anyview()
+                    }
+                } else {
+                    text(body_text.clone()).body().anyview()
+                }
             }
-        } else {
-            text(body_text.clone()).body().anyview()
         };
         // r39 translate: while `translated` holds an entry the body swaps
-        // to it (both mounted, `.visible` flip — same pattern as the
-        // spoiler mask above); the caption restores the original.
+        // to it. Only the active branch is mounted — a `.visible`-flipped
+        // zstack sibling keeps its measured width and the hidden branch
+        // pushes the visible text off the sender line at narrow widths
+        // (r51 D4). The caption restores the original.
         let rid = row.id;
         let tr_map = store.translated.clone();
         let has_tr = tr_map
@@ -2885,10 +2925,9 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             .map(move |m| m.get(&rid).cloned().unwrap_or_default())
             .computed();
         parts.push(
-            zstack((
-                text_part.visible(has_tr.not()),
+            when(has_tr.clone(), move || {
                 vstack((
-                    text(tr_text).body(),
+                    text(tr_text.clone()).body(),
                     text("Translated to English — show original")
                         .caption()
                         .foreground(Accent)
@@ -2898,8 +2937,8 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
                 ))
                 .spacing(3.0)
                 .leading()
-                .visible(has_tr.clone()),
-            ))
+            })
+            .otherwise(make_text_part)
             .anyview(),
         );
     }
@@ -3099,14 +3138,6 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     .spacing(3.0)
     .padding_with([0.0, 8.0, 0.0, 8.0]);
 
-    // Signal-derived cap — Telegram Desktop's ~72%-of-pane rule with its
-    // absolute 480dp ceiling. Honest repro: `Frame::max_width` samples a
-    // signal only at mount (waterui#1214, DOGFOOD r11-2b), so the cap is
-    // whatever the mount-time pane width produces; no wrap inside the cap
-    // on hydrolysis yet (hydrolysis#130). No workaround applied.
-    let bubble_cap = store
-        .win_frame
-        .map(|f| ((f.width() - 340.0) * 0.72).clamp(220.0, 480.0));
     // Finite zstack layers: `ZStackLayout` reports the envelope of its
     // children, so the bubble hugs max(content, chips, meta) — BottomLeading
     // anchors the chips under the content, BottomTrailing the meta row.
@@ -3131,7 +3162,7 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     let bubble: AnyView = if emoji_n > 0 && !row.highlighted {
         // No fill: the emoji itself is the content (Telegram Desktop).
         Frame::new(bubble_inner)
-            .max_width(bubble_cap)
+            .max_width(bubble_cap.clone())
             .foreground(Foreground)
             .anyview()
     } else {
@@ -3152,7 +3183,7 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             RoundedRectangle::new(0.18).fill(bubble_fill).anyview()
         };
         Frame::new(bubble_inner)
-            .max_width(bubble_cap)
+            .max_width(bubble_cap.clone())
             .background(bg)
             .foreground(if row.outgoing {
                 Color::from(AccentForeground)
@@ -3449,7 +3480,12 @@ pub(crate) fn message_bubble(store: Store, row: MessageRow) -> impl View {
 #[allow(if_else_view)] // when() needs a signal; conditions here are plain bools
 #[allow(signal_get_in_view)] // the `has` gate rebuilds the view when the
 // file lands; get() then reads the resolved path at rebuild time
-pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
+pub(crate) fn media_slot(
+    store: &Store,
+    row: &MessageRow,
+    bubble_cap: impl IntoComputed<f32>,
+) -> impl View {
+    let bubble_cap = bubble_cap.into_computed();
     if row.play_file != 0 {
         // Playable payload (video / voice / audio / animation). Shows the
         // inline player once the file is downloaded; before that, a
@@ -3579,10 +3615,29 @@ pub(crate) fn media_slot(store: &Store, row: &MessageRow) -> impl View {
         let url = path_b.map(Url::from_file_path_str);
         let label_text = row.media_label.clone();
         let pct = store.file_progress_signal(fid);
+        let cap = bubble_cap.clone();
+        let nat_w = row.media_w.max(1) as f32;
+        let nat_h = row.media_h.max(1) as f32;
         when(has, move || {
-            Photo::new(url.clone())
-                .max_width(320.0)
-                .clip(RoundedRectangle::new(0.12))
+            // `ReactiveImage` is non-resizable by default — without
+            // `.resizable()` the photo paints at its natural pixel size
+            // (r51 D5). The photo is `resizable + Fit` inside a frame sized
+            // to the bubble cap from the payload's own pixels (like
+            // Desktop's media layout), and `clip` corners it off.
+            // `aspect_ratio` sizes against the proposed width rather than a
+            // cap, so the capped width and matching height come from signals;
+            // signal-driven `width/height` needs `Frame` (`View` takes f32
+            // only).
+            let disp_w = cap.map(move |c| nat_w.min(c));
+            let disp_h = cap.map(move |c| nat_h * nat_w.min(c) / nat_w);
+            Frame::new(
+                Photo::new(url.clone())
+                    .resizable()
+                    .content_mode(ContentMode::Fit),
+            )
+            .width(disp_w)
+            .height(disp_h)
+            .clip(RoundedRectangle::new(0.12))
         })
         .otherwise(move || {
             hstack((
@@ -4542,7 +4597,11 @@ fn media_cell(store: Store, row: SharedMediaRow) -> impl View {
 /// Poll block inside a bubble: question, tappable options showing vote
 /// share, and a totals footer. Tapping an option calls `setPollAnswer`.
 #[allow(if_else_view)] // color pick, not a view
-fn poll_block(message_id: i64, poll: &PollRow) -> impl View {
+fn poll_block(
+    message_id: i64,
+    poll: &PollRow,
+    muted_parts: impl Fn(AnyView) -> AnyView,
+) -> impl View {
     let mut opts: Vec<AnyView> = Vec::new();
     for o in &poll.options {
         let ix = o.ix;
@@ -4554,7 +4613,7 @@ fn poll_block(message_id: i64, poll: &PollRow) -> impl View {
                 hstack((
                     text(format!("{}{}", o.text, mark)).caption(),
                     spacer(),
-                    text(format!("{}%", o.pct)).caption().muted(),
+                    muted_parts(text(format!("{}%", o.pct)).caption().anyview()),
                 ))
                 .spacing(6.0),
                 RoundedRectangle::new(0.5)
@@ -4576,13 +4635,15 @@ fn poll_block(message_id: i64, poll: &PollRow) -> impl View {
     vstack((
         text(poll.question.clone()).body().bold(),
         vstack(opts).spacing(6.0),
-        text(if poll.closed {
-            format!("{} votes · closed", poll.voters)
-        } else {
-            format!("{} votes", poll.voters)
-        })
-        .caption()
-        .muted(),
+        muted_parts(
+            text(if poll.closed {
+                format!("{} votes · closed", poll.voters)
+            } else {
+                format!("{} votes", poll.voters)
+            })
+            .caption()
+            .anyview(),
+        ),
     ))
     .spacing(6.0)
     .leading()
