@@ -102,6 +102,10 @@
 | 操作反馈 toast | ✅ | `SnackbarManager` + `.snackbar(...)` 浮层：复制/置顶/转发完成/删除等提示（"2 messages forwarded" 实测出现）；按 Desktop 底部居中条 | `toast_notice_fires_on_copy` + 实测截图（r37_snack*/r37d_fwded.png） |
 | 频道贴 footer（浏览数/签名） | ✅ | `kind_icon="channel"` 贴子行尾：👁 `view_count` + `author_signature` | `channel_post_footer_shows_views` + 实测截图（r37_channel*） |
 | 频道贴评论区 | ✅ | `interaction_info.reply_info.reply_count` → 行尾 💬 N chip → `open_comments` 弹层（`comments_list`，发送者+正文行，demo 播种）；点击 chip 开串 | `open_comments_seeds_thread` + 三宽实测（r43_comments*） |
+| 应用内新消息横幅（未选中会话） | ✅ | `Update::NewMessage` → `maybe_banner` → `msg_banner` on_change → Snackbar "sender: preview" + 「Open」动作（demo `demo_incoming` 路径同真实路径经 `update_chat_row` 更新预览+未读，r50 实测 `#17 "Bob bundle verified — ship it 1"`；Snackbar 本体 headless 不可见 = DOGFOOD r50-3） | `incoming_banner_fires_for_other_chat` + mcp 树实测 |
+| 代码/预格式化块 + 逐块复制 | ✅ | `textEntityTypePre`/`PreCode` → `waterui::text::code` 卡片：语言头 + 高亮 mono 体 + 「Copy」钮（未知语言回落 Plaintext + `.info(token)`）；整条消息为 pre 时整泡覆盖；Copy 不可经 a11y 调起 = DOGFOOD r50-4 | `pre_blocks_slicing` + mcp 树实测（Rust/Plaintext 卡片 + mono 源码节点） |
+| 引用（Quote）菜单动作 | ✅ | 右键菜单「Quote」（`!row.text.is_empty()`）→ `quote_message`：`> {first_line}\n` 进 composer 草稿，发送时带引用块 | `quote_message_roundtrip` + mcp 实测（composer `value=> my sketch — first pass`） |
+| #话题标签 → 会话内搜索 | ✅ | `first_hashtag` 提取 → 右键菜单「Search #{tag}」→ `search_hashtag` = `chat_search_open` + `run_chat_search` 作用域内搜索 | `hashtag_search_scopes` + mcp 实测（`text_input value=#waterui [focused]`） |
 | 跳转到日期弹层 | ✅ | 工具栏日历钮 → 日期弹层 → `date_jump_target` 定位并高亮目标消息 | `date_jump_popup_opens` + 实测截图（r37_jump*） |
 | 拖拽文件进窗口发送 | ✅ | waterui eda24225 类型化拖放（#1254）+ hydrolysis 437ef045 桥接 winit XDnD `HoveredFile`/`DroppedFile`（#275）：根 `.drop_destination(|f: Files| f.into_urls()→attach)` + `.drop_hover` 蒙层；落入 → 附件条+提示 → caption → 文档气泡（demo `demo_echo_attachments`，真实 `sendMessage`）；合成 XDnD 源 + file:// URI 实测 | 三宽实测（r44_drop*/r44_docsent_*） |
 | 日期分隔条 | ✅ | 消息 `date` 跨天时插入居中分隔（Today / Yesterday / 月 日 / 月 日， 年） | `set_messages_marks_day_headers` |
@@ -184,7 +188,7 @@
 
 ## 覆盖情况汇总
 
-- 已实现 ✅：140 项 ｜ 部分 🟡：0 项｜ 未实现 ❌：0 项
+- 已实现 ✅：144 项 ｜ 部分 🟡：0 项｜ 未实现 ❌：0 项
 - r41 补录：机器人内联键盘（replyMarkup 按钮行+分类型分发）、聊天操作条（chatActionBar* 全型，替换输入框区）、消息信息卡（getMessageReadDate+getMessageViewers）、全局搜索过滤标签（All/Chats/Media/Files/Links）、文件夹编辑器会话选择器（getChatFolder 回填 + included_chat_ids 写回）—— 均 1400/800/600 实机验证；m3 锁已解除（waterui ee85dc47 含 TabItemLayout），m3→b21c79f6；waterkit 锁亦解除（video-gpu#35 已并 01f3d3fc，pin waterkit dev 11300217 software-decode），waterkit*→11300217 + video-gpu→01f3d3fc
 - r39 新增：自动删除定时器（行菜单嵌套 `Menu`）、未读回应 ❤ 徽标+浮动跳转钮、消息翻译（内联互换+还原）、复制消息链接、复制图片 —— 五项均 1400/800/600 实机验证
 - 现有测试：19 个 `#[waterui::test]` + 探测测试 + 1 个 `#[ignore]` 真实 DC e2e（`tests/tdlib_e2e.rs`）
@@ -195,3 +199,4 @@
 - r43 补录：Emoji 面板最近使用条、资料字段点按复制（@username/电话/简介→"Copied" toast）、频道贴 💬 评论弹层、停止投票（"Poll stopped"+closed footer）、保存到收藏夹（追加到 Saved Messages+toast）——均 1400/800/600 实机验证（r43_* 截图）；Ctrl+W 补全→快捷键升 ✅（根因是 app 代码：无任何 Command 携带 chord，挂载 Menu 的 shortcut 注册表本就全局派发）；紧凑宽（<700）Profile 推送不可见的 app 级修正：`show_profile` 在紧凑宽 `selected=None`，使压入侧栏栈的资料页立即可见（hydrolysis 紧凑语义：`render_compact_split` 只渲染一列，selection=Some 时详情列覆盖侧栏栈）；新缺陷 DOGFOOD r43-1（`App::menu_bar` 三个 runner 均解构丢弃）。
 - r44 补录：拖放文件发送（根 `.drop_destination(|f: Files|…)`+`.drop_hover` 蒙层，合成 XDnD 实测落入→附件条→文档气泡）、汉堡 "Night mode"（`.selected` ✓）、编辑媒体说明（`editMessageCaption` 并入既有编辑栏）、静音时长嵌套菜单（1h/8h/2d/∞+Unmute）、聊天背景五色板（`.background(signal_color)`）——均 1400/800/600 实机验证（r44_* 截图）；repin waterui eda24225/hydrolysis 437ef045（r41-1 `.visible` 还原实测 + r43-1 于 hydrolysis devin/menu-bar 66501fc 内修复，App::menu_bar 携带 Ctrl+W/N/, 实测）；新缺陷 DOGFOOD r44-1（条件嵌套 Menu 不派发）/ r44-2（低位弹层下缘点击穿透）。
 - r45 补录：删除后撤销（Snackbar.action Undo）、认证/诈骗徽标（check/alert decagram + 标题 ✓）、群组在线人数副标题（"N members, M online"）、举报会话（行菜单 Report→"Reported"）、资料页 "Add to contacts"（→折叠+toast）——均 1400/800/600 实机验证（r45_* 截图）；repin hydrolysis 4a34cf9a（#279 已并，`App::menu_bar` 无 path patch，Ctrl+N/Ctrl+,/Ctrl+W 三和弦复核实测）；新缺陷 DOGFOOD r45-1（场景重发 mid-press 清空 armed 手势 —— 全 app `.on_tap` 在人手速下失效；删除卡按钮已改 `button().action` 指针对象路径）。
+- r50 补录：应用内新消息横幅（未选中会话 `maybe_banner`→Snackbar+Open）、代码/Pre 块 `code()` 卡片+逐块 Copy、「Quote」引用菜单动作、#话题标签→会话内搜索 —— 均 `water mcp` 语义树实测（树摘录见交付报告；Snackbar 本体 headless 不可见记 DOGFOOD r50-3）；seen-by 信息卡与跳转到日期为既有行复测通过（demo 修复：群聊 `select_chat` 重播 `demo_members` 使 seen-by 可达）。六条 mcp 缺陷草案：r50-1..6（cli MCP GPU/stdio、waterui Snackbar/Code-Copy/clipboard、lints spawn_local 候选）。
