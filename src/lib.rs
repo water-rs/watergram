@@ -39,10 +39,19 @@ fn demo_page() -> Option<&'static str> {
         })
 }
 
+/// The app's own data directory — where the demo seed writes its assets
+/// and the real path keeps TDLib files. Missing platform data dir is a
+/// startup error, not a fallback.
+fn app_data_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .expect("platform data dir")
+        .join("watergram")
+}
+
 #[preview]
 fn main() -> impl View {
     if std::env::var_os("WATERGRAM_DEMO").is_some() {
-        let store = Store::new(0);
+        let store = Store::new(0, app_data_dir());
         store.seed_demo();
         // `water mcp` runs through SemanticRuntime, which builds its own window
         // and never drives this one's `frame` binding — the info-panel width
@@ -72,7 +81,7 @@ fn main() -> impl View {
         });
     }
     let (client_id, rx) = td::spawn_client();
-    let store = Store::new(client_id);
+    let store = Store::new(client_id, app_data_dir());
     let s = store.clone();
     views::root(store).task(async move {
         s.start();
@@ -89,7 +98,7 @@ pub fn app(mut env: Environment) -> App {
     } else {
         td::spawn_client()
     };
-    let store = Store::new(client_id);
+    let store = Store::new(client_id, app_data_dir());
     if demo {
         store.seed_demo();
         // Synchronous seeds — evaluated before the view mounts. The async
@@ -232,7 +241,17 @@ mod tests {
     use waterui_testing::{Role, Styled, UiBuilder};
 
     fn store() -> Store {
-        Store::new(0)
+        // Each test's store gets its own temporary data dir — parallel
+        // `seed_demo` calls never share the demo photo file.
+        let dir = std::env::temp_dir().join(format!(
+            "watergram-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        Store::new(0, dir)
     }
 
     fn chat(id: i64, title: &str, preview: &str, order: i64) -> ChatRow {
@@ -4928,9 +4947,10 @@ mod tests {
         assert_eq!(store.notice.snapshot().1.as_str(), "Auto-delete: 1 week");
     }
 
-    /// r39 pick: Copy image resolves the photo's local file and decodes it
-    /// (the arboard write itself is X11-dependent, so the test asserts the
-    /// decode path plus the toast dispatch, not the OS clipboard).
+    /// r39 pick: Copy image resolves the photo's local file and hands it
+    /// to the clipboard API, reporting through the notice binding. Runs
+    /// under Xvfb in CI, so the write succeeds and the toast must be
+    /// exactly "Image copied".
     #[test]
     fn copy_image_decodes_demo_photo() {
         let store = store();
@@ -4942,13 +4962,15 @@ mod tests {
             .into_iter()
             .find(|r| r.id == 17)
             .expect("demo photo msg 17");
-        // file_signal(1) resolves to the seeded PNG (state.rs writes it).
+        // file_signal(1) resolves to the seeded PNG in this store's own
+        // temp data dir — parallel seeds can't truncate each other's file.
         let path = store.file_signal(row.media_file).snapshot().to_string();
         assert!(!path.is_empty());
         let img = image::open(&path).expect("demo PNG decodes");
         assert_eq!((img.width(), img.height()), (640, 360));
         store.copy_image(&row);
-        assert!(!store.notice.snapshot().1.is_empty());
+        let notice = store.notice.snapshot().1;
+        assert_eq!(notice.as_str(), "Image copied");
     }
 
     /// r41: bot inline-keyboard rows parse off `replyMarkup` and each button

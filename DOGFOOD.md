@@ -3556,6 +3556,15 @@ Side-effect observed in gates: `copy_image_decodes_demo_photo` is
 flaky under parallel `cargo test` for the same reason — arboard's
 X11 hand-off races the test's own clipboard read and the notice is
 sometimes never set; the test passes alone and on rerun.
+**App-side FIXED** on `ci/first-run`: watergram moved text+image
+clipboard writes to `waterkit-clipboard` (`Clipboard::set_text` /
+`set_image`); its desktop backend (clipboard-rs) owns a
+process-lifetime X11 server thread, so contents survive handle
+drop. The parallel-test decode race was a second, independent
+cause — `demo_photo_png` truncated the shared `photo.png` while a
+sibling test read it; the write is now temp+rename atomic. The
+framework-side defect (waterui `code.rs` still on arboard) stands
+until water-rs/waterui#1351 lands.
 
 ### r50-6 [water-rs/lints]: candidate lint — `spawn_local` outside a live executor context panics at runtime, statically detectable
 
@@ -3626,6 +3635,30 @@ with a `Hashtag` entity at (9,8) — the tag renders link-blue via
 `styled_from_formatted` but a tap on it does nothing; the menu item
 `Search #waterui` (`views.rs` `bubble_menu_items`) is the honest fallback.
 
+### r50-9 [water-rs/waterkit]: `waterkit_clipboard` can write an image only from a file path — no decoded-pixel setter
+
+Observed (waterkit `2f1e3592`, `platform/clipboard`): the write surface
+is `Clipboard::set_image(&Path)` (`src/lib.rs:356` → `sys/desktop.rs:162`
+decodes via `image::open` → `RustImageData` → native format) and
+`set_binary(bytes, mime)` (`lib.rs:381` → raw buffer under a custom
+format/mime). The `Image` type (`src/content.rs:8` — width/height/RGBA)
+is read-side only (`Clipboard::image()`), and `ClipboardData` lets a
+caller supply bytes+mime, which lands as `set_buffer` — a *custom*
+format on macOS/Windows, not the native image slot.
+What the app needs: it already holds a decoded `RgbaImage` after
+`image::open` (TDLib photos are downloaded files, so `set_image(path)`
+works but decodes twice); other callers — screenshots, re-encoded crops,
+in-memory frames — have no file to point at. Writing PNG bytes via
+`set_binary` works on X11/Wayland (`image/png` IS the native image
+target there) but registers a non-standard format on macOS/Windows where
+receivers expect `public.png`/`PNG`.
+Expected: `set_image` gaining a decoded variant —
+`set_image_data(Image)` or `ClipboardData for Image` — writing the same
+native image slot as `set_image(&Path)` on every backend.
+Repro: watergram `state.rs` `copy_image` decodes then must pass the file
+path anyway (decode runs twice — once in-app, once inside
+`set_image_from_path`).
+
 ### Adopted this round
 
 - **`waterui::text::code` for `textEntityTypePre/PreCode`** —
@@ -3633,3 +3666,59 @@ with a `Hashtag` entity at (9,8) — the tag renders link-blue via
   tokens → `unwrap_or(Plaintext)` + `.info(token)` preserves the tag.
 - **`android_clipboard` on Android** replacing the unconditional
   arboard dep (mirroring `code.rs`'s cfg split).
+
+### r51-1 [upstream dylint]: stale `libwaterui_lints.so` survives a rev bump — dylint silently runs old lints
+
+Observed (cargo-dylint 6.0.4, nightly-2026-05-28): `cargo dylint --all`
+reported **0 warnings** on every local gate because
+`target/dylint/libraries/<toolchain>/release/libwaterui_lints.so`
+(built 2026-09-26) predated the `workspace.metadata.dylint` rev bump to
+`a9058391` — `strings` on the .so shows it lacks the `cloned state` and
+`collection-view-in-stack` lints entirely. The rev change did not
+invalidate the cached lint library, so every run linted with the OLD
+lints. A clean `ubuntu:24.04` container on the same commit reports **11
+warnings** (4× `cloned state forks this state on every Clone`, 6×
+`a collection view is not a stack element`, 1× stack-content suggestion);
+wiping `target/dylint/libraries` on the VM makes the same 11 appear.
+Local gates can therefore claim "0 findings" while CI reports real ones.
+
+Root cause (cargo-dylint 6.0.4 source):
+- `dylint/src/library_packages/mod.rs:63-69` —
+  `Package::target_directory` returns
+  `<workspace target>/dylint/libraries/<toolchain>`. The cache key is the
+  toolchain only; the resolved git rev never enters it.
+- `dylint/src/library_packages/mod.rs:455-484` — `build_library` runs a
+  bare `cargo build --release --target-dir <that dir>` inside
+  `package.root` and afterwards only `ensure!`s the `@toolchain` file
+  exists (`:472-480`). Dylint performs no freshness check of its own —
+  no rev/commit comparison, no `cargo clean`, nothing keyed on the
+  checkout it resolved. Whether anything rebuilds is entirely Cargo's
+  fingerprint decision.
+- `dylint/src/library_packages/cargo_cli/mod.rs:123-196` —
+  `git_dependency_root` is NOT the bug: the dummy-package `cargo fetch`
+  + `find_accessed_subdir` correctly returns the new rev's checkout
+  (`~/.cargo/git/checkouts/lints-*/a905839`), so `package.root` is fresh.
+- Why Cargo still skips the rebuild — verified on this VM: Cargo writes
+  ONE fingerprint directory per package
+  (`release/.fingerprint/waterui-lints-c454193267194666`) that does NOT
+  incorporate the package's absolute path — a build inside the OTHER
+  checkout (`lints-ee87e83e8f6b2ae1/8f74a56`) against the shared target
+  dir reports `Finished release profile in 0.23s` and emits nothing.
+  Freshness then rides on the dep-info `.d` file listing the LAST build's
+  absolute source paths. `cargo fetch` never prunes old checkouts
+  (`lints-*/{85c9c1d,8f74a56,a905839,b60983d}` all persist), so after a
+  rev bump the `.d` paths still exist with unchanged mtimes →
+  fingerprint "fresh" → `cargo build` in the NEW checkout is a no-op and
+  the stale `.so` is kept. Ownership: the missing rev-in-key and missing
+  freshness check live in dylint's `build_library`/`target_directory`
+  (trailofbits/dylint) — the lints repo's declaration (`git` + `rev`)
+  exercises the documented path and cargo-git-checkout persistence is
+  standard Cargo behaviour; hence [upstream dylint]. Dylint could key
+  the libraries dir on the resolved `PackageId`/checkout hash or run
+  `cargo clean -p` in that dir before building.
+
+Expected: the lint-library fingerprint keyed on the resolved git rev so
+a rev bump forces a rebuild (or a documented `cargo dylint clean`).
+Repro: pin lints rev A, run `cargo dylint --all`; bump to rev B with
+new/changed lints, rerun → the old .so is reused; `strings` shows the
+new lint names absent; `rm -rf target/dylint/libraries` restores them.

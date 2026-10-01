@@ -9,7 +9,7 @@
 use chrono::Datelike;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -802,7 +802,17 @@ pub enum Route {
 #[state]
 #[derive(Clone)]
 pub struct Store {
-    pub client_id: Cell<i32>,
+    pub client_id: Rc<Cell<i32>>,
+    /// The app's own data directory — the demo seed writes its assets
+    /// under it. Passed in at construction; tests get a unique temp dir
+    /// each, so parallel `seed_demo` calls never share a file.
+    pub data_dir: Rc<PathBuf>,
+    /// OS clipboard handle, created once at construction. Every
+    /// `waterkit_clipboard::Clipboard::new()` spawns its own X11 server
+    /// window, and concurrent instances race each other for selection
+    /// ownership (clipboard-rs: "Failed to take ownership of the
+    /// clipboard") — clones share the one server.
+    sys_clipboard: Rc<RefCell<Option<waterkit_clipboard::Clipboard>>>,
     /// The main window's state binding — the same one handed to
     /// `Window::new` — so commands (Ctrl+W Quit) can close the app window.
     pub win_state: Binding<WindowState>,
@@ -866,7 +876,7 @@ pub struct Store {
     pub list_selection: Binding<Option<i64>>,
     /// Guards the `list_selection` snap-back write inside `select_chat` so
     /// the `on_change` watcher does not re-enter it.
-    pub syncing_selection: Cell<bool>,
+    pub syncing_selection: Rc<Cell<bool>>,
     pub messages: Binding<Vec<MessageRow>>,
     pub scroll: ScrollController<usize>,
     pub composer: Binding<Str>,
@@ -1104,10 +1114,10 @@ pub struct Store {
     pub twofa_email: Binding<Str>,
     pub twofa_note: Binding<Str>,
     /// Cached user id of the @gif inline bot (resolved on first search).
-    gif_bot: Cell<i64>,
+    gif_bot: Rc<Cell<i64>>,
     /// Per-user privacy exception picker: (setting, allow?).
     pub privacy_picker_open: Binding<bool>,
-    privacy_target: RefCell<Option<(enums::UserPrivacySetting, bool)>>,
+    privacy_target: Rc<RefCell<Option<(enums::UserPrivacySetting, bool)>>>,
     /// Guards keeping notification-scope watchers alive.
     notif_watchers: Rc<RefCell<Vec<Box<dyn std::any::Any>>>>,
     /// Global notification toggles (per scope; true = notifications on).
@@ -1780,9 +1790,11 @@ impl Store {
         }
     }
 
-    pub fn new(client_id: i32) -> Self {
+    pub fn new(client_id: i32, data_dir: PathBuf) -> Self {
         Self {
-            client_id: Cell::new(client_id),
+            client_id: Rc::new(Cell::new(client_id)),
+            data_dir: Rc::new(data_dir),
+            sys_clipboard: Rc::new(RefCell::new(waterkit_clipboard::Clipboard::new().ok())),
             win_state: Binding::container(WindowState::Normal),
             screen: Binding::container(Screen::Loading),
             dark: Binding::bool(false),
@@ -1817,7 +1829,7 @@ impl Store {
             search: Binding::container(Str::from("")),
             selected: Binding::default(),
             list_selection: Binding::default(),
-            syncing_selection: Cell::new(false),
+            syncing_selection: Rc::new(Cell::new(false)),
             messages: Binding::<Vec<MessageRow>>::default(),
             scroll: ScrollController::<usize>::new(0),
             composer: Binding::container(Str::from("")),
@@ -1969,8 +1981,8 @@ impl Store {
             twofa_email: Binding::container(Str::from("")),
             twofa_note: Binding::container(Str::from("")),
             privacy_picker_open: Binding::bool(false),
-            gif_bot: Cell::new(0),
-            privacy_target: RefCell::new(None),
+            gif_bot: Rc::new(Cell::new(0)),
+            privacy_target: Rc::new(RefCell::new(None)),
             notif_watchers: Rc::new(RefCell::new(Vec::new())),
             notif_private: Binding::bool(true),
             notif_groups: Binding::bool(true),
@@ -2294,11 +2306,14 @@ impl Store {
         // Seed the photo message's local file so its thumbnail renders —
         // the demo path has no TDLib download pipeline, so `file_signal(1)`
         // would otherwise stay empty and fall back to the file card.
-        if let Some(path) = demo_photo_png() {
-            self.files
-                .borrow_mut()
-                .insert(1, path.to_string_lossy().to_string());
-            self.files_version.add_assign(1);
+        match demo_photo_png(&self.data_dir.join("demo")) {
+            Ok(path) => {
+                self.files
+                    .borrow_mut()
+                    .insert(1, path.to_string_lossy().to_string());
+                self.files_version.add_assign(1);
+            }
+            Err(e) => tracing::warn!(error = %e, dir = ?self.data_dir, "demo photo seed failed"),
         }
         self.demo_seed_pinned(1);
         // Global-search demo corpus (chat_id, message_id, sender, text,
@@ -5854,7 +5869,7 @@ impl Store {
     /// pattern of `copy_message`.
     pub fn copy_field(&self, value: &str) {
         self.clipboard.set_from(value.to_string());
-        system_clipboard_set_text(value.to_string());
+        self.sys_clipboard_set_text(value);
         self.notify(self.tr("Copied", 0, "Copied"));
     }
 
@@ -7990,7 +8005,7 @@ impl Store {
             KbKind::Copy(t) => {
                 let text = t.to_string();
                 if !text.is_empty() {
-                    system_clipboard_set_text(text);
+                    self.sys_clipboard_set_text(&text);
                 }
                 self.notify("Copied");
             }
@@ -8155,7 +8170,7 @@ impl Store {
         self.clipboard.set(row.text.clone());
         let text = row.text.to_string();
         if !text.is_empty() {
-            system_clipboard_set_text(text);
+            self.sys_clipboard_set_text(&text);
         }
         self.notify("Text copied");
     }
@@ -8226,7 +8241,7 @@ impl Store {
         if self.client_id.get() == 0 {
             let link = format!("https://t.me/watergram/{id}");
             self.clipboard.set_from(link.clone());
-            system_clipboard_set_text(link);
+            self.sys_clipboard_set_text(&link);
             self.notify("Link copied");
             return;
         }
@@ -8236,8 +8251,9 @@ impl Store {
         spawn_local(async move {
             match functions::get_message_link(chat_id, id, 0, false, false, client).await {
                 Ok(enums::MessageLink::MessageLink(l)) => {
-                    store.clipboard.set_from(l.link.clone());
-                    system_clipboard_set_text(l.link);
+                    let link = l.link.clone();
+                    store.clipboard.set_from(link.clone());
+                    store.sys_clipboard_set_text(&link);
                     store.notify("Link copied");
                 }
                 _ => store.notify("No link for this message"),
@@ -8254,19 +8270,12 @@ impl Store {
             self.notify("No image to copy");
             return;
         }
-        match image::open(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-                let ok = system_clipboard_set_image(&rgba, w, h);
-                self.notify(if ok {
-                    "Image copied"
-                } else {
-                    "Clipboard unavailable"
-                });
-            }
-            Err(_) => self.notify("Could not decode image"),
-        }
+        let ok = self.sys_clipboard_set_image(std::path::Path::new(&path));
+        self.notify(if ok {
+            "Image copied"
+        } else {
+            "Clipboard unavailable"
+        });
     }
 
     /// Chat auto-delete timer (`setChatMessageAutoDeleteTime`, seconds).
@@ -8308,7 +8317,7 @@ impl Store {
             return;
         }
         self.clipboard.set_from(joined.clone());
-        system_clipboard_set_text(joined);
+        self.sys_clipboard_set_text(&joined);
         let n = self.selected_msgs.snapshot().len();
         self.notify(format!("{n} copied"));
     }
@@ -10494,141 +10503,77 @@ impl Store {
     }
 }
 
-/// Demo asset: writes a small procedural PNG into the app's data dir so
-/// the seeded photo message's `file_signal(1)` resolves a real path and
-/// the media slot renders the actual image (the demo path has no TDLib
-/// download pipeline). The zlib stream uses stored deflate blocks, so no
-/// codec dependency is needed to produce it.
-fn demo_photo_png() -> Option<PathBuf> {
-    const W: usize = 640;
-    const H: usize = 360;
+/// Demo asset: writes a small procedural PNG under `dir` so the seeded
+/// photo message's `file_signal(1)` resolves a real path and the media
+/// slot renders the actual image (the demo path has no TDLib download
+/// pipeline). The caller owns the directory — a missing/unwritable one
+/// is an error, not a fallback.
+fn demo_photo_png(dir: &Path) -> std::io::Result<PathBuf> {
+    const W: u32 = 640;
+    const H: u32 = 360;
     // RGB dusk scene: vertical gradient sky, a sun disc, a darker
     // shoreline with a soft sine edge.
-    let mut raw = Vec::with_capacity(H * (1 + W * 3));
-    for y in 0..H {
-        raw.push(0u8); // scanline filter: none
-        for x in 0..W {
-            let t = y as f32 / (H - 1) as f32;
-            let (mut r, mut g, mut b) = (28.0 + 110.0 * t, 52.0 + 70.0 * t, 150.0 - 70.0 * t);
-            let (dx, dy) = (x as f32 - 470.0, y as f32 - 130.0);
-            let sun = 1.0 - ((dx * dx + dy * dy).sqrt() / 58.0).min(1.0);
-            if sun > 0.0 {
-                r += 210.0 * sun;
-                g += 150.0 * sun;
-                b += 70.0 * sun;
-            }
-            if y > 250 {
-                let shore = 250.0 + (x as f32 / 18.0).sin() * 6.0;
-                if y as f32 > shore {
-                    r *= 0.45;
-                    g *= 0.6;
-                    b *= 0.9;
-                }
-            }
-            raw.extend_from_slice(&[
-                r.clamp(0.0, 255.0) as u8,
-                g.clamp(0.0, 255.0) as u8,
-                b.clamp(0.0, 255.0) as u8,
-            ]);
+    let img = image::RgbImage::from_fn(W, H, |x, y| {
+        let t = y as f32 / (H - 1) as f32;
+        let (mut r, mut g, mut b) = (28.0 + 110.0 * t, 52.0 + 70.0 * t, 150.0 - 70.0 * t);
+        let (dx, dy) = (x as f32 - 470.0, y as f32 - 130.0);
+        let sun = 1.0 - ((dx * dx + dy * dy).sqrt() / 58.0).min(1.0);
+        if sun > 0.0 {
+            r += 210.0 * sun;
+            g += 150.0 * sun;
+            b += 70.0 * sun;
         }
-    }
-    // zlib stream of stored (uncompressed) deflate blocks.
-    let mut z = Vec::with_capacity(raw.len() + raw.len() / 65535 * 5 + 16);
-    z.extend_from_slice(&[0x78, 0x01]);
-    let mut i = 0;
-    while i < raw.len() {
-        let n = (raw.len() - i).min(65535);
-        z.push(u8::from(i + n == raw.len()));
-        z.extend_from_slice(&(n as u16).to_le_bytes());
-        z.extend_from_slice(&(!(n as u16)).to_le_bytes());
-        z.extend_from_slice(&raw[i..i + n]);
-        i += n;
-    }
-    z.extend_from_slice(&adler32(&raw).to_be_bytes());
-    let mut png = Vec::with_capacity(z.len() + 64);
-    png.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
-    let mut ihdr = Vec::with_capacity(13);
-    ihdr.extend_from_slice(&(W as u32).to_be_bytes());
-    ihdr.extend_from_slice(&(H as u32).to_be_bytes());
-    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit truecolor RGB
-    png_chunk(&mut png, b"IHDR", &ihdr);
-    png_chunk(&mut png, b"IDAT", &z);
-    png_chunk(&mut png, b"IEND", &[]);
-    let dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("watergram")
-        .join("demo");
-    std::fs::create_dir_all(&dir).ok()?;
+        if y > 250 {
+            let shore = 250.0 + (x as f32 / 18.0).sin() * 6.0;
+            if y as f32 > shore {
+                r *= 0.45;
+                g *= 0.6;
+                b *= 0.9;
+            }
+        }
+        image::Rgb([
+            r.clamp(0.0, 255.0) as u8,
+            g.clamp(0.0, 255.0) as u8,
+            b.clamp(0.0, 255.0) as u8,
+        ])
+    });
+    std::fs::create_dir_all(dir)?;
     let path = dir.join("photo.png");
-    std::fs::write(&path, &png).ok()?;
-    Some(path)
+    img.save(&path).map_err(std::io::Error::other)?;
+    Ok(path)
 }
 
-fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    out.extend_from_slice(kind);
-    out.extend_from_slice(data);
-    let mut crc_in = Vec::with_capacity(4 + data.len());
-    crc_in.extend_from_slice(kind);
-    crc_in.extend_from_slice(data);
-    out.extend_from_slice(&crc32(&crc_in).to_be_bytes());
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
+impl Store {
+    /// One X11 server per Store: every `waterkit_clipboard::Clipboard::new()`
+    /// spawns its own server window, and concurrent instances race each other
+    /// for selection ownership (clipboard-rs: "Failed to take ownership of the
+    /// clipboard") — clones share the one server. A write is a single call;
+    /// its result picks the toast.
+    fn sys_clipboard_write(
+        &self,
+        write: impl Fn(
+            &mut waterkit_clipboard::Clipboard,
+        ) -> Result<(), waterkit_clipboard::ClipboardError>,
+    ) -> bool {
+        let mut guard = self.sys_clipboard.borrow_mut();
+        let Some(cb) = guard.as_mut() else {
+            return false;
+        };
+        write(cb).is_ok()
     }
-    !crc
-}
 
-fn adler32(data: &[u8]) -> u32 {
-    const MOD: u32 = 65521;
-    let (mut a, mut b) = (1u32, 0u32);
-    for &x in data {
-        a = (a + u32::from(x)) % MOD;
-        b = (b + a) % MOD;
+    /// Text → OS clipboard on every target via waterkit-clipboard. Its
+    /// desktop backend (clipboard-rs) keeps a process-lifetime X11 server
+    /// thread, so written contents outlive the handle — the arboard
+    /// die-with-the-handle defect (DOGFOOD r50-5) is gone.
+    fn sys_clipboard_set_text(&self, text: &str) {
+        self.sys_clipboard_write(|cb| cb.set_text(text));
     }
-    (b << 16) | a
-}
 
-/// Text → OS clipboard: `arboard` on desktop targets, `android_clipboard`
-/// on Android (arboard has no Android backend; waterui's `code.rs` splits
-/// the same way).
-#[cfg(not(target_os = "android"))]
-fn system_clipboard_set_text(text: String) {
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        let _ = cb.set_text(text);
+    /// Image → OS clipboard on every target. `set_image` takes a file path
+    /// and converts to each platform's native image format; there is no
+    /// decoded-pixel setter at waterkit 2f1e3592 (DOGFOOD r50-9).
+    fn sys_clipboard_set_image(&self, path: &std::path::Path) -> bool {
+        self.sys_clipboard_write(|cb| cb.set_image(path))
     }
-}
-
-#[cfg(target_os = "android")]
-fn system_clipboard_set_text(text: String) {
-    let _ = android_clipboard::set_text(text);
-}
-
-/// Image → OS clipboard. `android_clipboard` is text-only, so the Android
-/// variant reports failure and the caller notifies "Clipboard unavailable".
-#[cfg(not(target_os = "android"))]
-fn system_clipboard_set_image(rgba: &image::RgbaImage, width: usize, height: usize) -> bool {
-    let data = arboard::ImageData {
-        width,
-        height,
-        bytes: rgba.as_raw().clone().into(),
-    };
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_image(data))
-        .is_ok()
-}
-
-#[cfg(target_os = "android")]
-fn system_clipboard_set_image(_rgba: &image::RgbaImage, _width: usize, _height: usize) -> bool {
-    false
 }

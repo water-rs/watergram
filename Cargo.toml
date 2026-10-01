@@ -61,6 +61,7 @@ waterui-barcode = "0.3.0"
 robius-open = "0.3"
 waterkit-audio = "0.1.4"
 waterkit-camera = "0.1.4"
+waterkit-clipboard = "0.1.4"
 waterkit-codec = "0.1.4"
 waterkit-video-container = "0.1.4"
 opus-pure = "0.2.1"
@@ -156,11 +157,3 @@ waterui-webview = { git = "https://github.com/water-rs/waterui", rev = "225259c8
 
 [workspace.metadata.dylint]
 libraries = [{ git = "https://github.com/water-rs/lints", rev = "a9058391ed6a876bea4a53c9499623eaaff82f78" }]
-
-# System clipboard: arboard covers desktop targets only — it has no Android
-# backend (waterui's `code.rs` splits the same way).
-[target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = "3.6.1"
-
-[target.'cfg(target_os = "android")'.dependencies]
-android_clipboard = "0.1.0"
