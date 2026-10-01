@@ -8,7 +8,7 @@ initialize:
       sudo apt-get install -y --no-install-recommends \
         libegl-dev libgles-dev libglvnd-dev libfontconfig-dev libxkbcommon-dev \
         libgbm-dev libspa-0.2-dev libc++-dev libc++abi-dev meson ninja-build \
-        pkg-config curl ca-certificates gcc g++
+        pkg-config curl ca-certificates gcc g++ fonts-noto-color-emoji
   - name: libva 2.22 (stock 2.14 is too old for cros-libva 0.0.12)
     run: |
       set -e
