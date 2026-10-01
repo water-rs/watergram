@@ -578,7 +578,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
             when(store.accounts_open.clone(), move || {
                 let rows = store.accounts.clone();
                 vstack((
-                    VStack::for_each(
+                    scroll(VStack::for_each(
                         SignalCollection::new(rows.clone()),
                         move |acc: AccountRow| {
                             let id = acc.id;
@@ -586,7 +586,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                                 .padding_with((4.0, 12.0))
                                 .on_tap(move |store: Store| store.switch_account(id))
                         },
-                    ),
+                    )),
                     hstack((
                         plus().tint(Accent).size(14.0, 14.0),
                         text("Add account").caption().foreground(Accent),
@@ -3693,7 +3693,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                 .on_tap(|store: Store| store.open_twofa())
                 .a11y_label("Two-step verification")
                 .a11y_role(AccessibilityRole::Button),
-                VStack::for_each(
+                scroll(VStack::for_each(
                     SignalCollection::new(store.privacy_rows.clone()),
                     move |row: PrivacyRow| {
                         let k = row.key.clone();
@@ -3724,7 +3724,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                             }),
                         ))
                     },
-                ),
+                )),
                 vstack((
                     text(store.tr("Notifications", 0, "Notifications"))
                         .caption()
@@ -3746,7 +3746,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                     .style(ButtonStyle::Plain)
                     .action(|store: Store| store.terminate_all_sessions()),
                 )),
-                VStack::for_each(
+                scroll(VStack::for_each(
                     SignalCollection::new(store.sessions.clone()),
                     move |row: SessionRow| {
                         let is_current = row.current;
@@ -3764,12 +3764,12 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                         .context_menu(("Terminate"
                             .action(move |store: Store| store.terminate_session_by_id(row.id)),))
                     },
-                ),
+                )),
                 vstack((
                     text(store.tr("BlockedUsers", 0, "Blocked users"))
                         .caption()
                         .muted(),
-                    VStack::for_each(
+                    scroll(VStack::for_each(
                         SignalCollection::new(store.blocked.clone()),
                         |row: MemberRow| {
                             hstack((
@@ -3785,7 +3785,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                             .a11y_label(Str::from(format!("Unblock {}", row.name)))
                             .a11y_role(AccessibilityRole::Button)
                         },
-                    ),
+                    )),
                 ))
                 .spacing(4.0)
                 .leading(),
@@ -3820,7 +3820,7 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
             // setOption language_pack_id and refetches the pack's strings.
             vstack((
                 text(store.tr("Language", 0, "Language")).caption().muted(),
-                VStack::for_each(
+                scroll(VStack::for_each(
                     SignalCollection::new(store.lang_packs.clone()),
                     |row: LangRow| {
                         let id = row.id.clone();
@@ -3828,14 +3828,16 @@ pub(crate) fn settings_view(store: Store) -> NavigationView {
                             text(row.name.clone()),
                             when(row.beta, || text("beta").caption().muted()),
                             spacer(),
-                            when(row.active, || check().tint(Accent).size(16.0, 16.0)),
+                            when(row.active, || {
+                                check().tint(Accent).size(16.0, 16.0).a11y_hidden(true)
+                            }),
                         ))
                         .padding_with((4.0, 0.0))
                         .on_tap(move |store: Store| store.apply_language(&id))
                         .a11y_label(Str::from(format!("Use {}", row.name)))
                         .a11y_role(AccessibilityRole::Button)
                     },
-                ),
+                )),
             ))
             .spacing(4.0)
             .leading(),
@@ -4104,7 +4106,7 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
                 .spacing(8.0)
                 .leading()
             }),
-            VStack::for_each(
+            scroll(VStack::for_each(
                 SignalCollection::new(store.contacts.clone()),
                 move |row: MemberRow| {
                     hstack((
@@ -4121,7 +4123,7 @@ pub(crate) fn new_chat_view(store: Store) -> NavigationView {
                         "Remove contact".action(move |store: Store| store.remove_contact(row.key)),
                     ))
                 },
-            ),
+            )),
         ))
         .spacing(10.0)
         .padding_with((12.0, 16.0)),
@@ -4389,7 +4391,7 @@ pub(crate) fn info_panel(store: Store) -> impl View {
                 .padding_with((4.0, 14.0)),
                 {
                     let member_av = member_rows.clone();
-                    VStack::for_each(
+                    scroll(VStack::for_each(
                         SignalCollection::new(member_rows.members.clone()),
                         move |row: MemberRow| {
                             let label_text = format!("Member {}", row.name);
@@ -4425,7 +4427,7 @@ pub(crate) fn info_panel(store: Store) -> impl View {
                                 spacer(),
                             ))
                         },
-                    )
+                    ))
                 },
             ))
             .spacing(0.0)
