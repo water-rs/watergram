@@ -8003,6 +8003,7 @@ dependencies = [
  "waterui-backend-core",
  "waterui-barcode",
  "waterui-icons-material-icon",
+ "waterui-image",
  "waterui-testing",
  "wgpu",
 ]

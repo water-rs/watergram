@@ -3722,3 +3722,81 @@ a rev bump forces a rebuild (or a documented `cargo dylint clean`).
 Repro: pin lints rev A, run `cargo dylint --all`; bump to rev B with
 new/changed lints, rerun → the old .so is reused; `strings` shows the
 new lint names absent; `rm -rf target/dylint/libraries` restores them.
+
+### r51-2 [water-rs/hydrolysis]: scroll offsets never move — a11y scroll actions, pointer wheel and drag are all no-ops
+
+Observed (hydrolysis `a01a1e6`, X11/Xvfb build, watergram folder chip rail
+and chat history scrolls): every programmatic and pointer scroll input is
+inert. The a11y tree advertises `actions=[scroll_left,scroll_right]` on
+the `scroll_view` nodes and `act` accepts them, but the scroll offset
+never changes (bounds and pixels identical before/after); `pointer
+kind=scroll` wheel deltas and `pointer kind=drag` gestures over the same
+nodes move nothing either. So a chip clipped by the viewport — "Archive"
+in the 340pt sidebar before the r51 D10 fix — is unreachable: the
+advertised action exists, it just does nothing.
+Candidates (unconfirmed which layer drops it):
+`src/renderer/accessibility/accessibility_impl.rs:2318-2360`
+(`handle_accessibility_scroll_action`) forwards to
+`handle.apply_scroll_delta` and **ignores the returned bool**, so a
+silently-dropped delta still reports success upstream;
+`waterui backends/core/src/scroll.rs:206-214`
+(`ScrollHandle::apply_scroll_delta`) returns `false` without applying
+when `state.generation != self.generation` — a handle captured by an
+earlier frame goes permanently stale. Either is consistent with "input
+accepted, zero offset change".
+Expected: at minimum the advertised `scroll_*` actions move the offset
+by `ACCESSIBILITY_SCROLL_STEP` (the doc at :2313 says "programmatic: they
+move the offset immediately"); ideally wheel/drag work too.
+Repro: `water mcp` on watergram — `find` a `scroll_view` node whose
+content overflows (chip rail at 340pt sidebar pre-D10-fix, Archive
+clipped at x>240), `act` its `scroll_right`, then `snapshot`/`screenshot`
+→ identical bounds and pixels; repeat with `pointer kind=scroll` and
+`pointer kind=drag`.
+
+### r51-3 [water-rs/waterui (waterui-image)]: a `resizable` image has no intrinsic size — inside `when(...)` it collapses to 0×0
+
+Observed (waterui `225259c8` / waterui-image 0.5.0): `ReactiveImage::body`
+(`image.rs:452-473`) returns a bare `Frame` when `resizable` — the only
+size source is the `dimensions` Binding, which stays `None` until the
+decoder's first frame publishes. Same in `Image::body` (:360-373). In a
+non-stretch context — `when(sig)` mounts via `Dynamic`, which is
+`raw_view!(Dynamic)` and therefore a static `StretchAxis::None`
+(`core/src/components/dynamic.rs:41` → the `raw_view!` default at
+`core/src/macros.rs:68`) — the parent's negotiated offer is
+the child's intrinsic max-probe, i.e. 0: the media collapses to 0×0 and
+never paints, even after `dimensions` arrives. And without `.resizable()`
+the same view ignores any enclosing cap and paints at its natural pixel
+size (watergram r51 D5: a 640×360 photo at a 480pt bubble cap, drawn
+640 wide overflowing its bubble).
+Expected: a resizable image publishing its decoded `dimensions` as the
+measure's natural size, so `Fit` + `aspect_ratio` (foundation layout
+*does* ship `aspect_ratio()`/`AspectRatioLayout`) or a `max_width` cap
+produce ratio-correct media sizing; or `Photo`/`Image`/`ReactiveImage`
+taking an aspect/size contract directly. Without it the only honest
+app-side expression is plumbing the payload's own pixel dims into an
+explicit signal-driven `Frame::width().height()` — which is what
+watergram now does (`media_w`/`media_h` from `photoSize`, like Desktop's
+media layout).
+Repro: `when(sig, || Photo::new(url).resizable().content_mode(Fit))`
+inside a width-bounded vstack → 0×0 paint; remove `.resizable()` →
+natural-pixel paint ignoring the cap.
+
+### r51-4 [water-rs/lints]: `signal_in_param` suggests `use waterui::signal::IntoComputed` — a path that does not exist
+
+Observed (lints `a9058391`, `cargo dylint --all`): the
+`a public function takes Computed<T> where callers would pass any
+signal` diagnostic's machine suggestion inserts
+`use waterui::signal::IntoComputed;`. Applied verbatim it fails to
+resolve: the waterui facade re-exports nami as `waterui::reactive`
+(`src/lib.rs:221`, `pub use nami as reactive`) and there is no
+`waterui::signal` module at `225259c8`. The trait itself is
+`nami::signal::IntoComputed` (nami `reactive_core/signal.rs:47`,
+re-exported `nami::signal`), so the working import is
+`waterui::reactive::signal::IntoComputed`.
+Expected: the suggestion's path resolves in a real consumer crate —
+emit `use waterui::reactive::signal::IntoComputed;` (or detect the
+facade's nami alias) so `-D warnings` users can apply the lint
+mechanically.
+Repro: write `fn f(x: &Computed<f32>)` in a crate depending on the
+waterui facade; apply the lint's suggested import; `cargo check` →
+`unresolved import waterui::signal`.

@@ -54,6 +54,9 @@ dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
 waterui-icons-material-icon = "0.5.1"
+# `ContentMode` for `Photo::content_mode` lives in this crate; `Photo` does
+# not re-export it.
+waterui-image = "0.5.0"
 # ModalInteraction (modal Escape scopes) is part of the backend contract
 # crate; hydrolysis-m3 is dev-only so views can't reach its re-export.
 waterui-backend-core = "0.5.2"
