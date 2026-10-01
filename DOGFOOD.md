@@ -3445,3 +3445,191 @@ pinned they all recover at once — no app-side gesture change needed.
 - **`App::menu_bar` from upstream pin** — path patch removed; the
   merged #279 implementation now arms the three app commands.
 - No other API changes adopted; pins only.
+
+## r50 — MCP/headless + clipboard + a11y gaps found driving the app through `water mcp`
+
+Observed on waterui `225259c8` (the r50 pin), hydrolysis `a01a1e6d`,
+`water` CLI from the installed toolchain, on this Linux VM
+(llvmpipe adapter only). Each draft is labelled with its owning
+repository.
+
+### r50-1 [water-rs/cli]: `water mcp` refuses to start on any host without a GPU-compatible adapter — headless verification is impossible on CPU-only machines
+
+Observed: `water mcp --path . --viewport 1400x900` panics at
+`hydrolysis/src/platform.rs:1014` — "this host has no GPU Hydrolysis
+can use" — because the only adapter is llvmpipe (a software adapter
+that cannot run the renderer's pipelines fails or aborts the runner
+probe). The panic message itself points at waterui-dew as the CPU
+renderer, i.e. the codebase knows the answer; the mcp/offscreen path
+just doesn't take it.
+Workaround found this round: `WATER_HYDROLYSIS_FORCE_FALLBACK_ADAPTER=1`
+— llvmpipe then runs the compute pipelines fine and produces a full
+accessibility tree (snapshot/find/act/wait all work; verified against
+watergram: 30+ assertions across the five r50 picks).
+Expected: `water mcp` selects the fallback adapter by itself on
+adapter-less hosts (it never produces pixels a user would trust
+anyway — it is a tree/automation surface), or prints the env var in
+the panic message instead of dying opaque.
+Repro (outside the app): any WaterUI app on a machine whose only
+wgpu adapter is `llvmpipe`/`SwiftShader` → `water mcp --path .` →
+panic at `platform.rs:1014`.
+
+### r50-2 [water-rs/cli]: `water mcp` has no client-loadable surface — stdio is the only route, and most of its value survives
+
+Observed: this session's MCP tooling lists zero servers for the
+project's `.mcp.json` (`mcp_list_servers` → none), so every call
+went through the raw stdio transport — newline-delimited JSON-RPC,
+`initialize` → `notifications/initialized` → `tools/call`.
+What survives without a client: all 11 tools work — `snapshot`
+(accessibility tree with bounds/actions/states), `find` (15 filter
+fields), `act`, `key`, `pointer` (tap/drag/scroll/secondary_click
+with node anchoring), `type_text`, `wait`, `advance`, `restart`,
+`preview`, `screenshot`. Tree-driven verification needs nothing
+else; the whole r50 verification ran on it.
+What does not survive: (a) `screenshot` image content has to be
+handled as bytes in the JSON payload — fine for replay scripts, but
+there is no first-class "save to file" flag on the CLI side;
+(b) session lifetime — each `water mcp` invocation is one app boot
+(~30–60 s build+launch on this box); there is no documented way to
+keep a server resident and re-attach, so verification suites pay
+one boot per run;
+(c) discoverability — a `.mcp.json` in the project is not picked
+up by the agent host driving the session, so the server effectively
+requires out-of-band knowledge to invoke.
+Suggested CLI direction (for the draft): a `--serve`/daemon mode
+plus a `--once 'tools/call …'` short-circuit, and the `.mcp.json`
+documented in `water --help`/docs so clients can mount it.
+
+### r50-3 [water-rs/waterui]: snackbars are invisible in the mcp/offscreen runtime — every transient UI assertion has to fall back to stderr
+
+Observed: `SnackbarManager` is "automatically installed in every
+`Window`" (`src/runtime/snackbar.rs:553`), but the SemanticRuntime
+the mcp server boots never installs it — `Option<SnackbarManager>`
+extracts `None` inside `.on_change` handlers, so `Snackbar::new(msg)`
+and `.action(...)` show nothing. Concretely: the "Copied" toast on
+copy actions and the msg-banner `Snackbar … .action("Open", …)`
+(views.rs:166-203) are absent from `snapshot` even within the same
+settled revision. Additionally, mutating calls return only the
+settled tree, so even a working snackbar would need a `settle:false`
++ immediate `snapshot` path to be observable before auto-dismiss.
+Expected: the mcp/offscreen window installs SnackbarManager like a
+real `Window` (its overlay lands in the semantic tree), so
+notification-style features are verifiable headless.
+Repro: waterui `225259c8`; any view calling
+`env.get::<Option<SnackbarManager>>()` inside a `water mcp` session
+→ `None`; same call under a real window → `Some`.
+
+### r50-4 [water-rs/waterui]: `Code`'s Copy affordance is a bare `text("Copy")` + TapGesture — unreachable from a11y/`act`, wrong on touch
+
+Observed: `components/foundation/text/src/code.rs:266-276` builds
+the affordance as `text("Copy").color(Accent)` wrapped in
+`GestureObserver(TapGesture)`. In the semantic tree it lands as a
+`label "Copy"` with **no role and no click action** — a screen
+reader announces text, and `water mcp`'s `act(click)` cannot invoke
+it (verified: `find label "Copy"` returns label nodes; no
+`actions=[click]`). A real `button("Copy")` would expose
+`actions=[click,focus]` for free and style identically.
+Expected: the affordance is a `button` (or carries
+`a11y_role(Button)`+`on_tap`) so assistive tech and automation can
+invoke it.
+Repro: waterui `225259c8`; `code("rust", "fn main(){}")` in any app,
+then `snapshot` — the Copy node is a label, not a button.
+
+### r50-5 [water-rs/waterui]: `copy_to_clipboard` (arboard) loses the clipboard contents ~100 ms after return on X11 without a clipboard manager
+
+Observed: `code.rs:46` (and the app's own `copy_field`, same arboard
+call) writes to the X11 selection successfully — the X11 write is
+observable — but the contents die ~100 ms after the `Clipboard`
+handle is dropped when no clipboard manager owns the selection
+(xclip reads "target STRING not available"; arboard logs "Could not
+hand the clipboard contents over to the clipboard manager. The
+request timed out." / "Clipboard was dropped very quickly").
+Every WaterUI copy path on a plain X11 session therefore copies
+nothing a user can paste — silent feature loss.
+Expected: `copy_to_clipboard` keeps the clipboard alive long enough
+for the hand-off (retain the handle / spawn the wait thread arboard
+documents), or at minimum logs an actionable warning once instead
+of timing out invisibly.
+Repro: waterui `225259c8`, X11 session without a clipboard manager:
+call the Copy affordance → `xclip -o -selection clipboard` → empty.
+Side-effect observed in gates: `copy_image_decodes_demo_photo` is
+flaky under parallel `cargo test` for the same reason — arboard's
+X11 hand-off races the test's own clipboard read and the notice is
+sometimes never set; the test passes alone and on rerun.
+
+### r50-6 [water-rs/lints]: candidate lint — `spawn_local` outside a live executor context panics at runtime, statically detectable
+
+Observed: seeding code ran `spawn_local(...)` from `seed_demo`,
+which executes before the runner installs the local executor →
+panic `Local executor not set` (executor-core 0.7.1:711). Moving
+the same call into the window's `.task { … }` block fixed it. The
+rule is simple enough for dylint: `spawn_local` called from a
+function invoked during app construction/seeding (anything not
+downstream of `.task`, an event handler, or an executor-owned
+scope) is a panic waiting to happen. A lint flagging `spawn_local`
+in `seed_*`/initializers or outside recognized task contexts would
+have caught it before the first run.
+
+### r50-7 [water-rs/waterkit + water-rs/cli]: `cargo check --target aarch64-linux-android` needs the *build* toolchain, not a check toolchain — five sequential failures to get a clean check
+
+Observed (waterkit `2f1e3592`, watergram r50 head): `cargo check
+--target aarch64-linux-android --locked` fails, in order, on:
+1. `ring v0.17.14` build script — `ToolNotFound:
+   aarch64-linux-android-clang` (ring ← rustls ← futures-rustls ←
+   zenwave ← waterkit-audio; needs the NDK LLVM toolchain;
+   NDK r27d has no unprefixed `aarch64-linux-android-clang` — only
+   API-suffixed `aarch64-linux-android21..25-clang`, so a shim is
+   required);
+2. `waterkit-audio` build script — panics `android.rs:300` "Failed
+   to find android.jar. Is ANDROID_HOME set?" (needs an SDK
+   platforms dir);
+3. same script — `android.rs:308` "Failed to locate Kotlin standard
+   library jars" (needs KOTLIN_HOME with `lib/kotlin-stdlib*.jar`);
+4. same script — `android.rs:359` "Failed to find d8.jar" (needs
+   Android build-tools);
+5. `arboard` — no Android backend (`platform::Clipboard` etc.
+   missing; 8 errors). App-side fix landed: watergram's clipboard
+   calls split cfg'd like waterui's `code.rs` — `android_clipboard`
+   on Android, arboard elsewhere; `copy_image`'s clipboard write
+   reports "Clipboard unavailable" on Android (text-only API).
+Expected: `cargo check` (which never produces an APK) should not
+require kotlinc/d8 — waterkit's `utils/build/src/android.rs` could
+defer the dex toolchain requirement to the packaging step the `water`
+CLI owns (issue water-rs/watergram#3). At minimum the errors are
+already clear; the missing piece is a documented env contract
+(ANDROID_HOME+KOTLIN_HOME+NDK) in `water` docs. Label: waterkit for
+the check-time dex requirement, cli for the toolchain contract.
+
+### r50-8 [water-rs/waterui]: no tappable span inside `Text`/`StyledStr` — hashtag/mention/url entities can be styled but never tapped
+
+What the app needs: a tap on a span inside running styled text —
+`TextEntityType::Hashtag` → in-chat search, `Mention`/`MentionName` →
+profile, `Url`/`TextUrl` → open — carrying the span's payload, not just
+the bubble's.
+Observed (waterui `225259c8`): `StyledStr` chunks carry style only
+(`components/foundation/text/src/styled.rs:36-90` — font, foreground,
+background, weight, monospaced, size; `push(text, style)` :275). There is
+no interaction field on `Style`/`Chunk`, and `text()`/`styled()` offer no
+span-level hit-testing API. `component/link.rs` is a standalone
+button-with-link-style whole view — it cannot compose *inside* a text
+run; `flow_markdown` parses `RichTextElement::Link` for streaming
+markdown but renders whole-element rows, not inline spans in an ordinary
+`Text`. The app's only routes are whole-bubble taps (context menu,
+`Search {tag}` item) — one item per message, no per-span targeting.
+Expected: a span-level link/tap semantic on styled text, e.g.
+`StyledStr::push` accepting an interaction payload
+(`Style::on_tap(handler)` or a `TextEntity`-aware `text()` that dispatches
+entity spans to handlers), delivered through the a11y tree as
+focusable/activatable regions.
+Repro: watergram `state.rs` seeds m49 "shipping #waterui r50 tonight"
+with a `Hashtag` entity at (9,8) — the tag renders link-blue via
+`styled_from_formatted` but a tap on it does nothing; the menu item
+`Search #waterui` (`views.rs` `bubble_menu_items`) is the honest fallback.
+
+### Adopted this round
+
+- **`waterui::text::code` for `textEntityTypePre/PreCode`** —
+  `.on_copied` toast hook; `Language::try_from` panics on unknown
+  tokens → `unwrap_or(Plaintext)` + `.info(token)` preserves the tag.
+- **`android_clipboard` on Android** replacing the unconditional
+  arboard dep (mirroring `code.rs`'s cfg split).

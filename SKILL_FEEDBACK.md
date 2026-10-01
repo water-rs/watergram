@@ -622,3 +622,46 @@ positives observed. (Patterns from earlier rounds folded in.)
     body touching `store.field`) is easy to write.
   - none other — `Str::from(&name)` lifetime error surfaced at compile
     time; dylint clean on all new code.
+
+## r50
+
+- **The skill has no chapter on `waterui::text::code` — the whole
+  code-block API is self-discovery.** `code(language, content)`,
+  `Language::try_from`, `.on_copied`, `.info` are all in
+  `components/foundation/text/src/code.rs` @225259c but the skill's
+  text section stops at styled text. Two real traps the skill could
+  have prevented: (a) `code()` **panics** on a `TryInto<Language>`
+  failure — feeding a Telegram `textEntityTypePreCode.language`
+  token straight in will kill the app on any unrecognized language;
+  the safe shape is `Language::try_from(t).unwrap_or(Plaintext)` +
+  `.info(token)`; (b) the built-in Copy affordance is a label node,
+  not a button (DOGFOOD r50-4) — don't assert on it through a11y.
+  Skill fix: a "code blocks" section naming the widget, the panic
+  contract, and the Copy affordance's actual semantics.
+- **No mention of `water mcp` anywhere in the skill.** The single
+  most useful dogfooding surface (snapshot/find/act/wait over
+  stdio) is undocumented: I found the tool list by calling
+  `tools/list`. What the skill should carry: the
+  `water mcp --path . --viewport WxH` stdio recipe
+  (initialize → notifications/initialized → tools/call), the
+  `WATER_HYDROLYSIS_FORCE_FALLBACK_ADAPTER=1` requirement on
+  software-adapter hosts (r50-1), settle:false + `advance` for
+  transients, and the fact that the returned tree is already
+  settled (transient snackbars are gone — and in the mcp runtime
+  SnackbarManager isn't installed at all, r50-3).
+- **`spawn_local` needs an executor scope — unwritten.** Seeding
+  async work in `seed_*`/constructors panics `Local executor not
+  set`; the skill's reactivity chapter should say "async work goes
+  in `.task` blocks / event handlers, never in view construction or
+  store seeding" (lint candidate r50-6).
+- **`.on_change` handlers don't get a SnackbarManager in the mcp
+  runtime** — nothing in the skill warns that "automatically
+  installed in every Window" has a silent exception (r50-3).
+- **Lint candidates:** r50-6 `spawn_local`-outside-executor lint.
+- **`format_in_text` fired a true positive** (lints `a9058391`):
+  `Str::from(format!("Search {}", row.hashtag))` in a menu-item
+  label position was correctly flagged as an untranslatable
+  catalog entry, and its suggested `text!("Search {hashtag}", …)`
+  compiled straight into the `Command` label slot. A lint win —
+  the same pattern elsewhere in the file (a11y labels via
+  `format!`) did *not* fire, which is the correct scoped behavior.

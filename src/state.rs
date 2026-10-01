@@ -373,6 +373,24 @@ pub struct MessageRow {
     /// Inline keyboard rows (`replyMarkupInlineKeyboard`) rendered as
     /// button pills under the bubble content.
     pub kb_rows: Vec<Vec<KbBtn>>,
+    /// Text of each `Pre`/`PreCode` entity — Desktop renders them as
+    /// tinted mono cards with a Copy button at the corner.
+    pub code_blocks: Vec<CodeBlock>,
+    /// First `#hashtag` entity text (with the `#`) — the bubble menu's
+    /// "Search #tag" action; empty when the message carries none.
+    pub hashtag: Str,
+}
+
+/// A `Pre`/`PreCode` entity sliced from a text message: the fence text
+/// plus its language token ("" for plain `Pre`) for the `Code` widget's
+/// header.
+#[derive(Clone, PartialEq)]
+pub struct CodeBlock {
+    /// Language token the sender wrote on `PreCode` (`rust`, `python`,
+    /// …); "" on a plain `Pre` block.
+    pub lang: Str,
+    /// The block's verbatim text (no fences — TDLib strips them).
+    pub text: Str,
 }
 
 impl MessageRow {
@@ -758,6 +776,8 @@ impl PartialEq for MessageRow {
             && self.album_id == o.album_id
             && self.album_files == o.album_files
             && self.kb_rows == o.kb_rows
+            && self.code_blocks == o.code_blocks
+            && self.hashtag == o.hashtag
     }
 }
 impl Eq for MessageRow {}
@@ -1020,6 +1040,10 @@ pub struct Store {
     /// Transient toast text the root view routes into `SnackbarManager`
     /// (seq + message; the seq makes identical messages re-fire).
     pub notice: Binding<(u64, Str)>,
+    /// In-app new-message banner: (seq, chat_id, "Chat: preview"). Desktop
+    /// pops the same toast when a message lands outside the selected chat;
+    /// seq makes identical texts re-fire; chat_id drives the Open action.
+    pub msg_banner: Binding<(u64, i64, Str)>,
     /// Message multi-selection (batch forward/delete).
     pub selected_msgs: Binding<Vec<i64>>,
     /// Folder editor sheet state.
@@ -1445,6 +1469,79 @@ pub(crate) fn auto_delete_label(secs: i32) -> &'static str {
     }
 }
 
+/// `Pre`/`PreCode` entities sliced out of a `FormattedText` — TDLib
+/// entity offsets are UTF-16 code units, same as `first_url_entity`.
+pub(crate) fn pre_blocks(ft: &types::FormattedText) -> Vec<CodeBlock> {
+    let units: Vec<u16> = ft.text.encode_utf16().collect();
+    let mut out = Vec::new();
+    for e in &ft.entities {
+        let lang = match &e.r#type {
+            enums::TextEntityType::Pre => String::new(),
+            enums::TextEntityType::PreCode(p) => p.language.clone(),
+            _ => continue,
+        };
+        let (s, t) = (
+            e.offset.max(0) as usize,
+            (e.offset + e.length).max(0) as usize,
+        );
+        if s < t && t <= units.len() {
+            out.push(CodeBlock {
+                lang: lang.into(),
+                text: Str::from(String::from_utf16_lossy(&units[s..t])),
+            });
+        }
+    }
+    out
+}
+
+/// Every non-whitespace position sits inside a `Pre`/`PreCode` entity
+/// range — i.e. the message IS code block(s) and should render only as
+/// `Code` cards, not text.
+pub(crate) fn whole_pre_cover(ft: &types::FormattedText) -> bool {
+    let units: Vec<u16> = ft.text.encode_utf16().collect();
+    let ranges: Vec<(usize, usize)> = ft
+        .entities
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.r#type,
+                enums::TextEntityType::Pre | enums::TextEntityType::PreCode(_)
+            )
+        })
+        .map(|e| {
+            (
+                e.offset.max(0) as usize,
+                (e.offset + e.length).max(0) as usize,
+            )
+        })
+        .collect();
+    !ranges.is_empty()
+        && (0..units.len()).all(|i| {
+            ranges.iter().any(|&(s, t)| s <= i && i < t)
+                || String::from_utf16(&units[i..i + 1])
+                    .map(|c| c.trim().is_empty())
+                    .unwrap_or(false)
+        })
+}
+
+/// First `#hashtag` entity text (with `#`) — TDLib slices it out of the
+/// message by offset the same way `pre_blocks` does.
+pub(crate) fn first_hashtag(ft: &types::FormattedText) -> Str {
+    let units: Vec<u16> = ft.text.encode_utf16().collect();
+    for e in &ft.entities {
+        if matches!(e.r#type, enums::TextEntityType::Hashtag) {
+            let (s, t) = (
+                e.offset.max(0) as usize,
+                (e.offset + e.length).max(0) as usize,
+            );
+            if s < t && t <= units.len() {
+                return Str::from(String::from_utf16_lossy(&units[s..t]));
+            }
+        }
+    }
+    Str::from("")
+}
+
 /// First link target a `FormattedText` points at: a `TextUrl`'s url, or a
 /// `Url` entity sliced out of the text (entity offsets are UTF-16 units).
 fn first_url_entity(ft: &types::FormattedText) -> Option<Str> {
@@ -1540,37 +1637,80 @@ pub(crate) fn parse_markdown(input: &str) -> types::FormattedText {
     let mut entities = Vec::new();
     let mut rest = input;
     while !rest.is_empty() {
-        let Some(start) = rest.find(|c| "*_`~|".contains(c)) else {
-            clean.push_str(rest);
-            break;
-        };
-        clean.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        let Some(delim) = DELIMS.iter().find(|d| tail.starts_with(**d)) else {
-            unreachable!("find() matched a delimiter char");
-        };
-        let after = &tail[delim.len()..];
-        match after.find(*delim) {
-            Some(close) if close > 0 => {
-                let inner = &after[..close];
-                entities.push(types::TextEntity {
-                    offset: clean.encode_utf16().count() as i32,
-                    length: inner.encode_utf16().count() as i32,
-                    r#type: kind(delim),
-                });
-                clean.push_str(inner);
-                rest = &after[close + delim.len()..];
+        if quote_line(rest) {
+            // A run of `> ` lines is one `BlockQuote` entity — Desktop's
+            // composer draft shape; `quote_message` writes it too.
+            let quote_start = clean.encode_utf16().count() as i32;
+            while quote_line(rest) {
+                let mut line = &rest[1..];
+                while line.starts_with(' ') {
+                    line = &line[1..];
+                }
+                let eol = line.find('\n').map(|i| i + 1).unwrap_or(line.len());
+                clean.push_str(&line[..eol]);
+                rest = &line[eol..];
             }
-            _ => {
-                clean.push_str(delim);
-                rest = after;
+            // The run's own trailing newline isn't quoted — only the one
+            // that blank-separates it from the next paragraph stays.
+            let mut len = clean.encode_utf16().count() as i32 - quote_start;
+            if clean.ends_with('\n') {
+                len -= 1;
+            }
+            entities.push(types::TextEntity {
+                offset: quote_start,
+                length: len,
+                r#type: enums::TextEntityType::BlockQuote,
+            });
+            continue;
+        }
+        // Non-quote segment: everything up to the next line that opens a
+        // quote run (or the end of the draft).
+        let seg_end = rest
+            .match_indices('\n')
+            .find(|(i, _)| quote_line(&rest[i + 1..]))
+            .map(|(i, _)| i + 1)
+            .unwrap_or(rest.len());
+        let seg = &rest[..seg_end];
+        let mut seg_rest = seg;
+        while !seg_rest.is_empty() {
+            let Some(start) = seg_rest.find(|c| "*_`~|".contains(c)) else {
+                clean.push_str(seg_rest);
+                break;
+            };
+            clean.push_str(&seg_rest[..start]);
+            let tail = &seg_rest[start..];
+            let Some(delim) = DELIMS.iter().find(|d| tail.starts_with(**d)) else {
+                unreachable!("find() matched a delimiter char");
+            };
+            let after = &tail[delim.len()..];
+            match after.find(*delim) {
+                Some(close) if close > 0 => {
+                    let inner = &after[..close];
+                    entities.push(types::TextEntity {
+                        offset: clean.encode_utf16().count() as i32,
+                        length: inner.encode_utf16().count() as i32,
+                        r#type: kind(delim),
+                    });
+                    clean.push_str(inner);
+                    seg_rest = &after[close + delim.len()..];
+                }
+                _ => {
+                    clean.push_str(delim);
+                    seg_rest = after;
+                }
             }
         }
+        rest = &rest[seg_end..];
     }
     types::FormattedText {
         text: clean,
         entities,
     }
+}
+
+/// A draft line that opens a `BlockQuote`: `> ` or a bare `>` line.
+pub(crate) fn quote_line(s: &str) -> bool {
+    s.starts_with('>') && s[1..].chars().next().is_none_or(|c| c == ' ' || c == '\n')
 }
 
 fn position_in<'a>(
@@ -1795,6 +1935,7 @@ impl Store {
             forward_ids: Binding::<Vec<i64>>::default(),
             forward_comment: Binding::container(Str::from("")),
             notice: Binding::container((0u64, Str::from(""))),
+            msg_banner: Binding::container((0u64, 0i64, Str::from(""))),
             // Message multi-selection (Select → batch forward/delete).
             selected_msgs: Binding::<Vec<i64>>::default(),
             folder_open: Binding::bool(false),
@@ -2286,7 +2427,58 @@ impl Store {
             },
         ]);
         // Chat 1 (WaterUI devs) is a group — the info panel's member list.
-        self.members.set(vec![
+        self.members.set(Self::demo_members());
+        self.members_count.set_from("5 members");
+        self.twofa.set_from("enabled");
+        self.sticker_packs.set(vec![PackRow {
+            id: 1,
+            title: "Hot Cherry".into(),
+        }]);
+        self.accounts.set(vec![AccountRow {
+            id: 1,
+            label: "Lexo · current".into(),
+        }]);
+    }
+
+    /// `WATERGRAM_DEMO_INCOMING=<secs>`: after the delay a synthesized
+    /// incoming message lands in Bob's chat — the same Update::NewMessage
+    /// tail the real path takes (preview row, unread badge, banner).
+    /// Called from the window's `.task` seed: `spawn_local` needs the
+    /// executor installed, which seed-time is too early for (the offscreen
+    /// runner panics `Local executor not set` there).
+    pub fn schedule_demo_incoming(&self) {
+        if let Some(secs) = std::env::var("WATERGRAM_DEMO_INCOMING")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            let store = self.clone();
+            spawn_local(async move {
+                sleep(std::time::Duration::from_secs(secs)).await;
+                store.demo_incoming(6, "Bob", "bundle verified — ship it");
+            })
+            .detach();
+        }
+    }
+
+    /// Demo-only `Update::NewMessage` tail for a message landing outside the
+    /// selected chat: bump the row preview/unread and fire the banner,
+    /// exactly what the real update path does for `chat_id != open_chat`.
+    pub fn demo_incoming(&self, chat_id: i64, sender: &str, preview: &str) {
+        if self.open_chat.get() == chat_id {
+            return;
+        }
+        self.update_chat_row(chat_id, |r| {
+            r.preview = preview.to_string().into();
+            r.unread += 1;
+        });
+        self.maybe_banner(chat_id, sender, preview);
+    }
+
+    /// The seeded member list for the WaterUI devs group — reinstalled by
+    /// `select_chat` for group chats so the demo's members panel and
+    /// seen-by rows stay populated (opening a chat clears `members`).
+    pub(crate) fn demo_members() -> Vec<MemberRow> {
+        vec![
             MemberRow {
                 key: 11,
                 name: "Alice".into(),
@@ -2332,17 +2524,7 @@ impl Store {
                 photo: 0,
                 accent: -1,
             },
-        ]);
-        self.members_count.set_from("5 members");
-        self.twofa.set_from("enabled");
-        self.sticker_packs.set(vec![PackRow {
-            id: 1,
-            title: "Hot Cherry".into(),
-        }]);
-        self.accounts.set(vec![AccountRow {
-            id: 1,
-            label: "Lexo · current".into(),
-        }]);
+        ]
     }
 
     /// The seeded conversation `seed_demo` installs and `select_chat`
@@ -2422,6 +2604,8 @@ impl Store {
             album_id: 0,
             album_files: Vec::new(),
             kb_rows: Vec::new(),
+            code_blocks: Vec::new(),
+            hashtag: Str::from(""),
         };
         let svc = |id: i64, text: &str| {
             let mut r = m(id, "", text, "", false, false, "", "", "", "");
@@ -2813,6 +2997,44 @@ impl Store {
                 closed: false,
             });
             msgs.push(my_poll);
+        }
+        // Whole-message `PreCode`/`Pre` blocks: `message_row` clears the
+        // text for this shape — the `Code` card IS the bubble (Desktop
+        // parity). The literals mirror that outcome directly.
+        {
+            let src = "fn main() {\n    println!(\"ship it\");\n}";
+            let mut cb = m(47, "Alice", "", "10:02", false, false, "", "", "", "");
+            cb.code_blocks = vec![CodeBlock {
+                lang: "rust".into(),
+                text: src.into(),
+            }];
+            msgs.push(cb);
+        }
+        {
+            let src = "BUILD_STATUS=green\nTESTS=205/205";
+            let mut cb = m(48, "Bob", "", "10:03", false, false, "", "", "", "");
+            cb.code_blocks = vec![CodeBlock {
+                lang: "".into(),
+                text: src.into(),
+            }];
+            msgs.push(cb);
+        }
+        // A hashtag inside the text — the bubble menu's "Search #waterui"
+        // scopes the in-chat search. The tag itself is styled link-blue
+        // but inline-entity taps don't exist yet (water-rs/waterui#1352).
+        {
+            let tag_text = "shipping #waterui r50 tonight";
+            let mut tag_msg = m(49, "Alice", tag_text, "10:04", false, false, "", "", "", "");
+            tag_msg.styled = styled_from_formatted(&types::FormattedText {
+                text: tag_text.into(),
+                entities: vec![types::TextEntity {
+                    offset: 9,
+                    length: 8,
+                    r#type: enums::TextEntityType::Hashtag,
+                }],
+            });
+            tag_msg.hashtag = "#waterui".into();
+            msgs.push(tag_msg);
         }
         let today = chrono::Local::now().date_naive().num_days_from_ce() as i64;
         for r in &mut msgs {
@@ -3312,7 +3534,7 @@ impl Store {
                 .map(|c| m.id <= c.last_read_outbox_message_id)
                 .unwrap_or(false);
         let (reactions, my_reaction) = self.reactions_info(m);
-        let (styled, styled_open, has_spoiler, link_site, link_title, link_desc, link_url) =
+        let (mut styled, styled_open, has_spoiler, link_site, link_title, link_desc, link_url) =
             if let enums::MessageContent::MessageText(t) = &m.content {
                 let mask = if m.is_outgoing {
                     Color::from(AccentForeground)
@@ -3358,6 +3580,21 @@ impl Store {
                     Str::from(""),
                 )
             };
+        let (code_blocks, hashtag) = if let enums::MessageContent::MessageText(t) = &m.content {
+            (pre_blocks(&t.text), first_hashtag(&t.text))
+        } else {
+            (Vec::new(), Str::from(""))
+        };
+        // Whole-message code (`Pre`/`PreCode` covering the text plus
+        // whitespace): the `Code` card IS the bubble — the plain text
+        // part would duplicate it. Partial `pre` stays inline mono.
+        if !code_blocks.is_empty()
+            && let enums::MessageContent::MessageText(t) = &m.content
+            && whole_pre_cover(&t.text)
+        {
+            text = Str::from("");
+            styled = StyledStr::empty();
+        }
         let forwarded_from = m
             .forward_info
             .as_ref()
@@ -3527,6 +3764,8 @@ impl Store {
             album_id: m.media_album_id,
             album_files: Vec::new(),
             kb_rows,
+            code_blocks,
+            hashtag,
         }
     }
 
@@ -4049,6 +4288,12 @@ impl Store {
                         })
                         .detach();
                     }
+                } else if !m.is_outgoing {
+                    // In-app notification — Desktop pops a toast for a
+                    // message landing outside the selected chat.
+                    let sender = self.sender_name(&m.sender_id);
+                    let preview = self.preview_text(&m);
+                    self.maybe_banner(m.chat_id, sender.as_str(), preview.as_str());
                 }
             }
             enums::Update::MessageSendSucceeded(u) => {
@@ -4592,6 +4837,12 @@ impl Store {
             // Saved Messages shows the demo rows appended by save_to_saved.
             if kind == "saved" {
                 msgs.extend(self.saved_demo_msgs.borrow().iter().cloned());
+            }
+            // Group chats repopulate the members panel (select_chat cleared
+            // it) so the info panel and seen-by rows stay exercisable.
+            if kind == "group" {
+                self.members.set(Self::demo_members());
+                self.members_count.set_from("5 members");
             }
             self.set_messages(msgs);
             self.demo_seed_pinned(chat_id);
@@ -5184,6 +5435,8 @@ impl Store {
                 album_id: 0,
                 album_files: Vec::new(),
                 kb_rows: Vec::new(),
+                code_blocks: Vec::new(),
+                hashtag: Str::from(""),
             });
             self.set_messages(rows);
             return;
@@ -5601,9 +5854,7 @@ impl Store {
     /// pattern of `copy_message`.
     pub fn copy_field(&self, value: &str) {
         self.clipboard.set_from(value.to_string());
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            let _ = cb.set_text(value.to_string());
-        }
+        system_clipboard_set_text(value.to_string());
         self.notify(self.tr("Copied", 0, "Copied"));
     }
 
@@ -6813,6 +7064,8 @@ impl Store {
             album_id: 0,
             album_files: Vec::new(),
             kb_rows: Vec::new(),
+            code_blocks: Vec::new(),
+            hashtag: Str::from(""),
             day: local_day(now),
         });
         self.set_messages(rows);
@@ -6891,6 +7144,8 @@ impl Store {
                 album_id: 0,
                 album_files: Vec::new(),
                 kb_rows: Vec::new(),
+                code_blocks: Vec::new(),
+                hashtag: Str::from(""),
                 day: local_day(now),
             });
         }
@@ -7528,6 +7783,31 @@ impl Store {
         self.notice.set((seq + 1, msg.into()));
     }
 
+    /// In-app new-message banner (Desktop's toast): "Chat · Sender: preview"
+    /// for an incoming message in a non-selected chat. Muted chats stay
+    /// silent — TDLib already drops their server-side notifications, and
+    /// Desktop draws no in-window toast for them either. The snackbar's
+    /// Open action selects `chat_id`.
+    fn maybe_banner(&self, chat_id: i64, sender: &str, preview: &str) {
+        if preview.trim().is_empty() {
+            return;
+        }
+        let chats = self.chats.snapshot();
+        let Some(row) = chats.iter().find(|r| r.id == chat_id) else {
+            return;
+        };
+        if row.muted {
+            return;
+        }
+        let label = if sender.is_empty() || row.title.as_str() == sender {
+            format!("{}: {preview}", row.title)
+        } else {
+            format!("{} · {sender}: {preview}", row.title)
+        };
+        let (seq, _, _) = self.msg_banner.snapshot();
+        self.msg_banner.set((seq + 1, chat_id, label.into()));
+    }
+
     /// Map `chatActionBar*` to the row's (kind, aux title) strings.
     fn action_bar_parts(ab: Option<&enums::ChatActionBar>) -> (Str, Str) {
         match ab {
@@ -7709,10 +7989,8 @@ impl Store {
             KbKind::Url(u) => self.open_link(u.clone()),
             KbKind::Copy(t) => {
                 let text = t.to_string();
-                if !text.is_empty()
-                    && let Ok(mut cb) = arboard::Clipboard::new()
-                {
-                    let _ = cb.set_text(text);
+                if !text.is_empty() {
+                    system_clipboard_set_text(text);
                 }
                 self.notify("Copied");
             }
@@ -7876,12 +8154,34 @@ impl Store {
     pub fn copy_message(&self, row: &MessageRow) {
         self.clipboard.set(row.text.clone());
         let text = row.text.to_string();
-        if !text.is_empty()
-            && let Ok(mut cb) = arboard::Clipboard::new()
-        {
-            let _ = cb.set_text(text);
+        if !text.is_empty() {
+            system_clipboard_set_text(text);
         }
         self.notify("Text copied");
+    }
+
+    /// Desktop's "Quote" context action: the message text lands in the
+    /// composer as `>`-prefixed lines above whatever was being typed —
+    /// `parse_markdown` turns the prefix run back into a `BlockQuote`
+    /// entity at send time.
+    pub fn quote_message(&self, row: &MessageRow) {
+        let mut draft = String::new();
+        for line in row.text.as_str().lines() {
+            draft.push_str("> ");
+            draft.push_str(line);
+            draft.push('\n');
+        }
+        draft.push('\n');
+        let cur = self.composer.snapshot().to_string();
+        draft.push_str(&cur);
+        self.composer.set_from(draft);
+    }
+
+    /// Hashtag context action: open the in-chat search bar scoped to the
+    /// tapped tag (Desktop scopes `#tag` inside the current chat).
+    pub fn search_hashtag(&self, row: &MessageRow) {
+        self.chat_search_open.set(true);
+        self.run_chat_search(row.hashtag.clone());
     }
 
     /// Translate a message into English (`translateMessageText`); the
@@ -7926,9 +8226,7 @@ impl Store {
         if self.client_id.get() == 0 {
             let link = format!("https://t.me/watergram/{id}");
             self.clipboard.set_from(link.clone());
-            if let Ok(mut cb) = arboard::Clipboard::new() {
-                let _ = cb.set_text(link);
-            }
+            system_clipboard_set_text(link);
             self.notify("Link copied");
             return;
         }
@@ -7939,9 +8237,7 @@ impl Store {
             match functions::get_message_link(chat_id, id, 0, false, false, client).await {
                 Ok(enums::MessageLink::MessageLink(l)) => {
                     store.clipboard.set_from(l.link.clone());
-                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                        let _ = cb.set_text(l.link);
-                    }
+                    system_clipboard_set_text(l.link);
                     store.notify("Link copied");
                 }
                 _ => store.notify("No link for this message"),
@@ -7962,14 +8258,7 @@ impl Store {
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-                let data = arboard::ImageData {
-                    width: w,
-                    height: h,
-                    bytes: rgba.into_raw().into(),
-                };
-                let ok = arboard::Clipboard::new()
-                    .and_then(|mut cb| cb.set_image(data))
-                    .is_ok();
+                let ok = system_clipboard_set_image(&rgba, w, h);
                 self.notify(if ok {
                     "Image copied"
                 } else {
@@ -8019,9 +8308,7 @@ impl Store {
             return;
         }
         self.clipboard.set_from(joined.clone());
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            let _ = cb.set_text(joined);
-        }
+        system_clipboard_set_text(joined);
         let n = self.selected_msgs.snapshot().len();
         self.notify(format!("{n} copied"));
     }
@@ -10310,4 +10597,38 @@ fn adler32(data: &[u8]) -> u32 {
         b = (b + a) % MOD;
     }
     (b << 16) | a
+}
+
+/// Text → OS clipboard: `arboard` on desktop targets, `android_clipboard`
+/// on Android (arboard has no Android backend; waterui's `code.rs` splits
+/// the same way).
+#[cfg(not(target_os = "android"))]
+fn system_clipboard_set_text(text: String) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn system_clipboard_set_text(text: String) {
+    let _ = android_clipboard::set_text(text);
+}
+
+/// Image → OS clipboard. `android_clipboard` is text-only, so the Android
+/// variant reports failure and the caller notifies "Clipboard unavailable".
+#[cfg(not(target_os = "android"))]
+fn system_clipboard_set_image(rgba: &image::RgbaImage, width: usize, height: usize) -> bool {
+    let data = arboard::ImageData {
+        width,
+        height,
+        bytes: rgba.as_raw().clone().into(),
+    };
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_image(data))
+        .is_ok()
+}
+
+#[cfg(target_os = "android")]
+fn system_clipboard_set_image(_rgba: &image::RgbaImage, _width: usize, _height: usize) -> bool {
+    false
 }

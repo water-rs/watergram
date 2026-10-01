@@ -67,6 +67,7 @@ fn main() -> impl View {
                 }
                 _ => {}
             }
+            store.schedule_demo_incoming();
             std::future::pending::<()>().await;
         });
     }
@@ -149,6 +150,7 @@ pub fn app(mut env: Environment) -> App {
                     }
                     _ => {}
                 }
+                s.schedule_demo_incoming();
                 // Anchor the seeded thread to the latest message, as the
                 // live history-load path does (`load_history` → `scroll_bottom`).
                 s.scroll_bottom();
@@ -320,6 +322,8 @@ mod tests {
             album_id: 0,
             album_files: Vec::new(),
             kb_rows: Vec::new(),
+            code_blocks: Vec::new(),
+            hashtag: "".into(),
         }
     }
 
@@ -868,7 +872,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(commands.len(), 10); // Reply Edit Copy Link Pin Forward Save Select Info Delete
+        assert_eq!(commands.len(), 11); // Reply Quote Edit Copy Link Pin Forward Save Select Info Delete
         assert_eq!(
             items
                 .iter()
@@ -883,13 +887,13 @@ mod tests {
         let items = views::bubble_menu_items(&incoming, false, false)
             .into_menu_items()
             .snapshot();
-        // Incoming: no Edit; Translate added; Save added; no Copy link (linkable=false).
+        // Incoming: no Edit; Quote + Translate added; Save added; no Copy link (linkable=false).
         assert_eq!(
             items
                 .iter()
                 .filter(|i| matches!(i, MenuItem::Command(_)))
                 .count(),
-            8
+            9
         );
     }
 
@@ -5333,5 +5337,157 @@ mod tests {
         store.open_comments(42);
         assert_eq!(store.comments_open.snapshot(), Some(42));
         assert!(store.comments_list.snapshot().len() >= 3);
+    }
+
+    /// r50: a message landing in a non-selected unmuted chat fires the
+    /// in-app banner "Chat: preview" carrying the target chat id; the
+    /// selected chat and muted chats stay silent, matching Desktop.
+    #[test]
+    fn incoming_banner_for_nonselected_chat() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.demo_incoming(6, "Bob", "bundle verified — ship it");
+        let (seq, cid, label) = store.msg_banner.snapshot();
+        assert_eq!(cid, 6);
+        assert_eq!(label.as_str(), "Bob: bundle verified — ship it");
+        assert!(seq > 0);
+        // Row preview + unread update like a real ChatLastMessage tail.
+        let row = store
+            .chats
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == 6)
+            .unwrap();
+        assert_eq!(row.preview.as_str(), "bundle verified — ship it");
+        assert_eq!(row.unread, 1);
+    }
+
+    /// r50: no banner for the selected chat, muted chats, or empty previews.
+    #[test]
+    fn incoming_banner_filters() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.demo_incoming(1, "Lexo", "you already see this");
+        assert_eq!(store.msg_banner.snapshot().0, 0, "selected chat silent");
+        store.set_mute(4, i32::MAX);
+        store.demo_incoming(4, "News", "big story");
+        assert_eq!(store.msg_banner.snapshot().0, 0, "muted chat silent");
+        store.demo_incoming(6, "Bob", "  ");
+        assert_eq!(store.msg_banner.snapshot().0, 0, "empty preview silent");
+    }
+
+    /// r50: identical previews re-fire because the seq bumps.
+    #[test]
+    fn incoming_banner_refires_same_text() {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.demo_incoming(6, "Bob", "ping");
+        let (s1, ..) = store.msg_banner.snapshot();
+        store.demo_incoming(6, "Bob", "ping");
+        let (s2, ..) = store.msg_banner.snapshot();
+        assert!(s2 > s1);
+    }
+
+    /// r50: `Pre`/`PreCode` entities slice into `CodeBlock`s and a
+    /// whole-message code body is recognised as card-only.
+    #[test]
+    fn pre_blocks_slicing() {
+        use crate::state::{pre_blocks, whole_pre_cover};
+        use tdlib_rs::{enums::TextEntityType as T, types};
+        let src = "fn main() {}";
+        let ft = types::FormattedText {
+            text: src.into(),
+            entities: vec![types::TextEntity {
+                offset: 0,
+                length: src.encode_utf16().count() as i32,
+                r#type: T::PreCode(types::TextEntityTypePreCode {
+                    language: "rust".into(),
+                }),
+            }],
+        };
+        let blocks = pre_blocks(&ft);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].lang.as_str(), "rust");
+        assert_eq!(blocks[0].text.as_str(), src);
+        assert!(whole_pre_cover(&ft));
+        // Inline `pre` inside a sentence still yields a block, but the
+        // message is not code-only.
+        let mixed = types::FormattedText {
+            text: "use this code".into(),
+            entities: vec![types::TextEntity {
+                offset: 4,
+                length: 4,
+                r#type: T::Pre,
+            }],
+        };
+        assert_eq!(pre_blocks(&mixed)[0].text.as_str(), "this");
+        assert!(!whole_pre_cover(&mixed));
+    }
+
+    /// r50: "Quote" writes the message back as `> ` lines above the draft,
+    /// and `parse_markdown` re-entities the run as `BlockQuote`.
+    #[test]
+    fn quote_message_roundtrip() {
+        use crate::state::parse_markdown;
+        use tdlib_rs::enums::TextEntityType as T;
+        let store = store();
+        let mut m = msg(1, "first\nsecond", false);
+        m.text = "first\nsecond".into();
+        store.composer.set_from("tail");
+        store.quote_message(&m);
+        assert_eq!(
+            store.composer.snapshot().as_str(),
+            "> first\n> second\n\ntail"
+        );
+        let ft = parse_markdown(&store.composer.snapshot());
+        assert_eq!(ft.text, "first\nsecond\n\ntail");
+        assert!(
+            ft.entities
+                .iter()
+                .any(|e| { e.r#type == T::BlockQuote && e.offset == 0 && e.length == 12 })
+        );
+    }
+
+    /// r50: a `> ` line mid-draft (after plain text) also parses to
+    /// `BlockQuote`, and unrelated text is untouched.
+    #[test]
+    fn blockquote_mid_draft() {
+        use crate::state::parse_markdown;
+        use tdlib_rs::enums::TextEntityType as T;
+        let ft = parse_markdown("hey\n> quoted line\ntrailing");
+        assert_eq!(ft.text, "hey\nquoted line\ntrailing");
+        assert_eq!(ft.entities.len(), 1);
+        assert_eq!(ft.entities[0].r#type, T::BlockQuote);
+        assert_eq!(ft.entities[0].offset, 4);
+        assert_eq!(ft.entities[0].length, 11);
+    }
+
+    /// r50: hashtag slicing + the search action opens chat search scoped
+    /// to the tag.
+    #[test]
+    fn hashtag_search_scopes() {
+        use crate::state::first_hashtag;
+        use tdlib_rs::{enums::TextEntityType as T, types};
+        let ft = types::FormattedText {
+            text: "shipping #waterui r50 tonight".into(),
+            entities: vec![types::TextEntity {
+                offset: 9,
+                length: 8,
+                r#type: T::Hashtag,
+            }],
+        };
+        assert_eq!(first_hashtag(&ft).as_str(), "#waterui");
+        let store = store();
+        let mut m = msg(1, "shipping #waterui r50 tonight", false);
+        m.hashtag = "#waterui".into();
+        store.chats.set(vec![chat(1, "Chat", "", 0)]);
+        store.selected.set(Some(1));
+        store.messages.set(vec![m.clone()]);
+        store.search_hashtag(&m);
+        assert!(store.chat_search_open.snapshot());
+        assert_eq!(store.chat_search.snapshot().as_str(), "#waterui");
     }
 }

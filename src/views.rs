@@ -28,7 +28,8 @@ use waterui::prelude::*;
 use waterui::reactive::collection::SignalCollection;
 use waterui::shape::{Circle, Path, Rectangle, RoundedRectangle, ShapeExt, UnevenRoundedRectangle};
 use waterui::snackbar::{Snackbar, SnackbarManager};
-use waterui::text::IntoText;
+use waterui::text::highlight::Language;
+use waterui::text::{IntoText, code};
 use waterui::theme::color::{
     Accent, AccentContainer, AccentForeground, Error, Foreground, MutedForeground,
     SelectionForeground, Surface, SurfaceVariant, TertiaryContainer,
@@ -185,6 +186,17 @@ pub fn root(store: Store) -> impl View {
                     ))
                     .action("Undo", move || store.undo_delete()),
                 );
+            }
+        },
+    )
+    // In-app new-message banner (Desktop toast): a message landing in a
+    // non-selected chat surfaces "Chat · Sender: preview" + Open — the
+    // action selects the chat, matching Desktop's click-to-jump.
+    .on_change(
+        &store.msg_banner,
+        |(_, chat_id, label): (u64, i64, Str), sb: Option<SnackbarManager>, store: Store| {
+            if let Some(sb) = sb {
+                sb.show(Snackbar::new(label).action("Open", move || store.select_chat(chat_id)));
             }
         },
     )
@@ -2891,6 +2903,25 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
             .anyview(),
         );
     }
+    for cb in &row.code_blocks {
+        // Desktop: every `Pre`/`PreCode` block renders as a surface card
+        // with the language in the header and a Copy affordance — the
+        // framework's `Code` view ships exactly that shape; `on_copied`
+        // surfaces our toast/clipboard binding.
+        let store_c = store.clone();
+        let text_c = cb.text.clone();
+        let lang = Language::try_from(cb.lang.as_str()).unwrap_or(Language::Plaintext);
+        let card = code(lang, cb.text.clone());
+        let card = if cb.lang.is_empty() {
+            card
+        } else {
+            card.info(cb.lang.clone())
+        };
+        parts.push(
+            card.on_copied(move |_env| store_c.copy_field(text_c.as_str()))
+                .anyview(),
+        );
+    }
     if has_link {
         // Desktop's link-preview card: accent bar + site name, title and
         // description, inside the bubble under the message text.
@@ -3157,6 +3188,8 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
     let r_img = row.clone();
     let r_info = row.clone();
     let r_saved = row.clone();
+    let r_quote = row.clone();
+    let r_tag = row.clone();
     let r_poll = row.id;
     let pin_label: &'static str = if pinned {
         "Unpin message"
@@ -3168,37 +3201,61 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
     let is_photo = row.media_file != 0
         && row.play_file == 0
         && row.media_label.to_lowercase().starts_with("photo");
-    (
-        "Reply".action(move |store: Store| store.start_reply(&r1)),
-        row.outgoing
-            .then(|| "Edit".action(move |store: Store| store.start_edit(&r4))),
+    let mut items: Vec<Command> = vec!["Reply".action(move |store: Store| store.start_reply(&r1))];
+    // Desktop's "Quote": the message text lands in the composer as a `> `
+    // blockquote draft (`parse_markdown` re-entities it at send).
+    if !row.text.is_empty() {
+        items.push("Quote".action(move |store: Store| store.quote_message(&r_quote)));
+    }
+    if row.outgoing {
+        items.push("Edit".action(move |store: Store| store.start_edit(&r4)));
+    }
+    items.push(
         "Copy text"
             .action(move |store: Store| store.copy_message(&r3))
             // Ctrl+C — Desktop's copy accelerator.
             .shortcut(Shortcut::new("c").control()),
-        (!row.outgoing && !row.text.is_empty())
-            .then(|| "Translate".action(move |store: Store| store.translate_message(&r_tr))),
-        linkable.then(|| "Copy link".action(move |store: Store| store.copy_link(&r_link))),
-        is_photo.then(|| "Copy image".action(move |store: Store| store.copy_image(&r_img))),
-        pin_label.action(move |store: Store| {
-            if pinned {
-                store.unpin_message(rid)
-            } else {
-                store.pin_message(rid)
-            }
-        }),
-        "Forward".action(move |store: Store| store.start_forward(&r2)),
-        // Desktop's message-menu quick action — forwards into the user's
-        // own Saved Messages chat without leaving this one.
-        "Save to Saved Messages".action(move |store: Store| store.save_to_saved(&r_saved)),
-        // Poll creator only — closing is the last action an open poll takes.
-        (row.poll.as_ref().map(|p| !p.closed).unwrap_or(false) && row.outgoing)
-            .then(|| "Stop poll".action(move |store: Store| store.stop_poll(r_poll))),
-        "Select".action(move |store: Store| store.toggle_select(r11)),
-        // Desktop's "Info" on outgoing messages: read time, views and the
-        // seen-by list (getMessageReadDate / getMessageViewers).
-        row.outgoing
-            .then(|| "Info".action(move |store: Store| store.open_msg_info(&r_info))),
+    );
+    if !row.outgoing && !row.text.is_empty() {
+        items.push("Translate".action(move |store: Store| store.translate_message(&r_tr)));
+    }
+    if linkable {
+        items.push("Copy link".action(move |store: Store| store.copy_link(&r_link)));
+    }
+    if is_photo {
+        items.push("Copy image".action(move |store: Store| store.copy_image(&r_img)));
+    }
+    items.push(pin_label.action(move |store: Store| {
+        if pinned {
+            store.unpin_message(rid)
+        } else {
+            store.pin_message(rid)
+        }
+    }));
+    items.push("Forward".action(move |store: Store| store.start_forward(&r2)));
+    // Desktop's message-menu quick action — forwards into the user's
+    // own Saved Messages chat without leaving this one.
+    items.push("Save to Saved Messages".action(move |store: Store| store.save_to_saved(&r_saved)));
+    // Poll creator only — closing is the last action an open poll takes.
+    if row.poll.as_ref().map(|p| !p.closed).unwrap_or(false) && row.outgoing {
+        items.push("Stop poll".action(move |store: Store| store.stop_poll(r_poll)));
+    }
+    items.push("Select".action(move |store: Store| store.toggle_select(r11)));
+    // Desktop's "Info" on outgoing messages: read time, views and the
+    // seen-by list (getMessageReadDate / getMessageViewers).
+    if row.outgoing {
+        items.push("Info".action(move |store: Store| store.open_msg_info(&r_info)));
+    }
+    // Desktop scopes `#tag` to the in-chat search. Inline-entity taps are
+    // a framework gap (water-rs/waterui#1352) — the menu is the honest route.
+    if !row.hashtag.is_empty() {
+        items.push(
+            text!("Search {hashtag}", hashtag = row.hashtag)
+                .action(move |store: Store| store.search_hashtag(&r_tag)),
+        );
+    }
+    (
+        items,
         Divider,
         "Delete"
             .command()
