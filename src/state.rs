@@ -7454,28 +7454,9 @@ impl Store {
 
     /// Open the video-note sheet: spin up camera + preview pump.
     pub fn open_video_note(&self) {
-        if self.video_shared.borrow().is_none() {
-            // Fresh shared state — the GpuContentView's content opens the
-            // camera on the engine's own device/queue in `setup`.
-            *self.video_shared.borrow_mut() = Some(crate::capture::new_video_note_shared());
-            // Capture-side threads publish status lines through a plain
-            // `Mutex` slot (Binding state can't cross into the `Send` content);
-            // mirror it into the binding while the sheet is open.
-            let store = self.clone();
-            spawn_local(async move {
-                loop {
-                    sleep(std::time::Duration::from_millis(150)).await;
-                    let Some(shared) = store.video_shared.borrow().clone() else {
-                        break;
-                    };
-                    let msg = shared.borrow().inner.status.lock().unwrap().take();
-                    if let Some(msg) = msg {
-                        shared.borrow().status.set_from(Str::from(msg));
-                    }
-                }
-            })
-            .detach();
-        }
+        // Fresh shared state per open — channel ends are single-owner, so a
+        // reopened sheet never shares channels with the dropped one.
+        *self.video_shared.borrow_mut() = Some(crate::capture::new_video_note_shared());
         self.video_note_open.set(true);
     }
 
