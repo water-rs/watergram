@@ -15,11 +15,11 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
+use waterui::Url;
 use waterui::color::Srgb;
 use waterui::form::secure::Secure;
 use waterui::graphics::color::Color;
 use waterui::layout::{Rect, ScrollController, Size};
-use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::task::spawn_local;
 use waterui::text::styled::{Style, StyledStr};
@@ -7455,9 +7455,26 @@ impl Store {
     /// Open the video-note sheet: spin up camera + preview pump.
     pub fn open_video_note(&self) {
         if self.video_shared.borrow().is_none() {
-            // Fresh shared state — the GpuSurface's GpuView opens the camera on
-            // the render surface's own device/queue in `setup`.
+            // Fresh shared state — the GpuContentView's content opens the
+            // camera on the engine's own device/queue in `setup`.
             *self.video_shared.borrow_mut() = Some(crate::capture::new_video_note_shared());
+            // Capture-side threads publish status lines through a plain
+            // `Mutex` slot (Binding state can't cross into the `Send` content);
+            // mirror it into the binding while the sheet is open.
+            let store = self.clone();
+            spawn_local(async move {
+                loop {
+                    sleep(std::time::Duration::from_millis(150)).await;
+                    let Some(shared) = store.video_shared.borrow().clone() else {
+                        break;
+                    };
+                    let msg = shared.borrow().inner.status.lock().unwrap().take();
+                    if let Some(msg) = msg {
+                        shared.borrow().status.set_from(Str::from(msg));
+                    }
+                }
+            })
+            .detach();
         }
         self.video_note_open.set(true);
     }

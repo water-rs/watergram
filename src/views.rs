@@ -7,13 +7,14 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::capture::VideoNoteGpu;
+use waterui::Url;
 use waterui::accessibility::{AccessibilityRole, AccessibilityState};
 use waterui::component::list::{List, ListItem};
 use waterui::component::menu::{Command, MenuView, Shortcut};
 use waterui::drag_drop::Files;
 use waterui::form::picker::file::FilePicker;
 use waterui::form::picker::{PickerItem, picker};
-use waterui::graphics::GpuSurface;
+use waterui::graphics::GpuContentView;
 use waterui::graphics::color::signal_color;
 use waterui::graphics::color::{BorderColor, Srgb, WithOpacity};
 use waterui::handler::SharedAction;
@@ -4199,7 +4200,10 @@ fn video_note_sheet(store: Store) -> impl View {
         .borrow()
         .clone()
         .unwrap_or_else(crate::capture::new_video_note_shared);
-    let status = shared.borrow().status.clone();
+    let (status, inner) = {
+        let sh = shared.borrow();
+        (sh.status.clone(), sh.inner.clone())
+    };
     let rec_flag = store.video_recording.clone();
     let rec_label = store.video_elapsed.clone();
     vstack((
@@ -4208,7 +4212,7 @@ fn video_note_sheet(store: Store) -> impl View {
             spacer(),
             icon_button(close(), "Close", |store: Store| store.close_video_note()),
         )),
-        GpuSurface::new(VideoNoteGpu::new(shared))
+        GpuContentView::new(VideoNoteGpu::new(inner))
             .size(240.0, 240.0)
             .background(RoundedRectangle::new(0.5).fill(SurfaceVariant)),
         when(status.map(|s: Str| !s.is_empty()).distinct(), move || {

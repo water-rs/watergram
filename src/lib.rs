@@ -14,8 +14,8 @@ mod td;
 mod views;
 
 use state::Store;
+use waterui::Url;
 use waterui::app::{App, LastWindowPolicy};
-use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::preview;
 use waterui::task::{sleep, spawn_local};

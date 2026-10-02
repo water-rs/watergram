@@ -3,9 +3,9 @@
 //! `opus-pure`.
 //!
 //! WaterUI ships no ready-made capture *view* (no `CameraPreview` widget), so
-//! the camera preview mounts a `GpuSurface`: the `GpuView` clones the
-//! surface's wgpu `Device`/`Queue` into `Arc`s and opens the camera on them —
-//! frames stay on the GPU and draw straight through `Frame::view()`.
+//! the camera preview is a `GpuContentView`: its `GpuContent` clones the
+//! engine's wgpu `Device`/`Queue` into `Arc`s and opens the camera on them —
+//! frames stay on the GPU and draw straight through `Frame::view`.
 //! Desktop `Camera::recording` is `ControlUnsupported`
 //! (water-rs/waterkit#86), so the encode tail is hand-wired: a compute pass
 //! converts the camera texture to 360x360 NV12 and only that buffer is mapped
@@ -25,8 +25,7 @@ use waterkit_codec::{CodecType, Encoder, EncoderProfile};
 use waterkit_video_container::{MuxerCodecType, VideoWriter};
 use waterui::Str;
 use waterui::binding::Binding;
-use waterui::graphics::{GpuContext, GpuFrame, GpuView};
-use waterui::prelude::Environment;
+use waterui::graphics::gpu::{Context as GpuContext, Frame as GpuFrame, GpuContent};
 
 /// Voice notes record at 48 kHz mono and encode Opus frames of 20 ms.
 const VOICE_SAMPLE_RATE: u32 = 48_000;
@@ -168,22 +167,40 @@ fn encode_waveform(samples: &[f32], _rate: u32) -> String {
 // Video notes — GPU-resident pipeline
 // ---------------------------------------------------------------------------
 
-/// Shared state between the video-note sheet's buttons and its `GpuView`.
+/// Shared state between the video-note sheet's buttons and its `GpuContent`.
 pub struct VideoNoteShared {
     /// Surface status line ("opening camera…", error text).
     pub status: Binding<Str>,
-    /// True while frames are converted + encoded.
-    pub recording: bool,
-    /// NV12 frames -> encoder thread.
-    rec_tx: Option<mpsc::Sender<RecMsg>>,
     /// One-shot result from the encoder thread.
     done_rx: Option<mpsc::Receiver<Result<VideoNoteDone, String>>>,
-    /// At most one outstanding buffer map.
-    map_in_flight: Arc<AtomicBool>,
-    /// Staging buffer mapped and ready to read.
-    mapped_ready: Arc<AtomicBool>,
     /// Capture start for the elapsed label.
     started: Instant,
+    /// The `Send` half the render thread holds; `Binding` state stays
+    /// UI-side and background paths publish status text through
+    /// [`VideoNoteInner::status`] for the UI pump to mirror.
+    pub(crate) inner: Arc<VideoNoteInner>,
+}
+
+/// The `Send` state a `GpuContent` may own (channels + atomics only).
+pub(crate) struct VideoNoteInner {
+    /// Pending status text a background path publishes; a UI-side task
+    /// drains it into `VideoNoteShared::status`.
+    pub(crate) status: Mutex<Option<String>>,
+    /// NV12 frames -> encoder thread.
+    pub(crate) rec_tx: Mutex<Option<mpsc::Sender<RecMsg>>>,
+    /// Frames are converted + encoded while true.
+    pub(crate) recording: AtomicBool,
+    /// At most one outstanding buffer map.
+    pub(crate) map_in_flight: AtomicBool,
+    /// Staging buffer mapped and ready to read.
+    pub(crate) mapped_ready: AtomicBool,
+}
+
+impl VideoNoteInner {
+    /// Queue a status line for the UI to display.
+    fn set_status(&self, text: impl Into<String>) {
+        *self.status.lock().unwrap() = Some(text.into());
+    }
 }
 
 /// Result of a finished video-note encode.
@@ -192,7 +209,7 @@ pub struct VideoNoteDone {
     pub thumb: Vec<u8>,
 }
 
-enum RecMsg {
+pub(crate) enum RecMsg {
     Frame(Vec<u8>),
     Finish,
 }
@@ -201,12 +218,15 @@ impl VideoNoteShared {
     fn new() -> Self {
         Self {
             status: Binding::container(Str::from("opening camera…")),
-            recording: false,
-            rec_tx: None,
             done_rx: None,
-            map_in_flight: Arc::new(AtomicBool::new(false)),
-            mapped_ready: Arc::new(AtomicBool::new(false)),
             started: Instant::now(),
+            inner: Arc::new(VideoNoteInner {
+                status: Mutex::new(None),
+                rec_tx: Mutex::new(None),
+                recording: AtomicBool::new(false),
+                map_in_flight: AtomicBool::new(false),
+                mapped_ready: AtomicBool::new(false),
+            }),
         }
     }
 }
@@ -215,11 +235,13 @@ impl VideoNoteShared {
 // Video notes — GPU-resident pipeline
 // ---------------------------------------------------------------------------
 // waterui has no ready-made camera-preview view, so the sheet mounts a
-// `GpuSurface` whose `GpuView` clones the surface's wgpu Device/Queue into
-// `Arc`s (both are `Clone` — the same approach as
+// `GpuContentView` whose `GpuContent` clones the engine's wgpu Device/Queue
+// into `Arc`s (both are `Clone` — the same approach as
 // `examples/waterkit_camera_filters`) and hands them to
-// `Camera::open_default`. Camera frames stay on the GPU the whole way and are
-// drawn straight onto the surface through `Frame::view()`.
+// `Camera::open_default` on a dedicated thread (`Camera` is not `Send`, so
+// it cannot live inside the `Send`-bound content; textures, which are `Send`,
+// cross back over a channel). Camera frames stay on the GPU the whole way
+// and are drawn straight onto the layer through `Frame::view`.
 //
 // Recording is the one place a readback happens: `waterkit-codec`'s
 // `Encoder::encode_nv12` takes CPU memory (VA-API import), so a compute pass
@@ -229,11 +251,10 @@ impl VideoNoteShared {
 // `ControlUnsupported` — water-rs/waterkit#86 — so the mux/encode tail is
 // hand-wired until it lands.
 
-/// Shared state between the video-note sheet's buttons and its `GpuView`.
-/// `GpuView` rendering camera frames and feeding an H.264 encoder.
+/// `GpuContent` rendering camera frames and feeding an H.264 encoder.
 pub struct VideoNoteGpu {
-    shared: Rc<RefCell<VideoNoteShared>>,
-    camera: Option<Camera>,
+    inner: Arc<VideoNoteInner>,
+    frame_rx: Option<mpsc::Receiver<wgpu::Texture>>,
     latest: Option<wgpu::Texture>,
     pipeline: Option<wgpu::RenderPipeline>,
     compute: Option<wgpu::ComputePipeline>,
@@ -333,11 +354,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 impl VideoNoteGpu {
-    /// Wrap the shared sheet state into a `GpuView`.
-    pub fn new(shared: Rc<RefCell<VideoNoteShared>>) -> Self {
+    /// Wrap the shared sheet state into a `GpuContent`.
+    pub fn new(inner: Arc<VideoNoteInner>) -> Self {
         Self {
-            shared,
-            camera: None,
+            inner,
+            frame_rx: None,
             latest: None,
             pipeline: None,
             compute: None,
@@ -351,8 +372,8 @@ impl VideoNoteGpu {
         }
     }
 
-    fn build(&mut self, ctx: &GpuContext<'_>) {
-        let device = ctx.device;
+    fn build(&mut self, gpu: &GpuContext<'_>) {
+        let device = gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("watergram-preview"),
             source: wgpu::ShaderSource::Wgsl(PREVIEW_WGSL.into()),
@@ -408,7 +429,7 @@ impl VideoNoteGpu {
                     entry_point: Some("fs"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: ctx.surface_format,
+                        format: gpu.format,
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -513,28 +534,13 @@ impl VideoNoteGpu {
         }));
     }
 
-    /// Poll one camera frame if available (transient borrow, like the
-    /// waterkit_camera_filters example: `frames()` borrows `&self`, so the
-    /// stream is created and dropped per render).
+    /// Drain the camera thread's channel; the newest texture wins.
     fn pull_frame(&mut self) {
-        let Some(camera) = self.camera.as_ref() else {
+        let Some(rx) = self.frame_rx.as_ref() else {
             return;
         };
-        let mut stream = Box::pin(camera.frames());
-        let waker = futures::task::noop_waker_ref();
-        let mut cx = std::task::Context::from_waker(waker);
-        let next = stream.as_mut().poll_next(&mut cx);
-        drop(stream);
-        match next {
-            std::task::Poll::Ready(Some(f)) => {
-                self.latest = Some(f.into_texture());
-            }
-            std::task::Poll::Ready(None) => {
-                self.camera = None;
-                self.latest = None;
-                self.shared.borrow().status.set_from("camera stream ended");
-            }
-            std::task::Poll::Pending => {}
+        while let Ok(texture) = rx.try_recv() {
+            self.latest = Some(texture);
         }
     }
 
@@ -551,13 +557,12 @@ impl VideoNoteGpu {
         ) else {
             return;
         };
+        if !self.inner.recording.load(Ordering::Acquire)
+            || self.inner.map_in_flight.load(Ordering::Acquire)
         {
-            let sh = self.shared.borrow();
-            if !sh.recording || sh.map_in_flight.load(Ordering::Acquire) {
-                return;
-            }
-            sh.map_in_flight.store(true, Ordering::Release);
+            return;
         }
+        self.inner.map_in_flight.store(true, Ordering::Release);
         let params: [u32; 4] = [texture.width(), texture.height(), VIDEO_NOTE_SIZE, 0];
         frame.queue.write_buffer(
             self.params_buf.as_ref().unwrap(),
@@ -605,14 +610,13 @@ impl VideoNoteGpu {
         enc.copy_buffer_to_buffer(nv12, 0, staging, 0, nv12.size());
         frame.queue.submit([enc.finish()]);
 
-        let in_flight = self.shared.borrow().map_in_flight.clone();
-        let ready = self.shared.borrow().mapped_ready.clone();
+        let inner = self.inner.clone();
         staging
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |res| {
-                in_flight.store(false, Ordering::Release);
+                inner.map_in_flight.store(false, Ordering::Release);
                 if res.is_ok() {
-                    ready.store(true, Ordering::Release);
+                    inner.mapped_ready.store(true, Ordering::Release);
                 }
             });
     }
@@ -622,15 +626,16 @@ impl VideoNoteGpu {
         let Some(staging) = self.staging.as_ref() else {
             return;
         };
-        let tx = {
-            let sh = self.shared.borrow();
-            if !sh.mapped_ready.load(Ordering::Acquire) {
-                return;
-            }
-            sh.mapped_ready.store(false, Ordering::Release);
-            sh.rec_tx.clone()
+        if !self.inner.mapped_ready.load(Ordering::Acquire) {
+            return;
+        }
+        self.inner.mapped_ready.store(false, Ordering::Release);
+        let tx = self.inner.rec_tx.lock().unwrap().clone();
+        let Ok(view) = staging.slice(..).get_mapped_range() else {
+            return;
         };
-        let data = staging.slice(..).get_mapped_range().to_vec();
+        let data = view.to_vec();
+        drop(view);
         staging.unmap();
         if let Some(tx) = tx {
             let _ = tx.send(RecMsg::Frame(data));
@@ -680,7 +685,7 @@ impl VideoNoteGpu {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("watergram-preview-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
+                    view: frame.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -700,29 +705,38 @@ impl VideoNoteGpu {
         frame.queue.submit([enc.finish()]);
     }
 }
-impl GpuView for VideoNoteGpu {
-    async fn setup(&mut self, ctx: &GpuContext<'_>, _env: &mut Environment) {
-        self.build(ctx);
+impl GpuContent for VideoNoteGpu {
+    fn setup(&mut self, gpu: &GpuContext<'_>) {
+        self.build(gpu);
         // Clone the surface's device/queue into Arcs — same pattern as
         // `examples/waterkit_camera_filters`; the camera then produces
-        // textures on the very device that draws them.
-        let device = Arc::new(ctx.device.clone());
-        let queue = Arc::new(ctx.queue.clone());
-        match Camera::open_default(device, queue).await {
-            Ok(cam) => {
-                self.camera = Some(cam);
-                self.shared.borrow().status.set_from("");
+        // textures on the very device that draws them. `setup` is sync and
+        // `Camera` is not `Send`, so open + stream polling run on a dedicated
+        // thread that forwards textures; a dropped receiver (sheet closed)
+        // ends the loop and drops the camera.
+        let device = Arc::new(gpu.device.clone());
+        let queue = Arc::new(gpu.queue.clone());
+        let inner = self.inner.clone();
+        let (tx, rx) = mpsc::channel();
+        self.frame_rx = Some(rx);
+        std::thread::spawn(move || {
+            match futures_lite::future::block_on(Camera::open_default(device, queue)) {
+                Ok(camera) => {
+                    inner.set_status("");
+                    let mut stream = Box::pin(camera.frames());
+                    while let Some(frame) = futures_lite::future::block_on(stream.as_mut().next()) {
+                        if tx.send(frame.into_texture()).is_err() {
+                            return;
+                        }
+                    }
+                    inner.set_status("camera stream ended");
+                }
+                Err(e) => inner.set_status(format!("camera: {e}")),
             }
-            Err(e) => {
-                self.shared
-                    .borrow()
-                    .status
-                    .set_from(Str::from(format!("camera: {e}")));
-            }
-        }
+        });
     }
 
-    fn render(&mut self, frame: &mut GpuFrame) {
+    fn render(&mut self, frame: &mut GpuFrame<'_>) {
         self.pull_frame();
         self.drain_mapped();
         self.pump_recording(frame);
@@ -744,9 +758,9 @@ pub(crate) fn video_note_start_recording(shared: &Rc<RefCell<VideoNoteShared>>, 
     let (dtx, drx) = mpsc::channel::<Result<VideoNoteDone, String>>();
     std::thread::spawn(move || recorder_thread(rx, dtx, path));
     let mut sh = shared.borrow_mut();
-    sh.rec_tx = Some(tx);
+    *sh.inner.rec_tx.lock().unwrap() = Some(tx);
     sh.done_rx = Some(drx);
-    sh.recording = true;
+    sh.inner.recording.store(true, Ordering::Release);
     sh.started = Instant::now();
 }
 
@@ -756,9 +770,9 @@ pub(crate) fn video_note_stop_recording(
     shared: &Rc<RefCell<VideoNoteShared>>,
 ) -> Option<mpsc::Receiver<Result<VideoNoteDone, String>>> {
     let mut sh = shared.borrow_mut();
-    sh.recording = false;
+    sh.inner.recording.store(false, Ordering::Release);
     let rx = sh.done_rx.take();
-    if let Some(tx) = sh.rec_tx.take() {
+    if let Some(tx) = sh.inner.rec_tx.lock().unwrap().take() {
         let _ = tx.send(RecMsg::Finish);
     }
     rx
