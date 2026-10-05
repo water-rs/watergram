@@ -202,4 +202,4 @@ cherenkov = { git = "https://github.com/water-rs/waterui", rev = "3b3d31a7b4444d
 [workspace]
 
 [workspace.metadata.dylint]
-libraries = [{ git = "https://github.com/water-rs/lints", rev = "a9058391ed6a876bea4a53c9499623eaaff82f78" }]
+libraries = [{ git = "https://github.com/water-rs/lints", rev = "18163a9cc7e96eb1ad3537d858dcb0502a01b7d4" }]
