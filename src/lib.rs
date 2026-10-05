@@ -4525,14 +4525,14 @@ mod tests {
         });
         app.settle();
         // Park over the second row, then wiggle inside it.
-        app.queue_pointer_move(200.0, 55.0);
-        app.queue_pointer_move(210.0, 60.0);
+        app.query().label("hoverable row").hover();
+        app.query().label("hoverable row").hover_at(0.5, 0.6);
         app.settle();
         assert!(
             hov.snapshot(),
             "on_hover_enter never ran on pointer move over the row"
         );
-        app.queue_pointer_move(200.0, 15.0);
+        app.query().label("anchor").hover();
         app.settle();
         assert!(
             !hov.snapshot(),
