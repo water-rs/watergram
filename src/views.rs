@@ -4199,10 +4199,11 @@ fn video_note_sheet(store: Store) -> impl View {
         .video_shared
         .borrow()
         .clone()
-        .unwrap_or_else(crate::capture::new_video_note_shared);
+        .expect("video-note sheet mounted without shared state — open_video_note installs it before video_note_open");
     let (status, inner, event_rx) = {
         let mut sh = shared.borrow_mut();
-        (sh.status.clone(), sh.inner.take(), sh.event_rx.take())
+        let (inner, event_rx) = sh.take_gpu_session();
+        (sh.status.clone(), inner, event_rx)
     };
     let rec_flag = store.video_recording.clone();
     let rec_label = store.video_elapsed.clone();
@@ -4212,22 +4213,17 @@ fn video_note_sheet(store: Store) -> impl View {
             spacer(),
             icon_button(close(), "Close", |store: Store| store.close_video_note()),
         )),
-        match (inner, event_rx) {
-            (Some(inner), Some(rx)) => {
-                let status_drain = status.clone();
-                GpuContentView::new(VideoNoteGpu::new(inner))
-                    .on_frame(move || {
-                        while let Ok(crate::capture::VideoNoteEvent::Status(text)) = rx.try_recv() {
-                            status_drain.set_from(Str::from(text));
-                        }
-                    })
-                    .size(240.0, 240.0)
-                    .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
-                    .anyview()
-            }
-            // `open_video_note` installs a fresh shared per open, so this is
-            // only reachable if the view is rebuilt without one.
-            _ => text("camera: no session").caption().muted().anyview(),
+        {
+            let status_drain = status.clone();
+            GpuContentView::new(VideoNoteGpu::new(inner))
+                .on_frame(move || {
+                    while let Ok(crate::capture::VideoNoteEvent::Status(text)) = event_rx.try_recv()
+                    {
+                        status_drain.set_from(Str::from(text));
+                    }
+                })
+                .size(240.0, 240.0)
+                .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
         },
         when(status.map(|s: Str| !s.is_empty()).distinct(), move || {
             text(status.clone()).caption().muted()

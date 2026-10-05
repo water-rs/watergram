@@ -7529,11 +7529,13 @@ impl Store {
                 };
                 match result {
                     Some(Ok(done)) => {
-                        let thumb_path = store.next_capture_path("jpg");
-                        let thumb_path_w = thumb_path.clone();
-                        let thumb_bytes = done.thumb;
-                        std::thread::spawn(move || {
-                            let _ = std::fs::write(thumb_path_w, &thumb_bytes);
+                        let thumb_path = done.thumb.map(|bytes| {
+                            let thumb_path = store.next_capture_path("jpg");
+                            let thumb_path_w = thumb_path.clone();
+                            std::thread::spawn(move || {
+                                let _ = std::fs::write(thumb_path_w, &bytes);
+                            });
+                            thumb_path
                         });
                         let path = store.video_path.borrow().clone();
                         store.send_video_file(path, thumb_path, done.duration);
@@ -7556,7 +7558,7 @@ impl Store {
     }
 
     /// Send the recorded mp4 as a video-note message.
-    fn send_video_file(&self, path: String, thumb: String, duration: i32) {
+    fn send_video_file(&self, path: String, thumb: Option<String>, duration: i32) {
         let chat_id = self.open_chat.get();
         if chat_id == 0 {
             return;
@@ -7570,8 +7572,8 @@ impl Store {
                 None,
                 enums::InputMessageContent::InputMessageVideoNote(types::InputMessageVideoNote {
                     video_note: enums::InputFile::Local(types::InputFileLocal { path }),
-                    thumbnail: Some(types::InputThumbnail {
-                        thumbnail: enums::InputFile::Local(types::InputFileLocal { path: thumb }),
+                    thumbnail: thumb.map(|path| types::InputThumbnail {
+                        thumbnail: enums::InputFile::Local(types::InputFileLocal { path }),
                         width: crate::capture::VIDEO_NOTE_SIZE as i32,
                         height: crate::capture::VIDEO_NOTE_SIZE as i32,
                     }),
