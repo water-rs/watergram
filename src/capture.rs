@@ -213,7 +213,9 @@ pub(crate) struct VideoNoteInner {
 /// Result of a finished video-note encode.
 pub struct VideoNoteDone {
     pub duration: i32,
-    pub thumb: Vec<u8>,
+    /// JPEG thumbnail of the last recorded frame; `None` when the session
+    /// recorded zero frames (a legitimate state — not an encode failure).
+    pub thumb: Option<Vec<u8>>,
 }
 
 pub(crate) enum RecMsg {
@@ -236,6 +238,23 @@ impl VideoNoteShared {
                 cmd_rx,
             }),
         }
+    }
+
+    /// Hand the GPU session's channel ends to the sheet mounting the
+    /// `GpuContentView`: `open_video_note` installs a fresh shared before
+    /// `video_note_open` flips, and the ends are taken exactly once per
+    /// mount. Anything else is a broken invariant, so it fails here rather
+    /// than falling back.
+    pub(crate) fn take_gpu_session(&mut self) -> (VideoNoteInner, mpsc::Receiver<VideoNoteEvent>) {
+        let inner = self
+            .inner
+            .take()
+            .expect("video-note GPU session taken without a fresh shared — open_video_note installs one per open");
+        let event_rx = self
+            .event_rx
+            .take()
+            .expect("video-note event drain taken without a fresh shared — open_video_note installs one per open");
+        (inner, event_rx)
     }
 }
 
@@ -261,9 +280,10 @@ impl VideoNoteShared {
 
 /// `GpuContent` rendering camera frames and feeding an H.264 encoder.
 pub struct VideoNoteGpu {
-    /// Camera textures — bounded to the newest one; stale frames are
-    /// dropped so GPU textures never accumulate.
-    frame_rx: Option<mpsc::Receiver<wgpu::Texture>>,
+    /// Camera textures — a single-slot handoff: the producer replaces the
+    /// pending texture, so the newest always wins, at most one waits
+    /// unprocessed, and GPU textures never queue up.
+    frame_slot: Arc<Mutex<Option<wgpu::Texture>>>,
     latest: Option<wgpu::Texture>,
     pipeline: Option<wgpu::RenderPipeline>,
     compute: Option<wgpu::ComputePipeline>,
@@ -385,7 +405,7 @@ impl VideoNoteGpu {
         let (map_done_tx, map_done_rx) = mpsc::channel();
         let (cancel_tx, cancel_rx) = fmpsc::channel(1);
         Self {
-            frame_rx: None,
+            frame_slot: Arc::new(Mutex::new(None)),
             latest: None,
             pipeline: None,
             compute: None,
@@ -579,11 +599,9 @@ impl VideoNoteGpu {
     }
 
     /// Drain the camera thread's channel; the newest texture wins.
+    /// Take the newest camera texture, if one is pending.
     fn pull_frame(&mut self) {
-        let Some(rx) = self.frame_rx.as_ref() else {
-            return;
-        };
-        while let Ok(texture) = rx.try_recv() {
+        if let Some(texture) = self.frame_slot.lock().unwrap().take() {
             self.latest = Some(texture);
         }
     }
@@ -789,10 +807,7 @@ impl GpuContent for VideoNoteGpu {
         let redraw = gpu.redraw.clone();
         let events = self.event_tx.clone();
         let mut cancel = self.cancel_rx.take().unwrap();
-        // Bounded to one pending frame: the newest wins and stale GPU
-        // textures are dropped rather than accumulated.
-        let (tx, rx) = mpsc::sync_channel::<wgpu::Texture>(1);
-        self.frame_rx = Some(rx);
+        let slot = self.frame_slot.clone();
         std::thread::spawn(move || {
             futures_lite::future::block_on(async move {
                 let status = |text: String| {
@@ -816,11 +831,13 @@ impl GpuContent for VideoNoteGpu {
                 let mut stream = Box::pin(camera.frames());
                 loop {
                     match future::select(stream.as_mut().next(), cancel.next()).await {
-                        Either::Left((Some(frame), _)) => match tx.try_send(frame.into_texture()) {
-                            Ok(()) => redraw.request_redraw(),
-                            Err(mpsc::TrySendError::Full(_)) => {}
-                            Err(mpsc::TrySendError::Disconnected(_)) => return,
-                        },
+                        Either::Left((Some(frame), _)) => {
+                            // Replace the pending texture: the render side
+                            // always draws the newest; the producer never
+                            // blocks and at most one texture waits.
+                            *slot.lock().unwrap() = Some(frame.into_texture());
+                            redraw.request_redraw();
+                        }
                         Either::Left((None, _)) => {
                             status("camera stream ended".into());
                             return;
@@ -931,13 +948,16 @@ fn recorder_thread(
             }
         }
         writer.finish().map_err(|e| e.to_string())?;
-        let thumb = last
-            .as_deref()
-            .map(|nv| {
+        // Zero recorded frames is a legitimate session — no thumbnail.
+        // A JPEG encode failure propagates instead of collapsing into an
+        // empty thumbnail.
+        let thumb = match last.as_deref() {
+            Some(nv) => {
                 let rgba = nv12_to_rgba(nv, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE);
-                rgba_to_jpeg(&rgba, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE).unwrap_or_default()
-            })
-            .unwrap_or_default();
+                Some(rgba_to_jpeg(&rgba, VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE)?)
+            }
+            None => None,
+        };
         Ok(VideoNoteDone {
             duration: (frames / VIDEO_FPS) as i32,
             thumb,
