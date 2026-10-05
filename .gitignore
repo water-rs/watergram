@@ -4,3 +4,5 @@ apple/DerivedData
 apple/build
 *.xcworkspace/xcuserdata
 web/pkg
+# Verification captures attach to the pull request or issue that produced them.
+shots/
