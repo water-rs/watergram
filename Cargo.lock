@@ -7549,6 +7549,7 @@ dependencies = [
 name = "watergram"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-channel",
  "base64 0.22.1",
  "bytemuck",
