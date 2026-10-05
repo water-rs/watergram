@@ -7529,16 +7529,34 @@ impl Store {
                 };
                 match result {
                     Some(Ok(done)) => {
-                        let thumb_path = done.thumb.map(|bytes| {
-                            let thumb_path = store.next_capture_path("jpg");
-                            let thumb_path_w = thumb_path.clone();
-                            std::thread::spawn(move || {
-                                let _ = std::fs::write(thumb_path_w, &bytes);
-                            });
-                            thumb_path
-                        });
+                        // Write the thumbnail off the UI thread but await it
+                        // before sending — TDLib reads the path, so the file
+                        // must be complete (and a failed write is reported).
+                        let thumb = match done.thumb {
+                            Some(bytes) => {
+                                let thumb_path = store.next_capture_path("jpg");
+                                let (tx, rx) = futures::channel::oneshot::channel();
+                                let thumb_path_w = thumb_path.clone();
+                                std::thread::spawn(move || {
+                                    let _ = tx.send(std::fs::write(thumb_path_w, &bytes));
+                                });
+                                let written = rx.await.unwrap_or_else(|_| {
+                                    Err(std::io::Error::other("thumbnail write thread dropped"))
+                                });
+                                match written {
+                                    Ok(()) => Some(thumb_path),
+                                    Err(e) => {
+                                        if let Some(sh) = store.video_shared.borrow().as_ref() {
+                                            sh.borrow().status.set_from(format!("thumbnail: {e}"));
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
                         let path = store.video_path.borrow().clone();
-                        store.send_video_file(path, thumb_path, done.duration);
+                        store.send_video_file(path, thumb, done.duration);
                         if let Some(sh) = store.video_shared.borrow().as_ref() {
                             sh.borrow().status.set_from("sent");
                         }

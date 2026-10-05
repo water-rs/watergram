@@ -79,6 +79,7 @@ base64 = "0.22"
 image = "0.25"
 futures = "0.3"
 bytemuck = "1"
+arc-swap = "1.9.2"
 
 [dev-dependencies]
 waterui-testing = { git = "https://github.com/water-rs/waterui", rev = "fc92c402b4ecc77a7ece1b00c2d1896263084d05" }

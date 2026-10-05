@@ -17,6 +17,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
+use arc_swap::ArcSwapOption;
 use futures::StreamExt;
 use futures::channel::mpsc as fmpsc;
 use futures::future::{self, Either};
@@ -283,8 +284,8 @@ pub struct VideoNoteGpu {
     /// Camera textures — a single-slot handoff: the producer replaces the
     /// pending texture, so the newest always wins, at most one waits
     /// unprocessed, and GPU textures never queue up.
-    frame_slot: Arc<Mutex<Option<wgpu::Texture>>>,
-    latest: Option<wgpu::Texture>,
+    frame_slot: Arc<ArcSwapOption<wgpu::Texture>>,
+    latest: Option<Arc<wgpu::Texture>>,
     pipeline: Option<wgpu::RenderPipeline>,
     compute: Option<wgpu::ComputePipeline>,
     render_bgl: Option<wgpu::BindGroupLayout>,
@@ -405,7 +406,7 @@ impl VideoNoteGpu {
         let (map_done_tx, map_done_rx) = mpsc::channel();
         let (cancel_tx, cancel_rx) = fmpsc::channel(1);
         Self {
-            frame_slot: Arc::new(Mutex::new(None)),
+            frame_slot: Arc::new(ArcSwapOption::new(None)),
             latest: None,
             pipeline: None,
             compute: None,
@@ -598,10 +599,9 @@ impl VideoNoteGpu {
         }));
     }
 
-    /// Drain the camera thread's channel; the newest texture wins.
     /// Take the newest camera texture, if one is pending.
     fn pull_frame(&mut self) {
-        if let Some(texture) = self.frame_slot.lock().unwrap().take() {
+        if let Some(texture) = self.frame_slot.swap(None) {
             self.latest = Some(texture);
         }
     }
@@ -835,7 +835,7 @@ impl GpuContent for VideoNoteGpu {
                             // Replace the pending texture: the render side
                             // always draws the newest; the producer never
                             // blocks and at most one texture waits.
-                            *slot.lock().unwrap() = Some(frame.into_texture());
+                            slot.store(Some(Arc::new(frame.into_texture())));
                             redraw.request_redraw();
                         }
                         Either::Left((None, _)) => {
