@@ -20,7 +20,7 @@ use waterui::prelude::*;
 use waterui::preview;
 use waterui::task::{sleep, spawn_local};
 use waterui::theme::Theme;
-use waterui::window::{Window, WindowState};
+use waterui::window::Window;
 
 /// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
 /// connection — for rendering checks on device-less VMs.
@@ -198,28 +198,23 @@ pub fn app(mut env: Environment) -> App {
     // (and render on NSApp.mainMenu on macOS). `.state(&store)` above puts
     // Store in the app env so actions take `|s: Store|` by DI.
     let store_bar = store.clone();
-    app.menu_bar = Computed::constant(vec![
-        Menu::new(
-            "Watergram",
+    app.menu_bar = Computed::constant(vec![Menu::new(
+        "File",
+        (
             store_bar
-                .tr("Quit", 0, "Quit Telegram")
-                .action(|s: Store| s.win_state.set(WindowState::Closed))
-                .shortcut(Shortcut::new("w").control()),
+                .tr("NewChat", 0, "New chat")
+                .action(|s: Store| s.nav.push(state::Route::NewChat))
+                .shortcut(Shortcut::new("n").control()),
+            store_bar
+                .tr("Settings", 0, "Settings")
+                .action(|s: Store| s.nav.push(state::Route::Settings))
+                .shortcut(Shortcut::new(",").control()),
+            // The typed Quit relocates the platform quit item (⌘Q) and runs
+            // through `Quit`'s termination hooks — a homemade command would
+            // bypass them and double the app menu's Quit (#1829).
+            MenuItem::Quit,
         ),
-        Menu::new(
-            "File",
-            (
-                store_bar
-                    .tr("NewChat", 0, "New chat")
-                    .action(|s: Store| s.nav.push(state::Route::NewChat))
-                    .shortcut(Shortcut::new("n").control()),
-                store_bar
-                    .tr("Settings", 0, "Settings")
-                    .action(|s: Store| s.nav.push(state::Route::Settings))
-                    .shortcut(Shortcut::new(",").control()),
-            ),
-        ),
-    ]);
+    )]);
     app
 }
 
