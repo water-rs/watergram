@@ -49,7 +49,7 @@ fn modal_escape(store: Store, close: fn(&Store)) -> ModalInteraction {
     ModalInteraction::new(true, SharedAction::new(move |_: Environment| close(&store)))
 }
 use tdlib_rs::enums;
-use waterui_barcode::Barcode;
+use waterui::barcode::Barcode;
 use waterui_icons_material_icon as mdi;
 
 use crate::state::{
