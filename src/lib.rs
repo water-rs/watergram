@@ -109,7 +109,6 @@ pub fn app(mut env: Environment) -> App {
             store.open_chat.set(1);
             store.regroup_messages();
             store.info_open.set(true);
-            store.load_shared_media();
         }
         if demo_page() == Some("chat") {
             store.selected.set(Some(1));
