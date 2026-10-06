@@ -39,6 +39,7 @@ rev = "3b3d31a7b4444d0246f3604377bb6d92b9b29d07"
 default-features = false
 features = [
     "assets",
+    "barcode",
     "flow-markdown",
     "media",
     "snackbar",
@@ -63,7 +64,6 @@ waterui-image = "0.5.0"
 # ModalInteraction (modal Escape scopes) is part of the backend contract
 # crate; hydrolysis-m3 is dev-only so views can't reach its re-export.
 waterui-backend-core = "0.5.2"
-waterui-barcode = "0.3.0"
 # Opens message URLs in the system browser (same mechanism waterui::link).
 robius-open = "0.3"
 waterkit-audio = "0.1.4"
@@ -72,13 +72,11 @@ waterkit-clipboard = "0.1.4"
 waterkit-codec = "0.1.4"
 waterkit-video-container = "0.1.4"
 opus-pure = "0.2.1"
-wgpu = "30"
 pollster = "1"
 futures-lite = "2"
 base64 = "0.22"
 image = "0.25"
 futures = "0.3"
-bytemuck = "1"
 arc-swap = "1.9.2"
 
 [dev-dependencies]

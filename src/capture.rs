@@ -28,6 +28,9 @@ use waterkit_video_container::{MuxerCodecType, VideoWriter};
 use waterui::Str;
 use waterui::binding::Binding;
 use waterui::graphics::gpu::{Context as GpuContext, Frame as GpuFrame, GpuContent, RedrawHandle};
+// wgpu/bytemuck come through the facade re-exports so their versions can
+// never split from the ones Hydrolysis drives (water-rs/waterui#1933).
+use waterui::graphics::{bytemuck, wgpu};
 
 /// Voice notes record at 48 kHz mono and encode Opus frames of 20 ms.
 const VOICE_SAMPLE_RATE: u32 = 48_000;

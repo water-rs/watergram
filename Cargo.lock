@@ -545,12 +545,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "barcoders"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3826fb6e98ec72c0c0db8c9a40af4932d16793021027469857e84c1b50a1e8f"
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2030,12 +2024,6 @@ name = "fast-float2"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6e8948ce679d00a02a94739ea185595dca7118ed04feb991127e443bd3d761f"
-
-[[package]]
-name = "fast_qr"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f5ea9788036fedaf55f43a2db0ba01eedf47d26fd6852f01e5cf51952571d57"
 
 [[package]]
 name = "fastrand"
@@ -7577,7 +7565,6 @@ dependencies = [
  "arc-swap",
  "async-channel",
  "base64 0.22.1",
- "bytemuck",
  "chrono",
  "dirs 6.0.0",
  "futures",
@@ -7598,11 +7585,9 @@ dependencies = [
  "waterkit-video-container",
  "waterui",
  "waterui-backend-core",
- "waterui-barcode",
  "waterui-icons-material-icon",
  "waterui-image",
  "waterui-testing",
- "wgpu",
 ]
 
 [[package]]
@@ -7979,20 +7964,6 @@ dependencies = [
  "waterui-layout",
  "waterui-text",
  "web-time",
-]
-
-[[package]]
-name = "waterui-barcode"
-version = "0.3.0"
-source = "git+https://github.com/water-rs/barcode?rev=491ada1c7db31bdab657135338a5bd670adbe61f#491ada1c7db31bdab657135338a5bd670adbe61f"
-dependencies = [
- "barcoders",
- "fast_qr",
- "kurbo",
- "nami",
- "thiserror 2.0.21",
- "waterui-core",
- "waterui-graphics",
 ]
 
 [[package]]
@@ -9806,6 +9777,11 @@ source = "git+https://github.com/water-rs/waterkit?rev=925f2e1bdc1eab6c7eea62711
 name = "waterui-apple"
 version = "0.1.0"
 source = "git+https://github.com/water-rs/waterui?rev=3b3d31a7b4444d0246f3604377bb6d92b9b29d07#3b3d31a7b4444d0246f3604377bb6d92b9b29d07"
+
+[[patch.unused]]
+name = "waterui-barcode"
+version = "0.3.0"
+source = "git+https://github.com/water-rs/barcode?rev=491ada1c7db31bdab657135338a5bd670adbe61f#491ada1c7db31bdab657135338a5bd670adbe61f"
 
 [[patch.unused]]
 name = "waterui-browser-cef"
