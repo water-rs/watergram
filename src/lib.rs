@@ -120,11 +120,6 @@ pub fn app(mut env: Environment) -> App {
     env.install(
         Theme::new().color_scheme(store.dark.select(ColorScheme::Dark, ColorScheme::Light)),
     );
-    // App-level env carries Store so `App::menu_bar` command actions take
-    // `|s: Store|` by DI instead of capturing the reactive handle. `#[state]`
-    // extraction reads `State<Store>` (the slot `.state(&v)` installs), so the
-    // wrapper goes in — not the bare value.
-    env.insert(State(store.clone()));
     let win_state = store.win_state.clone();
     let store_for_content = store.clone();
     let mut win = Window::new(store.window_title(), win_state, move || {
@@ -195,11 +190,13 @@ pub fn app(mut env: Environment) -> App {
     }
     // Telegram Desktop quits with its last window — `Quit` is also the
     // default, declared here so the behaviour survives a default change.
-    let mut app = App::new_with_windows([win], env).on_last_window_closed(LastWindowPolicy::Quit);
+    let mut app = App::new_with_windows([win], env)
+        .on_last_window_closed(LastWindowPolicy::Quit)
+        .state(&store);
     // r43-1 fixed in hydrolysis dev (4a34cf9a, PR #279): `App::menu_bar`
     // commands arm globally on `MenuShortcutRegistry` like a mounted `Menu`
-    // (and render on NSApp.mainMenu on macOS). `env.insert(store)` above
-    // puts Store in the app env so actions take `|s: Store|` by DI.
+    // (and render on NSApp.mainMenu on macOS). `.state(&store)` above puts
+    // Store in the app env so actions take `|s: Store|` by DI.
     let store_bar = store.clone();
     app.menu_bar = Computed::constant(vec![
         Menu::new(
