@@ -4775,20 +4775,10 @@ impl Store {
             })
             .detach();
             // The tap already highlighted the row — restore the highlight to
-            // the still-open chat (forwarding does not open a chat). The
-            // snap-back write is deferred one task turn: this select_chat ran
-            // inside `list_selection`'s on_change dispatch, and writing the
-            // same signal re-entrantly panics on the handler RefCell
-            // (on_change.rs:84) — water-rs/waterui#1297; revert
-            // to a plain `set` once the fix lands.
+            // the still-open chat (forwarding does not open a chat).
             self.syncing_selection.set(true);
-            let sel = self.selected.snapshot();
-            let st = self.clone();
-            spawn_local(async move {
-                st.list_selection.set(sel);
-                st.syncing_selection.set(false);
-            })
-            .detach();
+            self.list_selection.set(self.selected.snapshot());
+            self.syncing_selection.set(false);
             self.notify(if n == 1 {
                 Str::from("Message forwarded")
             } else {
