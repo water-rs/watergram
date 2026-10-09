@@ -103,7 +103,7 @@
 | 频道贴 footer（浏览数/签名） | ✅ | `kind_icon="channel"` 贴子行尾：👁 `view_count` + `author_signature` | `channel_post_footer_shows_views` + 实测截图（r37_channel*） |
 | 频道贴评论区 | ✅ | `interaction_info.reply_info.reply_count` → 行尾 💬 N chip → `open_comments` 弹层（`comments_list`，发送者+正文行，demo 播种）；点击 chip 开串 | `open_comments_seeds_thread` + 三宽实测（r43_comments*） |
 | 应用内新消息横幅（未选中会话） | ✅ | `Update::NewMessage` → `maybe_banner` → `msg_banner` on_change → Snackbar "sender: preview" + 「Open」动作（demo `demo_incoming` 路径同真实路径经 `update_chat_row` 更新预览+未读，r50 实测 `#17 "Bob bundle verified — ship it 1"`） | `incoming_banner_fires_for_other_chat` + mcp 树实测 |
-| 代码/预格式化块 + 逐块复制 | ✅ | `textEntityTypePre`/`PreCode` → `waterui::text::code` 卡片：语言头 + 高亮 mono 体 + 「Copy」钮（未知语言回落 Plaintext + `.info(token)`）；整条消息为 pre 时整泡覆盖；Copy 不可经 a11y 调起（water-rs/waterui#2368） | `pre_blocks_slicing` + mcp 树实测（Rust/Plaintext 卡片 + mono 源码节点） |
+| 代码/预格式化块 + 逐块复制 | ✅ | `textEntityTypePre`/`PreCode` → `waterui::text::code` 卡片：语言头 + 高亮 mono 体 + 「Copy」钮（未知语言回落 Plaintext + `.info(token)`）；整条消息为 pre 时整泡覆盖 | `pre_blocks_slicing` + mcp 树实测（Rust/Plaintext 卡片 + mono 源码节点） |
 | 引用（Quote）菜单动作 | ✅ | 右键菜单「Quote」（`!row.text.is_empty()`）→ `quote_message`：`> {first_line}\n` 进 composer 草稿，发送时带引用块 | `quote_message_roundtrip` + mcp 实测（composer `value=> my sketch — first pass`） |
 | #话题标签 → 会话内搜索 | ✅ | `first_hashtag` 提取 → 右键菜单「Search #{tag}」→ `search_hashtag` = `chat_search_open` + `run_chat_search` 作用域内搜索 | `hashtag_search_scopes` + mcp 实测（`text_input value=#waterui [focused]`） |
 | 跳转到日期弹层 | ✅ | 工具栏日历钮 → 日期弹层 → `date_jump_target` 定位并高亮目标消息 | `date_jump_popup_opens` + 实测截图（r37_jump*） |
