@@ -449,6 +449,39 @@ mod tests {
         assert_eq!(store.open_chat.get(), 3);
     }
 
+    /// watergram#14: in forward mode a chat-list tap routes the row's
+    /// `list_selection` write through `select_chat`'s forward branch,
+    /// which snaps the highlight back to the still-open chat with a
+    /// direct write — no deferred task turn (waterui#1297 is fixed).
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn forward_tap_restores_list_selection(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        let store = store();
+        store.seed_demo();
+        store.select_chat(1);
+        store.forward_message.set(Some((1, 7)));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(340, 700)
+            .mount(move || views::sidebar_view(inner.clone()).state(&inner));
+        app.settle();
+        app.query()
+            .role(Role::LIST_ITEM)
+            .label_contains("Alice")
+            .tap();
+        app.settle();
+        assert_eq!(
+            store.notice.snapshot().1.as_str(),
+            "Message forwarded",
+            "the chat-list tap did not dispatch the forward"
+        );
+        assert_eq!(store.open_chat.get(), 1, "forwarding must not open a chat");
+        assert_eq!(
+            store.list_selection.snapshot(),
+            Some(1),
+            "selection did not snap back to the open chat in the same settle"
+        );
+    }
+
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
     fn messages_render(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
         let store = store();
