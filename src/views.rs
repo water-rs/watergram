@@ -1254,7 +1254,7 @@ fn chat_row_menu(row: &ChatRow) -> impl MenuView {
         // itself runs from the context menu too.
         "Mark read"
             .action(move |store: Store| store.mark_read(id))
-            .shortcut(Shortcut::new("r").control()),
+            .shortcut(Shortcut::new('r').control()),
         if row.marked_unread {
             "Mark as read (clear flag)"
         } else {
@@ -2483,10 +2483,10 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     (
                         "Search in chat"
                             .action(move |store: Store| store.chat_search_open.set(true))
-                            .shortcut(Shortcut::new("f").control()),
+                            .shortcut(Shortcut::new('f').control()),
                         "Mark as read"
                             .action(move |store: Store| store.mark_read(chat_id))
-                            .shortcut(Shortcut::new("r").control()),
+                            .shortcut(Shortcut::new('r').control()),
                         "Clear history".action(move |store: Store| store.clear_history(chat_id)),
                         Divider,
                         "Leave chat"
@@ -3246,7 +3246,7 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
         "Copy text"
             .action(move |store: Store| store.copy_message(&r3))
             // Ctrl+C — Desktop's copy accelerator.
-            .shortcut(Shortcut::new("c").control()),
+            .shortcut(Shortcut::new('c').control()),
     );
     if !row.outgoing && !row.text.is_empty() {
         items.push("Translate".action(move |store: Store| store.translate_message(&r_tr)));
