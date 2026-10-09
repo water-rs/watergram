@@ -203,11 +203,11 @@ pub fn app(mut env: Environment) -> App {
             store_bar
                 .tr("NewChat", 0, "New chat")
                 .action(|s: Store| s.nav.push(state::Route::NewChat))
-                .shortcut(Shortcut::new("n").control()),
+                .shortcut(Shortcut::new('n').control()),
             store_bar
                 .tr("Settings", 0, "Settings")
                 .action(|s: Store| s.nav.push(state::Route::Settings))
-                .shortcut(Shortcut::new(",").control()),
+                .shortcut(Shortcut::new(',').control()),
             // The typed Quit relocates the platform quit item (⌘Q) and runs
             // through `Quit`'s termination hooks — a homemade command would
             // bypass them and double the app menu's Quit (#1829).
@@ -3783,7 +3783,7 @@ mod tests {
         // (index 2) as the divider row.
         store.select_chat(1);
         assert_eq!(
-            store.scroll.target().snapshot(),
+            store.scroll.request().snapshot().target,
             2,
             "unread chat did not open on the divider row"
         );
@@ -3796,7 +3796,7 @@ mod tests {
         store.select_chat(2);
         let last = store.messages.snapshot().len() - 1;
         assert_eq!(
-            store.scroll.target().snapshot(),
+            store.scroll.request().snapshot().target,
             last,
             "read chat did not open on the newest row"
         );

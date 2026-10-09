@@ -22,7 +22,10 @@ use futures::StreamExt;
 use futures::channel::mpsc as fmpsc;
 use futures::future::{self, Either};
 use waterkit_audio::AudioRecorder;
-use waterkit_camera::Camera;
+use waterkit_camera::{
+    Camera, ColorPrimaries, ColorRange, FrameConverter, MatrixCoefficients, TransferFunction,
+    VideoColorInfo,
+};
 use waterkit_codec::{CodecType, Encoder, EncoderProfile};
 use waterkit_video_container::{MuxerCodecType, VideoWriter};
 use waterui::Str;
@@ -38,6 +41,18 @@ const VOICE_FRAME: usize = 960;
 /// Video notes are square; Telegram caps the diameter at 640.
 pub(crate) const VIDEO_NOTE_SIZE: u32 = 360;
 const VIDEO_FPS: u32 = 30;
+/// The NV12 the capture pipeline feeds `encode_nv12` is BT.601 studio-range
+/// (`NV12_WGSL`'s RGB->NV12 matrix, mirrored by `nv12_to_rgba`): signal it in
+/// the encoder's VUI and the muxer's colr box so players decode the same
+/// colors the preview drew.
+const VIDEO_NOTE_COLOR: VideoColorInfo = VideoColorInfo {
+    matrix: MatrixCoefficients::Bt601,
+    primaries: ColorPrimaries::Bt601,
+    transfer: TransferFunction::Sdr,
+    range: ColorRange::Limited,
+    content_light_level: None,
+    dolby_vision: false,
+};
 
 // ---------------------------------------------------------------------------
 // Voice notes
@@ -818,7 +833,7 @@ impl GpuContent for VideoNoteGpu {
                     redraw.request_redraw();
                 };
                 let camera = match future::select(
-                    Box::pin(Camera::open_default(device, queue)),
+                    Box::pin(Camera::open_default(device.clone(), queue.clone())),
                     cancel.next(),
                 )
                 .await
@@ -831,15 +846,35 @@ impl GpuContent for VideoNoteGpu {
                     Either::Right(_) => return,
                 };
                 status(String::new());
+                // Frames arrive in any plane layout (RGB / Y'CbCr 4:2:0 /
+                // packed 4:2:2); the converter turns each into the upright
+                // Rgba8Unorm texture the draw and NV12 passes sample. `open`
+                // already ran the converter's `check_device` on this backend,
+                // so `new` cannot panic here.
+                let mut converter = FrameConverter::new(&device);
                 let mut stream = Box::pin(camera.frames());
                 loop {
                     match future::select(stream.as_mut().next(), cancel.next()).await {
-                        Either::Left((Some(frame), _)) => {
-                            // Replace the pending texture: the render side
-                            // always draws the newest; the producer never
-                            // blocks and at most one texture waits.
-                            slot.store(Some(Arc::new(frame.into_texture())));
-                            redraw.request_redraw();
+                        Either::Left((Some(Ok(frame)), _)) => {
+                            match converter.convert(&device, &queue, &frame) {
+                                Ok(texture) => {
+                                    // Replace the pending texture: the render
+                                    // side always draws the newest; the
+                                    // producer never blocks and at most one
+                                    // texture waits.
+                                    slot.store(Some(Arc::new(texture)));
+                                    redraw.request_redraw();
+                                }
+                                Err(e) => {
+                                    status(format!("camera frame: {e}"));
+                                    return;
+                                }
+                            }
+                        }
+                        // A capture failure is the stream's last item.
+                        Either::Left((Some(Err(e)), _)) => {
+                            status(format!("camera: {e}"));
+                            return;
                         }
                         Either::Left((None, _)) => {
                             status("camera stream ended".into());
@@ -919,6 +954,7 @@ fn recorder_thread(
             VIDEO_NOTE_SIZE,
             VIDEO_NOTE_SIZE,
             EncoderProfile::Realtime,
+            VIDEO_NOTE_COLOR,
         )
         .map_err(|e| e.to_string())?;
         let mut writer = VideoWriter::new(
@@ -927,6 +963,7 @@ fn recorder_thread(
             VIDEO_NOTE_SIZE,
             VIDEO_FPS,
             MuxerCodecType::H264,
+            VIDEO_NOTE_COLOR,
         )
         .map_err(|e| e.to_string())?;
         if let Some(cfg) = enc.codec_config() {
