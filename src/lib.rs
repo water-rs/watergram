@@ -1175,7 +1175,7 @@ mod tests {
         let inner = store.clone();
         let mut app = ui
             .viewport(1400, 900)
-            .mount_offscreen(move || views::chat_detail(inner.clone(), 7).state(&store));
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 7).state(&inner));
         app.semantic_mut().settle();
 
         let cap = |w: f32| ((w - 340.0) * 0.72).clamp(220.0, 480.0);
