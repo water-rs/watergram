@@ -358,7 +358,8 @@ pub struct MessageRow {
     pub sender_photo: i32,
     /// Service row (pin/join/etc.) — renders as a centered label, not a
     /// bubble; excluded from sender runs and multi-select. Kept as its own
-    /// list row (the r30 fold was reverted — DOGFOOD r31-1).
+    /// list row (the r30 fold was reverted — the spacing gap it covered
+    /// shipped as `ListItem::insets` in water-rs/waterui#1252).
     pub is_service: bool,
     /// Channel post footer: interaction_info view count (0 = none; user
     /// posts have no view count — `getMessageViewCount` is channel-only).
@@ -1171,8 +1172,8 @@ pub struct MsgHit {
 /// One row in the sidebar search results pane. Local chat matches, the
 /// "Global search results" section, message hits and the empty state all
 /// flow through a single `SignalCollection` so a filter-tab switch is a
-/// plain data update — a nested `when` inside the results pane never
-/// re-evaluates on winit (DOGFOOD r41-2 / hydrolysis#251).
+/// plain data update — a nested `when` inside the results pane failed to
+/// re-evaluate on winit before water-rs/nami#31 / water-rs/hydrolysis#251.
 #[derive(Clone)]
 pub enum SearchRow {
     /// Section label row ("Global search results" / "Messages").
@@ -1358,9 +1359,8 @@ fn fmt_day_label(day: i64) -> Str {
 /// quotes on a light background. `mask`: spoiler chunks get `background =
 /// mask` — a span background in the text's own color hides the glyphs
 /// inside a solid block until revealed (Telegram Desktop). hydrolysis
-/// drops per-span `background` until #207 lands, so the text shows
-/// unmasked for now — see DOGFOOD r32-2. `None` leaves spoiler text
-/// visible.
+/// paints per-span `background` since water-rs/hydrolysis#207. `None`
+/// leaves spoiler text visible.
 pub(crate) fn styled_from_formatted_mask(
     ft: &types::FormattedText,
     mask: Option<Color>,
@@ -4779,7 +4779,7 @@ impl Store {
             // snap-back write is deferred one task turn: this select_chat ran
             // inside `list_selection`'s on_change dispatch, and writing the
             // same signal re-entrantly panics on the handler RefCell
-            // (on_change.rs:84) — water-rs/waterui#1297, DOGFOOD r37-1; revert
+            // (on_change.rs:84) — water-rs/waterui#1297; revert
             // to a plain `set` once the fix lands.
             self.syncing_selection.set(true);
             let sel = self.selected.snapshot();
@@ -6460,9 +6460,9 @@ impl Store {
     /// Whether a newly arrived row pulls the viewport to the tail: your own
     /// send always does; an incoming row only when the chat has no pending
     /// unread divider — Telegram Desktop anchors you in unread context
-    /// instead of yanking to the tail. (DOGFOOD r34-2: a true viewport
-    /// anchor needs a scroll-offset readback `ScrollController` does not
-    /// expose, so the divider is the available proxy.)
+    /// instead of yanking to the tail. (water-rs/waterui#1259: a true
+    /// viewport anchor needs a scroll-offset readback `ScrollController`
+    /// does not expose, so the divider is the available proxy.)
     pub(crate) fn follows_tail(&self, outgoing: bool) -> bool {
         outgoing || !self.messages.snapshot().iter().any(|r| r.unread_divider)
     }
@@ -6681,8 +6681,8 @@ impl Store {
                 })
             })
             // Single consumer (the window title) — the shared-cell hazard
-            // of DOGFOOD r41-2 only bites when a distinct()ed signal is
-            // cloned for a second watcher.
+            // fixed in water-rs/nami#31 only bit when a distinct()ed
+            // signal was cloned for a second watcher.
             .distinct()
             .computed()
     }
@@ -10619,14 +10619,14 @@ impl Store {
     /// Text → OS clipboard on every target via waterkit-clipboard. Its
     /// desktop backend (clipboard-rs) keeps a process-lifetime X11 server
     /// thread, so written contents outlive the handle — the arboard
-    /// die-with-the-handle defect (DOGFOOD r50-5) is gone.
+    /// die-with-the-handle defect (water-rs/waterui#1351) is gone.
     fn sys_clipboard_set_text(&self, text: &str) {
         self.sys_clipboard_write(|cb| cb.set_text(text));
     }
 
     /// Image → OS clipboard on every target. `set_image` takes a file path
     /// and converts to each platform's native image format; there is no
-    /// decoded-pixel setter at waterkit 2f1e3592 (DOGFOOD r50-9).
+    /// decoded-pixel setter yet (water-rs/waterkit#358).
     fn sys_clipboard_set_image(&self, path: &std::path::Path) -> bool {
         self.sys_clipboard_write(|cb| cb.set_image(path))
     }

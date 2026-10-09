@@ -650,7 +650,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
                 let chat_rows = SignalCollection::new(store.chats.clone());
                 // Chip metrics: caption line ~17dp + 2×3dp vertical chip padding.
                 // ScrollView reports StretchAxis::Both unconditionally
-                // (raw_view!, axis not consulted — see DOGFOOD), and View has no
+                // (raw_view!, axis not consulted — water-rs/waterui#1208), and View has no
                 // propose-None/fixed-size-axis modifier, so a literal content
                 // height is the only way to stop the horizontal scroller taking
                 // the sidebar surplus. Breaks under font scaling — filed as a gap.
@@ -832,7 +832,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
         }),
         // `List` reports StretchAxis::Both and fills the leftover region;
         // a `Lazy` stack inside `scroll(vstack)` reports None and is sized to
-        // its realized rows, which clipped the list mid-pane (see DOGFOOD).
+        // its realized rows, which clipped the list mid-pane.
         zstack((
             {
                 let filtered_else = filtered.clone();
@@ -971,7 +971,7 @@ pub(crate) fn sidebar_view(store: Store) -> impl View {
 // M3 icon button: an icon-only `Label` keeps `name` as the semantic identity
 // (a11y) while rendering only the icon. Until water-rs/hydrolysis#115 gives
 // icon-only buttons the 40dp icon-button box they keep the generic ~58-72dp
-// minimum; measured widths are in DOGFOOD.
+// minimum.
 pub(crate) fn icon_button<F>(
     icon: impl View + Clone + 'static,
     name: &'static str,
@@ -1271,9 +1271,6 @@ fn chat_row_menu(row: &ChatRow) -> impl MenuView {
         row.muted
             .then(|| "Unmute".action(move |store: Store| store.toggle_mute(id))),
         // Telegram Desktop: "Mute for…" submenu with fixed durations.
-        // (Always present — a `.then`-conditional nested Menu renders and
-        // opens on hydrolysis but its commands never dispatch; see
-        // DOGFOOD r44-1.)
         Menu::new(
             "Mute for…",
             (
@@ -2315,7 +2312,7 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
     let store_com = store.clone();
     let store_for_info_overlay = store.clone();
     // Honest reproduction: `when(a).otherwise(b)` (WhenComplete) panics at
-    // mount on the shipped renderers — nami#23, DOGFOOD r11-4a. Kept in this
+    // mount on the shipped renderers — nami#23. Kept in this
     // form until the upstream fix lands; no workarounds.
     zstack((
         when(info_docked, {
@@ -2726,7 +2723,7 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     let time = row.time.clone();
     // Signal-derived cap — Telegram Desktop's ~72%-of-pane rule with its
     // absolute 480dp ceiling. Honest repro: `Frame::max_width` samples a
-    // signal only at mount (waterui#1214, DOGFOOD r11-2b), so the cap is
+    // signal only at mount (waterui#1214), so the cap is
     // whatever the mount-time pane width produces; no wrap inside the cap
     // on hydrolysis yet (hydrolysis#130). No workaround applied.
     let bubble_cap = store
@@ -4815,9 +4812,9 @@ fn viewer_layer(store: Store) -> impl View {
     // ‹ › step through the chat's media messages (Desktop's edge buttons;
     // ←/→ keys are handled by the `on_key_press` below). They sit as a
     // sibling zstack layer over the content column — inside the column as a
-    // nested `when` they never armed (r36-2/#251 family). This `when`-
-    // mounted layer registers no hit occluder, so a click here can still
-    // reach an armed row tap beneath it (DOGFOOD r40-1).
+    // nested `when` they never armed (water-rs/hydrolysis#251). The
+    // `when`-mounted layer occludes hits beneath it since
+    // water-rs/hydrolysis#269.
     let nav_buttons = hstack((
         icon_button(
             chevron_left().tint(viewer_fg.clone()),
