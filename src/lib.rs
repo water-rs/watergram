@@ -176,7 +176,7 @@ pub fn app(mut env: Environment) -> App {
     win.instance_name = Some("watergram".into());
     win.frame = store.win_frame.clone();
     // Spawn size; winit rewrites `win.frame` on Moved/Resized from here on.
-    // SemanticRuntime never drives it — see DOGFOOD 'window.frame bypassed'.
+    // SemanticRuntime never drives it — water-rs/hydrolysis#128.
     win.frame
         .set(Rect::new(Point::zero(), Size::new(1280.0, 800.0)));
     // Test hook for `water mcp` screenshots: `WATERGRAM_WIN_SIZE=WxH` makes the
@@ -1492,7 +1492,7 @@ mod tests {
     /// rendered runtime (`mount_offscreen` + `tap_at`). Headless the tap
     /// lands inside the resolved bounds and works; in the live winit build
     /// on a pristine launch the gesture region sits ~15px BELOW the painted
-    /// text inside the same List row (DOGFOOD r32-3), which this test does
+    /// text inside the same List row (water-rs/hydrolysis#208), which this test does
     /// not reproduce — region and paint agree once virtualization is absent
     /// (`spoiler_region_matches_paint_full_list`).
     #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
@@ -2110,7 +2110,7 @@ mod tests {
         app.query().label("12").assert_exists();
     }
 
-    /// DOGFOOD r35-3: a `List` row whose *fields* change while its `#[id]`
+    /// water-rs/hydrolysis#227: a `List` row whose *fields* change while its `#[id]`
     /// stays the same must repaint with the new content. The headless
     /// `mount_offscreen` path materializes rows fresh each settle (this probe
     /// passes — kept enabled as a semantic guard); the live retained/virtualized
@@ -4409,7 +4409,7 @@ mod tests {
         let _ = app.snapshot().save_png("/tmp/probe_sel_on.png");
     }
 
-    /// Minimal repro for DOGFOOD r36-3: a row scrolled so it straddles the
+    /// Minimal repro for water-rs/hydrolysis#252: a row scrolled so it straddles the
     /// scroll viewport's top edge keeps an unclipped `.on_tap` bound that
     /// reaches into the sibling band above — taps on that chrome fire the
     /// row. Paint is clipped by `push_layer_rect` (hydrolysis
@@ -4459,7 +4459,7 @@ mod tests {
         );
     }
 
-    /// Minimal repro for DOGFOOD r36-5: a `button` whose subtree is inserted
+    /// Minimal repro for water-rs/hydrolysis#251: a `button` whose subtree is inserted
     /// by `when` after mount PAINTS but never registers a pointer target on
     /// the winit renderer — the select bar's Copy/Forward/Delete/✕ and the
     /// forward banner's ✕ all get `pointer_hits=[]` on live clicks. `.on_tap`
@@ -5095,10 +5095,9 @@ mod tests {
         store.search_filter.set(0);
     }
 
-    /// r41-2 regression guard: two watchers of ONE `distinct()`ed signal
-    /// (clones) must both see each transition. Was DOGFOOD r41-2 — the
-    /// shared dedup cell starved every watcher after the first; fixed on
-    /// nami dev `ebe55e7` (water-rs/nami#31).
+    /// Regression guard for water-rs/nami#31: two watchers of ONE
+    /// `distinct()`ed signal (clones) must both see each transition. The
+    /// shared dedup cell starved every watcher after the first.
     #[test]
     fn distinct_clones_each_watch() {
         use std::cell::Cell;
