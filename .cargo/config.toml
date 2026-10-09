@@ -1,2 +1,0 @@
-[env]
-PKG_CONFIG_PATH = "/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
