@@ -1157,6 +1157,79 @@ mod tests {
         }
     }
 
+    /// The bubble cap re-derives from `win_frame`: a window
+    /// resize re-caps a bubble that is already mounted, and the text
+    /// re-wraps taller inside the narrower cap.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn bubble_cap_follows_window_resize(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        const LONG: &str = "the quick brown fox jumps over the lazy dog and keeps \
+            running through the long paragraph until the measured text width is far \
+            beyond the four hundred eighty point ceiling Telegram Desktop allows \
+            a message bubble to grow to on a wide desktop pane";
+        let store = store();
+        store.open_chat.set(7);
+        store.messages.set(vec![msg(1, LONG, false)]);
+        store
+            .win_frame
+            .set(Rect::new(Point::zero(), Size::new(1400.0, 900.0)));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 7).state(&store));
+        app.semantic_mut().settle();
+
+        let cap = |w: f32| ((w - 340.0) * 0.72).clamp(220.0, 480.0);
+        let measure = |app: &mut waterui_testing::OffscreenApp| {
+            let nodes = app.resolve_elements(&waterui_testing::Selector::default());
+            // The text leaf is the smallest-bounds node carrying the message.
+            let text = nodes
+                .iter()
+                .filter(|el| el.node().label().unwrap_or("").contains(LONG))
+                .filter_map(|el| el.node().bounds())
+                .min_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
+                .expect("message text node");
+            // The bubble is the smallest container around the text: the
+            // narrowest node wider than the text leaf itself.
+            let bubble = nodes
+                .iter()
+                .filter(|el| el.node().label().unwrap_or("").contains(LONG))
+                .filter_map(|el| el.node().bounds())
+                .filter(|b| b.width() > text.width() + 1.0)
+                .min_by(|a, b| a.width().total_cmp(&b.width()))
+                .expect("bubble container node");
+            (text, bubble)
+        };
+
+        let (text0, bubble0) = measure(&mut app);
+        store
+            .win_frame
+            .set(Rect::new(Point::zero(), Size::new(900.0, 900.0)));
+        app.semantic_mut().settle();
+        let (text1, bubble1) = measure(&mut app);
+
+        assert!(
+            (bubble0.width() - cap(1400.0)).abs() <= 1.0,
+            "initial bubble width {} != cap {}",
+            bubble0.width(),
+            cap(1400.0)
+        );
+        assert!(
+            (bubble1.width() - cap(900.0)).abs() <= 1.0,
+            "resized bubble width {} != cap {}",
+            bubble1.width(),
+            cap(900.0)
+        );
+        // The semantic tree exposes no line count: the wrapped text's
+        // height is the proxy — more lines inside the narrower cap means a
+        // taller text node.
+        assert!(
+            text1.height() > text0.height(),
+            "text height {} did not grow after narrowing (was {})",
+            text1.height(),
+            text0.height()
+        );
+    }
+
     #[test]
     fn reply_quote_jumps_to_loaded_message() {
         // r24-2: a reply quote carries the source id; jumping to a message
