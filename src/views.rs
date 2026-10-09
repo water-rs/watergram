@@ -2721,11 +2721,10 @@ fn bubble_view(store: &Store, row: &MessageRow) -> AnyView {
     let chips = row.reaction_chips.clone();
     let has_reactions = !chips.is_empty();
     let time = row.time.clone();
-    // Signal-derived cap — Telegram Desktop's ~72%-of-pane rule with its
-    // absolute 480dp ceiling. Honest repro: `Frame::max_width` samples a
-    // signal only at mount (waterui#1214), so the cap is
-    // whatever the mount-time pane width produces; no wrap inside the cap
-    // on hydrolysis yet (hydrolysis#130). No workaround applied.
+    // Telegram Desktop's bubble width: ~72% of the message pane (the window
+    // less the 340dp chat list), clamped to 220–480dp. Derived from
+    // `win_frame`, so a resize re-caps bubbles already on screen and their
+    // text re-wraps inside the new cap.
     let bubble_cap = store
         .win_frame
         .map(|f| ((f.width() - 340.0) * 0.72).clamp(220.0, 480.0));
