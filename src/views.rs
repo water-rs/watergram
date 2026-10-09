@@ -2686,11 +2686,6 @@ fn service_pill(line: Str) -> impl View {
 }
 
 #[cfg(test)]
-pub(crate) fn service_pill_for_test() -> AnyView {
-    service_pill(Str::from("Alice pinned a message")).anyview()
-}
-
-#[cfg(test)]
 pub(crate) fn reaction_strip_for_test(row: &MessageRow) -> AnyView {
     reaction_strip(row)
 }
