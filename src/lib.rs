@@ -1190,6 +1190,68 @@ mod tests {
         }
     }
 
+    /// The bubble cap re-derives from `win_frame`: a window
+    /// resize re-caps a bubble that is already mounted, and the text
+    /// re-wraps taller inside the narrower cap.
+    #[waterui::test(theme = hydrolysis_m3::Material3::defaults())]
+    fn bubble_cap_follows_window_resize(ui: UiBuilder<Styled<hydrolysis_m3::Material3>>) {
+        const LONG: &str = "the quick brown fox jumps over the lazy dog and keeps \
+            running through the long paragraph until the measured text width is far \
+            beyond the four hundred eighty point ceiling Telegram Desktop allows \
+            a message bubble to grow to on a wide desktop pane";
+        let store = store();
+        store.open_chat.set(7);
+        store.messages.set(vec![msg(1, LONG, false)]);
+        store
+            .win_frame
+            .set(Rect::new(Point::zero(), Size::new(1400.0, 900.0)));
+        let inner = store.clone();
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount_offscreen(move || views::chat_detail(inner.clone(), 7).state(&inner));
+        app.semantic_mut().settle();
+
+        let cap = |w: f32| ((w - 340.0) * 0.72).clamp(220.0, 480.0);
+        // The message's text leaf: the smallest node carrying the text. The
+        // bubble around it has no accessibility identity of its own, and the
+        // text wraps inside the cap, so its width bounds the cap from below.
+        let text_bounds = |app: &mut waterui_testing::OffscreenApp| {
+            app.resolve_elements(&waterui_testing::Selector::default())
+                .iter()
+                .filter(|el| el.node().label().unwrap_or("").contains(LONG))
+                .filter_map(|el| el.node().bounds())
+                .min_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
+                .expect("message text node")
+        };
+
+        let wide = text_bounds(&mut app);
+        store
+            .win_frame
+            .set(Rect::new(Point::zero(), Size::new(900.0, 900.0)));
+        app.semantic_mut().settle();
+        let narrow = text_bounds(&mut app);
+
+        assert!(
+            wide.width() <= cap(1400.0) && wide.width() > cap(900.0),
+            "at 1400pt the text spans {} — expected wider than the 900pt cap {} and within {}",
+            wide.width(),
+            cap(900.0),
+            cap(1400.0)
+        );
+        assert!(
+            narrow.width() <= cap(900.0),
+            "after narrowing to 900pt the text spans {}, beyond the new cap {}",
+            narrow.width(),
+            cap(900.0)
+        );
+        assert!(
+            narrow.height() > wide.height(),
+            "text height {} did not grow after narrowing (was {})",
+            narrow.height(),
+            wide.height()
+        );
+    }
+
     #[test]
     fn reply_quote_jumps_to_loaded_message() {
         // r24-2: a reply quote carries the source id; jumping to a message
