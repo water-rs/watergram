@@ -1212,54 +1212,43 @@ mod tests {
         app.semantic_mut().settle();
 
         let cap = |w: f32| ((w - 340.0) * 0.72).clamp(220.0, 480.0);
-        let measure = |app: &mut waterui_testing::OffscreenApp| {
-            let nodes = app.resolve_elements(&waterui_testing::Selector::default());
-            // The text leaf is the smallest-bounds node carrying the message.
-            let text = nodes
+        // The message's text leaf: the smallest node carrying the text. The
+        // bubble around it has no accessibility identity of its own, and the
+        // text wraps inside the cap, so its width bounds the cap from below.
+        let text_bounds = |app: &mut waterui_testing::OffscreenApp| {
+            app.resolve_elements(&waterui_testing::Selector::default())
                 .iter()
                 .filter(|el| el.node().label().unwrap_or("").contains(LONG))
                 .filter_map(|el| el.node().bounds())
                 .min_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
-                .expect("message text node");
-            // The bubble is the smallest container around the text: the
-            // narrowest node wider than the text leaf itself.
-            let bubble = nodes
-                .iter()
-                .filter(|el| el.node().label().unwrap_or("").contains(LONG))
-                .filter_map(|el| el.node().bounds())
-                .filter(|b| b.width() > text.width() + 1.0)
-                .min_by(|a, b| a.width().total_cmp(&b.width()))
-                .expect("bubble container node");
-            (text, bubble)
+                .expect("message text node")
         };
 
-        let (text0, bubble0) = measure(&mut app);
+        let wide = text_bounds(&mut app);
         store
             .win_frame
             .set(Rect::new(Point::zero(), Size::new(900.0, 900.0)));
         app.semantic_mut().settle();
-        let (text1, bubble1) = measure(&mut app);
+        let narrow = text_bounds(&mut app);
 
         assert!(
-            (bubble0.width() - cap(1400.0)).abs() <= 1.0,
-            "initial bubble width {} != cap {}",
-            bubble0.width(),
+            wide.width() <= cap(1400.0) && wide.width() > cap(900.0),
+            "at 1400pt the text spans {} — expected wider than the 900pt cap {} and within {}",
+            wide.width(),
+            cap(900.0),
             cap(1400.0)
         );
         assert!(
-            (bubble1.width() - cap(900.0)).abs() <= 1.0,
-            "resized bubble width {} != cap {}",
-            bubble1.width(),
+            narrow.width() <= cap(900.0),
+            "after narrowing to 900pt the text spans {}, beyond the new cap {}",
+            narrow.width(),
             cap(900.0)
         );
-        // The semantic tree exposes no line count: the wrapped text's
-        // height is the proxy — more lines inside the narrower cap means a
-        // taller text node.
         assert!(
-            text1.height() > text0.height(),
+            narrow.height() > wide.height(),
             "text height {} did not grow after narrowing (was {})",
-            text1.height(),
-            text0.height()
+            narrow.height(),
+            wide.height()
         );
     }
 
