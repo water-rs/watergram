@@ -425,7 +425,12 @@ mod tests {
             chat(3, "Carol", "yo", 40),
         ]);
         let store2 = store.clone();
-        let mut app = ui.mount(move || views::main_screen(store2.clone()).state(&store2));
+        // Desktop width: the list and the open chat are both on screen, so the
+        // list keeps focus for keyboard navigation after a selection. At the
+        // builder's compact default the split shows only its front pane.
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount(move || views::main_screen(store2.clone()).state(&store2));
         app.query()
             .role(Role::LIST_ITEM)
             .label_contains("Zelda")
