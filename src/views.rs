@@ -7,13 +7,14 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::capture::VideoNoteGpu;
+use waterui::Url;
 use waterui::accessibility::{AccessibilityRole, AccessibilityState};
 use waterui::component::list::{List, ListItem};
 use waterui::component::menu::{Command, MenuView, Shortcut};
 use waterui::drag_drop::Files;
 use waterui::form::picker::file::FilePicker;
 use waterui::form::picker::{PickerItem, picker};
-use waterui::graphics::GpuSurface;
+use waterui::graphics::GpuContentView;
 use waterui::graphics::color::signal_color;
 use waterui::graphics::color::{BorderColor, Srgb, WithOpacity};
 use waterui::handler::SharedAction;
@@ -48,7 +49,7 @@ fn modal_escape(store: Store, close: fn(&Store)) -> ModalInteraction {
     ModalInteraction::new(true, SharedAction::new(move |_: Environment| close(&store)))
 }
 use tdlib_rs::enums;
-use waterui_barcode::Barcode;
+use waterui::barcode::Barcode;
 use waterui_icons_material_icon as mdi;
 
 use crate::state::{
@@ -1253,7 +1254,7 @@ fn chat_row_menu(row: &ChatRow) -> impl MenuView {
         // itself runs from the context menu too.
         "Mark read"
             .action(move |store: Store| store.mark_read(id))
-            .shortcut(Shortcut::new("r").control()),
+            .shortcut(Shortcut::new('r').control()),
         if row.marked_unread {
             "Mark as read (clear flag)"
         } else {
@@ -2482,10 +2483,10 @@ pub(crate) fn chat_detail(store: Store, chat_id: i64) -> NavigationView {
                     (
                         "Search in chat"
                             .action(move |store: Store| store.chat_search_open.set(true))
-                            .shortcut(Shortcut::new("f").control()),
+                            .shortcut(Shortcut::new('f').control()),
                         "Mark as read"
                             .action(move |store: Store| store.mark_read(chat_id))
-                            .shortcut(Shortcut::new("r").control()),
+                            .shortcut(Shortcut::new('r').control()),
                         "Clear history".action(move |store: Store| store.clear_history(chat_id)),
                         Divider,
                         "Leave chat"
@@ -3245,7 +3246,7 @@ pub(crate) fn bubble_menu_items(row: &MessageRow, pinned: bool, linkable: bool) 
         "Copy text"
             .action(move |store: Store| store.copy_message(&r3))
             // Ctrl+C — Desktop's copy accelerator.
-            .shortcut(Shortcut::new("c").control()),
+            .shortcut(Shortcut::new('c').control()),
     );
     if !row.outgoing && !row.text.is_empty() {
         items.push("Translate".action(move |store: Store| store.translate_message(&r_tr)));
@@ -4198,8 +4199,12 @@ fn video_note_sheet(store: Store) -> impl View {
         .video_shared
         .borrow()
         .clone()
-        .unwrap_or_else(crate::capture::new_video_note_shared);
-    let status = shared.borrow().status.clone();
+        .expect("video-note sheet mounted without shared state — open_video_note installs it before video_note_open");
+    let (status, inner, event_rx) = {
+        let mut sh = shared.borrow_mut();
+        let (inner, event_rx) = sh.take_gpu_session();
+        (sh.status.clone(), inner, event_rx)
+    };
     let rec_flag = store.video_recording.clone();
     let rec_label = store.video_elapsed.clone();
     vstack((
@@ -4208,9 +4213,18 @@ fn video_note_sheet(store: Store) -> impl View {
             spacer(),
             icon_button(close(), "Close", |store: Store| store.close_video_note()),
         )),
-        GpuSurface::new(VideoNoteGpu::new(shared))
-            .size(240.0, 240.0)
-            .background(RoundedRectangle::new(0.5).fill(SurfaceVariant)),
+        {
+            let status_drain = status.clone();
+            GpuContentView::new(VideoNoteGpu::new(inner))
+                .on_frame(move || {
+                    while let Ok(crate::capture::VideoNoteEvent::Status(text)) = event_rx.try_recv()
+                    {
+                        status_drain.set_from(Str::from(text));
+                    }
+                })
+                .size(240.0, 240.0)
+                .background(RoundedRectangle::new(0.5).fill(SurfaceVariant))
+        },
         when(status.map(|s: Str| !s.is_empty()).distinct(), move || {
             text(status.clone()).caption().muted()
         }),

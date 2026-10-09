@@ -15,11 +15,11 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use tdlib_rs::{enums, functions, types};
+use waterui::Url;
 use waterui::color::Srgb;
 use waterui::form::secure::Secure;
 use waterui::graphics::color::Color;
 use waterui::layout::{Rect, ScrollController, Size};
-use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::task::spawn_local;
 use waterui::text::styled::{Style, StyledStr};
@@ -7454,11 +7454,9 @@ impl Store {
 
     /// Open the video-note sheet: spin up camera + preview pump.
     pub fn open_video_note(&self) {
-        if self.video_shared.borrow().is_none() {
-            // Fresh shared state — the GpuSurface's GpuView opens the camera on
-            // the render surface's own device/queue in `setup`.
-            *self.video_shared.borrow_mut() = Some(crate::capture::new_video_note_shared());
-        }
+        // Fresh shared state per open — channel ends are single-owner, so a
+        // reopened sheet never shares channels with the dropped one.
+        *self.video_shared.borrow_mut() = Some(crate::capture::new_video_note_shared());
         self.video_note_open.set(true);
     }
 
@@ -7531,14 +7529,34 @@ impl Store {
                 };
                 match result {
                     Some(Ok(done)) => {
-                        let thumb_path = store.next_capture_path("jpg");
-                        let thumb_path_w = thumb_path.clone();
-                        let thumb_bytes = done.thumb;
-                        std::thread::spawn(move || {
-                            let _ = std::fs::write(thumb_path_w, &thumb_bytes);
-                        });
+                        // Write the thumbnail off the UI thread but await it
+                        // before sending — TDLib reads the path, so the file
+                        // must be complete (and a failed write is reported).
+                        let thumb = match done.thumb {
+                            Some(bytes) => {
+                                let thumb_path = store.next_capture_path("jpg");
+                                let (tx, rx) = futures::channel::oneshot::channel();
+                                let thumb_path_w = thumb_path.clone();
+                                std::thread::spawn(move || {
+                                    let _ = tx.send(std::fs::write(thumb_path_w, &bytes));
+                                });
+                                let written = rx.await.unwrap_or_else(|_| {
+                                    Err(std::io::Error::other("thumbnail write thread dropped"))
+                                });
+                                match written {
+                                    Ok(()) => Some(thumb_path),
+                                    Err(e) => {
+                                        if let Some(sh) = store.video_shared.borrow().as_ref() {
+                                            sh.borrow().status.set_from(format!("thumbnail: {e}"));
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
                         let path = store.video_path.borrow().clone();
-                        store.send_video_file(path, thumb_path, done.duration);
+                        store.send_video_file(path, thumb, done.duration);
                         if let Some(sh) = store.video_shared.borrow().as_ref() {
                             sh.borrow().status.set_from("sent");
                         }
@@ -7558,7 +7576,7 @@ impl Store {
     }
 
     /// Send the recorded mp4 as a video-note message.
-    fn send_video_file(&self, path: String, thumb: String, duration: i32) {
+    fn send_video_file(&self, path: String, thumb: Option<String>, duration: i32) {
         let chat_id = self.open_chat.get();
         if chat_id == 0 {
             return;
@@ -7572,8 +7590,8 @@ impl Store {
                 None,
                 enums::InputMessageContent::InputMessageVideoNote(types::InputMessageVideoNote {
                     video_note: enums::InputFile::Local(types::InputFileLocal { path }),
-                    thumbnail: Some(types::InputThumbnail {
-                        thumbnail: enums::InputFile::Local(types::InputFileLocal { path: thumb }),
+                    thumbnail: thumb.map(|path| types::InputThumbnail {
+                        thumbnail: enums::InputFile::Local(types::InputFileLocal { path }),
                         width: crate::capture::VIDEO_NOTE_SIZE as i32,
                         height: crate::capture::VIDEO_NOTE_SIZE as i32,
                     }),

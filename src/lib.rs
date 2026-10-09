@@ -14,13 +14,13 @@ mod td;
 mod views;
 
 use state::Store;
+use waterui::Url;
 use waterui::app::{App, LastWindowPolicy};
-use waterui::media::Url;
 use waterui::prelude::*;
 use waterui::preview;
 use waterui::task::{sleep, spawn_local};
 use waterui::theme::Theme;
-use waterui::window::{Window, WindowState};
+use waterui::window::Window;
 
 /// `WATERGRAM_DEMO=1` mounts the UI on `seed_demo` data with no TDLib
 /// connection — for rendering checks on device-less VMs.
@@ -109,7 +109,6 @@ pub fn app(mut env: Environment) -> App {
             store.open_chat.set(1);
             store.regroup_messages();
             store.info_open.set(true);
-            store.load_shared_media();
         }
         if demo_page() == Some("chat") {
             store.selected.set(Some(1));
@@ -120,11 +119,6 @@ pub fn app(mut env: Environment) -> App {
     env.install(
         Theme::new().color_scheme(store.dark.select(ColorScheme::Dark, ColorScheme::Light)),
     );
-    // App-level env carries Store so `App::menu_bar` command actions take
-    // `|s: Store|` by DI instead of capturing the reactive handle. `#[state]`
-    // extraction reads `State<Store>` (the slot `.state(&v)` installs), so the
-    // wrapper goes in — not the bare value.
-    env.insert(State(store.clone()));
     let win_state = store.win_state.clone();
     let store_for_content = store.clone();
     let mut win = Window::new(store.window_title(), win_state, move || {
@@ -195,34 +189,31 @@ pub fn app(mut env: Environment) -> App {
     }
     // Telegram Desktop quits with its last window — `Quit` is also the
     // default, declared here so the behaviour survives a default change.
-    let mut app = App::new_with_windows([win], env).on_last_window_closed(LastWindowPolicy::Quit);
+    let mut app = App::new_with_windows([win], env)
+        .on_last_window_closed(LastWindowPolicy::Quit)
+        .state(&store);
     // r43-1 fixed in hydrolysis dev (4a34cf9a, PR #279): `App::menu_bar`
     // commands arm globally on `MenuShortcutRegistry` like a mounted `Menu`
-    // (and render on NSApp.mainMenu on macOS). `env.insert(store)` above
-    // puts Store in the app env so actions take `|s: Store|` by DI.
+    // (and render on NSApp.mainMenu on macOS). `.state(&store)` above puts
+    // Store in the app env so actions take `|s: Store|` by DI.
     let store_bar = store.clone();
-    app.menu_bar = Computed::constant(vec![
-        Menu::new(
-            "Watergram",
+    app.menu_bar = Computed::constant(vec![Menu::new(
+        "File",
+        (
             store_bar
-                .tr("Quit", 0, "Quit Telegram")
-                .action(|s: Store| s.win_state.set(WindowState::Closed))
-                .shortcut(Shortcut::new("w").control()),
+                .tr("NewChat", 0, "New chat")
+                .action(|s: Store| s.nav.push(state::Route::NewChat))
+                .shortcut(Shortcut::new('n').control()),
+            store_bar
+                .tr("Settings", 0, "Settings")
+                .action(|s: Store| s.nav.push(state::Route::Settings))
+                .shortcut(Shortcut::new(',').control()),
+            // The typed Quit relocates the platform quit item (⌘Q) and runs
+            // through `Quit`'s termination hooks — a homemade command would
+            // bypass them and double the app menu's Quit (#1829).
+            MenuItem::Quit,
         ),
-        Menu::new(
-            "File",
-            (
-                store_bar
-                    .tr("NewChat", 0, "New chat")
-                    .action(|s: Store| s.nav.push(state::Route::NewChat))
-                    .shortcut(Shortcut::new("n").control()),
-                store_bar
-                    .tr("Settings", 0, "Settings")
-                    .action(|s: Store| s.nav.push(state::Route::Settings))
-                    .shortcut(Shortcut::new(",").control()),
-            ),
-        ),
-    ]);
+    )]);
     app
 }
 
@@ -434,7 +425,12 @@ mod tests {
             chat(3, "Carol", "yo", 40),
         ]);
         let store2 = store.clone();
-        let mut app = ui.mount(move || views::main_screen(store2.clone()).state(&store2));
+        // Desktop width: the list and the open chat are both on screen, so the
+        // list keeps focus for keyboard navigation after a selection. At the
+        // builder's compact default the split shows only its front pane.
+        let mut app = ui
+            .viewport(1400, 900)
+            .mount(move || views::main_screen(store2.clone()).state(&store2));
         app.query()
             .role(Role::LIST_ITEM)
             .label_contains("Zelda")
@@ -3792,7 +3788,7 @@ mod tests {
         // (index 2) as the divider row.
         store.select_chat(1);
         assert_eq!(
-            store.scroll.target().snapshot(),
+            store.scroll.request().snapshot().target,
             2,
             "unread chat did not open on the divider row"
         );
@@ -3805,7 +3801,7 @@ mod tests {
         store.select_chat(2);
         let last = store.messages.snapshot().len() - 1;
         assert_eq!(
-            store.scroll.target().snapshot(),
+            store.scroll.request().snapshot().target,
             last,
             "read chat did not open on the newest row"
         );
@@ -4525,14 +4521,14 @@ mod tests {
         });
         app.settle();
         // Park over the second row, then wiggle inside it.
-        app.queue_pointer_move(200.0, 55.0);
-        app.queue_pointer_move(210.0, 60.0);
+        app.query().label("hoverable row").hover();
+        app.query().label("hoverable row").hover_at(0.5, 0.6);
         app.settle();
         assert!(
             hov.snapshot(),
             "on_hover_enter never ran on pointer move over the row"
         );
-        app.queue_pointer_move(200.0, 15.0);
+        app.query().label("anchor").hover();
         app.settle();
         assert!(
             !hov.snapshot(),
