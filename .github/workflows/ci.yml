@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, main, dev]
+    branches: [main]
   pull_request:
 
 env:
@@ -93,3 +93,20 @@ jobs:
         env:
           DYLINT_RUSTFLAGS: -D warnings
         run: cargo dylint --all
+
+  result:
+    name: CI result
+    if: always()
+    needs: [gate, dylint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ', ') }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "job results: $RESULTS"
+          if [ "$FAILED" = "true" ]; then
+            echo "::error::one or more jobs failed or were cancelled"
+            exit 1
+          fi
