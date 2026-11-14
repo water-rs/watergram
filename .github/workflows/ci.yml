@@ -86,7 +86,7 @@ jobs:
       - name: cargo-dylint
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-dylint@6.0.4,dylint-link@6.0.4
+          tool: cargo-dylint@6.3.2,dylint-link@6.3.2
 
       # Lint findings fail the job, same as clippy's -D warnings.
       - name: dylint
